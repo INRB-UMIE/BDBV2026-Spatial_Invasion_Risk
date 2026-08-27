@@ -33,12 +33,21 @@ spatiotemporal/     Model code — the pipeline that produces the forecasts
 outputs/            Daily forecast outputs, one folder per analysis date
   latest.json       Pointer to the most recent analysis date
   YYYY-MM-DD/       See "Daily outputs" below
+    submission_format/  The day's forecast in hubverse submission format
+
+submission-format/  Format spec for comparable projections from other models
+  README.md         What to submit and how
+  tasks.json        Machine-readable schema (hubverse format)
+  locations.csv     The 519 canonical health-zone names
+  template.csv      Blank submission template
+  make_template.py  Build a template, or convert model output into one
 
 docs/
   DATA_DICTIONARY.md      Column-by-column definitions for the output CSVs
 
 tools/
   filter_public_outputs.sh  Allowlist that decides what is published here
+  sync_model_code.sh        Mirrors spatiotemporal/ from the analysis repo
 ```
 
 ---
@@ -55,6 +64,7 @@ Each `outputs/<date>/` folder is one complete daily re-issue, roughly 425 KB.
 | `model_selection.json` / `model_selection.md` | Which model configuration was featured for this run, and the comparison that selected it. |
 | `bayes_parameters.csv` | Fitted model terms on the hazard-ratio scale, with credible intervals and `rhat` convergence diagnostics. |
 | `bayes_topk_precision_h*.pdf`<br>`bayes_discrimination_summary_h*.pdf`<br>`bayes_lfo_forecast_vs_outcome_h*.pdf`<br>`bayes_model_performance_figure3_h*.pdf`<br>`bayes_predicted_vs_observed_over_folds_h*.pdf`<br>`bayes_priority_scatter_h*.pdf`<br>`bayes_invasion_uncertainty_h*.pdf` | Evaluation diagnostics for both horizons — how well the model has actually been forecasting, assessed by leave-future-out cross-validation. Published alongside the forecasts so the archive can be judged on its record, not just its predictions. |
+| `submission_format/<date>-INRB-bayes_renewal.csv` | The same forecast in the [hubverse submission format](submission-format/), so this model can be scored side by side with any other model using the same standard tools. Derived from `bayes_risk_scores_all_zones.csv` — if the two ever disagree, that file is authoritative. |
 
 Column definitions are in [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md).
 
@@ -147,6 +157,21 @@ is a strict allowlist: any output not named in it stays out, so new pipeline pro
 never published by accident.
 
 ---
+
+## Comparing another model against these forecasts
+
+[`submission-format/`](submission-format/) defines a file format for spatial invasion
+projections, following the [hubverse](https://hubverse.io) model-output standard. If you
+model this outbreak and produce your projections in that format, they line up
+row-for-row with the ones published here and can be scored side by side with standard
+tools. It ships a blank template, the canonical zone list, and a converter.
+
+This model eats its own cooking: every `outputs/<date>/submission_format/` folder holds
+that day's forecast in the same format, so there is always a current, valid file to
+compare against.
+
+It is a format specification, not a hub — nothing here collects or validates submissions
+automatically. Contributions and questions are welcome via the issue tracker.
 
 ## Data
 

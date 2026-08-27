@@ -30,6 +30,33 @@ REPORTS="$SRC/reports"
 
 [[ -d "$KEY" ]] || { echo "error: no key_outputs under $SRC" >&2; exit 1; }
 
+# --- Preflight: resolve everything that could fail BEFORE touching DEST -------
+# This script overwrites files in place, so anything that can abort must abort
+# before the first copy. Otherwise a mid-run failure leaves a half-updated
+# directory: some files refreshed from source, others still carrying edits this
+# script would have re-applied (redaction, provenance stamps).
+
+# The analysis commit that produced this run. Written by the pipeline into
+# code_version.json; ANALYSIS_REF is the CI fallback. Without one, a published
+# forecast cannot be tied to the code that generated it.
+CODE_SHA=""
+if [[ -f "$SRC/code_version.json" ]]; then
+  CODE_SHA="$(jq -r '.commit // empty' "$SRC/code_version.json")"
+fi
+[[ -n "$CODE_SHA" ]] || CODE_SHA="${ANALYSIS_REF:-}"
+if [[ -z "$CODE_SHA" ]]; then
+  echo "error: no code_version.json in the bundle and ANALYSIS_REF unset —" >&2
+  echo "       refusing to publish a forecast that cannot be tied to its code." >&2
+  exit 1
+fi
+
+# The submission-format converter, resolved relative to this script.
+SUBMIT_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/submission-format/make_template.py"
+[[ -f "$SUBMIT_SCRIPT" ]] || {
+  echo "error: submission-format converter not found at $SUBMIT_SCRIPT" >&2; exit 1; }
+command -v jq      >/dev/null || { echo "error: jq is required" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "error: python3 is required" >&2; exit 1; }
+
 # --- Required: the run is not publishable without these -----------------------
 REQUIRED_KEY=(
   bayes_risk_scores_all_zones.csv     # per-zone invasion probability, CI, rank, priority
@@ -97,24 +124,6 @@ for f in "${OPTIONAL_REPORTS[@]}"; do
   [[ -f "$REPORTS/$f" ]] && copy_one "$REPORTS/$f" "$DEST/$f"
 done
 
-# --- Stamp the analysis commit that produced this run ------------------------
-# Written by the pipeline into code_version.json alongside the outputs. Without
-# it a published forecast cannot be tied to the code that generated it, so this
-# is required for any run from 2026-08-28 onward. The 12 backfilled dates before
-# that carry an inferred stamp instead (source="inferred").
-CODE_SHA=""
-if [[ -f "$SRC/code_version.json" ]]; then
-  CODE_SHA="$(jq -r '.commit // empty' "$SRC/code_version.json")"
-fi
-if [[ -z "$CODE_SHA" && -n "${ANALYSIS_REF:-}" ]]; then
-  CODE_SHA="$ANALYSIS_REF"   # fallback: the ref CI checked out
-fi
-if [[ -z "$CODE_SHA" ]]; then
-  echo "error: no code_version.json in the bundle and ANALYSIS_REF unset —" >&2
-  echo "       refusing to publish a forecast that cannot be tied to its code." >&2
-  exit 1
-fi
-
 # --- Redact internal pipeline paths from run_info.json -----------------------
 # The upstream file records the container-internal location of the line-list
 # pointer. Harmless in itself, but there is no reason to publish the private
@@ -138,6 +147,21 @@ if [[ -f "$DEST/run_info.json" ]]; then
     exit 1
   fi
 fi
+
+# --- Emit the forecast in hubverse submission format --------------------------
+# Same numbers as bayes_risk_scores_all_zones.csv, reshaped so this model sits in
+# the format external models are asked to use (see submission-format/).
+# origin_date comes from run_info rather than the directory name, so the file
+# name and its contents can never disagree.
+origin_date="$(jq -r '.analysis_date // empty' "$DEST/run_info.json")"
+[[ "$origin_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+  echo "error: could not read a valid analysis_date from run_info.json" >&2; exit 1; }
+rm -rf "$DEST/submission_format"
+mkdir -p "$DEST/submission_format"
+python3 "$SUBMIT_SCRIPT" convert \
+  "$DEST/bayes_risk_scores_all_zones.csv" \
+  "$origin_date" \
+  "$DEST/submission_format/${origin_date}-INRB-bayes_renewal.csv"
 
 # --- Guard: nothing oversized should ever land in the public repo -------------
 # The agreed footprint is well under 1 MB/day. Anything above 5 MB means the
