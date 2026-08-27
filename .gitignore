@@ -1,0 +1,44 @@
+# --- Sensitive inputs must never enter this public repository ---------------
+# The model runs against access-controlled INRB case data. Nothing derived from
+# individual records belongs here; only the allowlisted, zone-aggregated outputs
+# produced by tools/filter_public_outputs.sh.
+data/
+*linelist*
+*ctsafe*
+id_lookup*
+dhis2_processed*
+*_pairwise_import_force.csv
+
+# Manuscript drafts and reviews (mirrors the analysis repo's rules)
+MANUSCRIPT*
+BDBV_LID*
+LID_MANUSCRIPT_REVIEW.md
+REVIEW_FINDINGS*.md
+REVIEW_RESPONSE*.md
+
+# Local pipeline run products — published outputs arrive via CI, not by hand
+spatiotemporal/outputs/
+backup_outputs_*/
+
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+Rplots.pdf
+*.rds
+
+# Stan / cmdstanr build artefacts
+*.stan.o
+*_model
+cmdstan/
+
+# Editors, OS, tooling
+.DS_Store
+.Rapp.history
+.vscode/
+.idea/
+.claude/
+*.bak
+*~
