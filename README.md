@@ -50,13 +50,57 @@ Each `outputs/<date>/` folder is one complete daily re-issue, roughly 425 KB.
 | File | What it is |
 |---|---|
 | `bayes_risk_scores_all_zones.csv` | **The headline product.** One row per health zone per horizon: calibrated invasion probability with credible interval, national and provincial relative risk, rank, vulnerability index and preparedness priority. |
-| `harmonised_confirmed_cases.csv` | Cumulative confirmed cases per health zone as of the analysis date. |
+| `harmonised_confirmed_cases.csv` | Cumulative confirmed cases per health zone, reconciling the DHIS2 line list with the INSP situation reports. See [where confirmed case counts come from](#where-confirmed-case-counts-come-from). |
 | `run_info.json` / `run_info.md` | Provenance for the run — line-list snapshot ID, analysis date, training cutoff, number of zones and confirmed cases, cross-validation fold structure, list of invaded zones. Read this before interpreting any forecast. |
 | `model_selection.json` / `model_selection.md` | Which model configuration was featured for this run, and the comparison that selected it. |
 | `bayes_parameters.csv` | Fitted model terms on the hazard-ratio scale, with credible intervals and `rhat` convergence diagnostics. |
 | `bayes_topk_precision_h*.pdf`<br>`bayes_discrimination_summary_h*.pdf`<br>`bayes_lfo_forecast_vs_outcome_h*.pdf`<br>`bayes_model_performance_figure3_h*.pdf`<br>`bayes_predicted_vs_observed_over_folds_h*.pdf`<br>`bayes_priority_scatter_h*.pdf`<br>`bayes_invasion_uncertainty_h*.pdf` | Evaluation diagnostics for both horizons — how well the model has actually been forecasting, assessed by leave-future-out cross-validation. Published alongside the forecasts so the archive can be judged on its record, not just its predictions. |
 
 Column definitions are in [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md).
+
+### Where confirmed case counts come from
+
+**File:** `outputs/<date>/harmonised_confirmed_cases.csv` — one row per health zone (519),
+giving cumulative confirmed cases at that date's training cutoff. Present from 2026-08-06
+onward; the two earliest published dates predate the pipeline emitting it.
+
+"Harmonised" means the counts reconcile **two** sources rather than reporting one:
+
+- the **DHIS2 line list**, one row per case, held in INRB's access-controlled repository;
+- the **INSP situation reports**, specifically the *cumulative* confirmed-case file. The
+  daily `new_confirmed_cases` stream is deliberately not used — it undercounts badly
+  against the cumulative record.
+
+**The sitrep acts as a floor, never a ceiling.** For each zone the pipeline appends the
+shortfall — `max(0, sitrep_cumulative − line-list_confirmed)` — as additional confirmed
+records, so every zone reaches at least its officially confirmed count. Where the line
+list already meets or exceeds the sitrep, nothing is added. **No case is ever removed.**
+Per zone, counts are taken as the maximum across spelling variants on each date, then a
+running maximum over dates (which absorbs the sitrep's occasional revisions and dips),
+then differenced into dated whole-case increments.
+
+**Why this matters.** In this model a zone counts as "invaded" only once it has a
+*confirmed* case in the line list. The line list lags the sitrep for some zones, so a
+zone the sitrep has already confirmed can still appear as suspect-only — and would then
+be scored as never invaded. That is not just a presentational problem: the retrospective
+cross-validation that selects each day's featured model would be scoring every candidate
+against a ground truth missing real invasions.
+
+Two things the file is **not**. It is not nowcast-corrected — these are observed counts,
+not counts adjusted upward for reporting delay. And it is not a case count in the sense
+of a situation report: it is the modelling pipeline's reconciled view at a specific
+training cutoff, which is earlier than the analysis date. For official case figures, cite
+INSP and WHO, not this file.
+
+Reconciled counts are computed before modelling, with guards against sitrep zones outside
+the 519-zone spine and against increments dated after the analysis date (so a back-dated
+re-run cannot leak future confirmations). Every appended record is tagged in the pipeline
+with a traceable `SITREP-CONF-<zone>-NN` identifier, and the whole step can be switched
+off with `APPEND_SITREP_CONFIRMED = FALSE` for a sitrep-free sensitivity run. The
+implementation is `.build_sitrep_confirmed_appends()` in
+[`spatiotemporal/01_data_prep.R`](spatiotemporal/01_data_prep.R); the full treatment,
+including assumptions and effect on the current snapshot, is §1 of
+[`spatiotemporal/METHODS.md`](spatiotemporal/METHODS.md).
 
 ### Reading METHODS.md
 

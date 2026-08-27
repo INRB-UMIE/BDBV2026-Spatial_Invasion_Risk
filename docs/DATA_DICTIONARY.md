@@ -83,10 +83,22 @@ would do most damage, not only where one is most likely (§8, "Preparedness prio
 | Column | Definition |
 |---|---|
 | `health_zone` | Health zone name on the same 519-zone spine. |
-| `cumulative_confirmed_cases` | Confirmed cases recorded in the zone up to the analysis date. `0` for at-risk zones. |
+| `cumulative_confirmed_cases` | Confirmed cases in the zone up to that run's **training cutoff** (not the analysis date — they differ by the reporting delay). `0` for at-risk zones. |
 
-Names are harmonised across the line list, shapefile and sitrep sources, so this file is
-the correct join key for the risk scores.
+Two distinct things are harmonised here, and it is worth keeping them apart:
+
+- **Zone names** are mapped through an alias table onto the canonical 519-zone spine
+  shared by every output file, which makes this the correct join key for the risk scores.
+- **Counts** reconcile the DHIS2 line list with the INSP situation reports, with the
+  sitrep treated as a floor on each zone's confirmed total. Observed counts only — not
+  nowcast-corrected. The README section
+  [where confirmed case counts come from](../README.md#where-confirmed-case-counts-come-from)
+  explains the rule and why it exists.
+
+By construction `cumulative_confirmed_cases > 0` exactly when the zone is flagged
+`was_active_before` in `bayes_risk_scores_all_zones.csv` — both derive from the same
+reconciled zone-week table, so the two files cannot disagree about which zones are
+affected.
 
 ---
 
