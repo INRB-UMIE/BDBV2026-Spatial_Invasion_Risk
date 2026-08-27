@@ -1,0 +1,139 @@
+{
+  "pipeline": "spatiotemporal",
+  "conditional_variant": false,
+  "generated_at": "2026-08-18T12:07:01+0000",
+  "linelist_snapshot": {
+    "folder": "LINELIST_17082026",
+    "processed_at": "2026-08-17T12:00:00",
+    "source_pointer": "<redacted: internal path>"
+  },
+  "analysis_date": "2026-08-17",
+  "linelist_cutoff_date": "2026-08-11",
+  "training_window_end": "2026-08-17",
+  "outbreak_start": "2026-04-30",
+  "week_anchor": {
+    "week_start": 2,
+    "weeks_end_on": "Monday"
+  },
+  "data_date_range": {
+    "first": "2026-04-28",
+    "last": "2026-08-16"
+  },
+  "n_health_zones_total": 519,
+  "n_health_zones_invaded": 55,
+  "n_confirmed_cases": 4744,
+  "health_zones_invaded": [
+    "Adja",
+    "Ariwara",
+    "Aru",
+    "Aungba",
+    "Bafwasende",
+    "Bambu",
+    "Beni",
+    "Boga",
+    "Boma Mangbetu",
+    "Bunia",
+    "Buta",
+    "Butembo",
+    "Damas",
+    "Drodro",
+    "Fataki",
+    "Gety",
+    "Goma",
+    "Gombari",
+    "Isiro",
+    "Kabondo",
+    "Kalunguta",
+    "Kambala",
+    "Katwa",
+    "Kilo",
+    "Komanda",
+    "Kyondo",
+    "Lita",
+    "Logo",
+    "Lolwa",
+    "Lubero",
+    "Lubunga (Tshopo)",
+    "Mabalako",
+    "Mahagi",
+    "Makiso Kisangani",
+    "Mambasa",
+    "Mandima",
+    "Mangala",
+    "Mangobo",
+    "Masereka",
+    "Miti Murhesa",
+    "Mongbwalu",
+    "Musienene",
+    "Nia Nia",
+    "Nizi",
+    "Nyankunde",
+    "Oicha",
+    "Pawa",
+    "Rimba",
+    "Rungu",
+    "Rwampara",
+    "Tchomia",
+    "Tshopo",
+    "Vuhovi",
+    "Wamba",
+    "Wanierukula"
+  ],
+  "forecast_horizons_weeks": [
+    1,
+    2
+  ],
+  "forecast_target_windows": [
+    {
+      "horizon": 1,
+      "window_start": "2026-08-18",
+      "window_end": "2026-08-24"
+    },
+    {
+      "horizon": 2,
+      "window_start": "2026-08-18",
+      "window_end": "2026-08-31"
+    }
+  ],
+  "cross_validation": {
+    "scheme": "leave-future-out (weekly origins)",
+    "n_folds": 10,
+    "n_folds_source": "in-memory (this run)",
+    "fold_cutoffs": [
+      "2026-05-12",
+      "2026-05-19",
+      "2026-05-26",
+      "2026-06-02",
+      "2026-06-09",
+      "2026-06-16",
+      "2026-06-23",
+      "2026-06-30",
+      "2026-07-07",
+      "2026-07-14"
+    ],
+    "fold_horizons": [
+      1,
+      2
+    ],
+    "n_folds_planned_current_grid": 10,
+    "planned_fold_cutoffs": [
+      "2026-05-12",
+      "2026-05-19",
+      "2026-05-26",
+      "2026-06-02",
+      "2026-06-09",
+      "2026-06-16",
+      "2026-06-23",
+      "2026-06-30",
+      "2026-07-07",
+      "2026-07-14"
+    ]
+  },
+  "generation_time_primary": "medium",
+  "code_version": {
+    "analysis_repo": "INRB-UMIE/BDBV2026-Analysis",
+    "commit": "eecd35ce3dbc7e5ca79ac89e9cf26d9503819d1b",
+    "source": "inferred",
+    "note": "Inferred from the ANALYSIS_REF pinned in CI when this run's outputs were committed; not recorded by the run itself."
+  }
+}
