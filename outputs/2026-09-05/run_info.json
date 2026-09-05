@@ -1,0 +1,151 @@
+{
+  "pipeline": "spatiotemporal",
+  "conditional_variant": false,
+  "generated_at": "2026-09-05T16:40:48+0000",
+  "linelist_snapshot": {
+    "folder": "LINELIST_05092026",
+    "processed_at": "2026-09-05T12:00:00",
+    "source_pointer": "<redacted: internal path>"
+  },
+  "analysis_date": "2026-09-05",
+  "linelist_cutoff_date": "2026-08-30",
+  "training_window_end": "2026-09-05",
+  "outbreak_start": "2026-04-30",
+  "week_anchor": {
+    "week_start": 7,
+    "weeks_end_on": "Saturday"
+  },
+  "data_date_range": {
+    "first": "2026-04-26",
+    "last": "2026-09-05"
+  },
+  "n_health_zones_total": 519,
+  "n_health_zones_invaded": 60,
+  "n_confirmed_cases": 6508,
+  "health_zones_invaded": [
+    "Adja",
+    "Ariwara",
+    "Aru",
+    "Aungba",
+    "Bafwasende",
+    "Bambu",
+    "Beni",
+    "Biena",
+    "Boga",
+    "Boma Mangbetu",
+    "Bunia",
+    "Buta",
+    "Butembo",
+    "Damas",
+    "Drodro",
+    "Fataki",
+    "Ganga",
+    "Gety",
+    "Goma",
+    "Gombari",
+    "Isiro",
+    "Kabondo",
+    "Kalunguta",
+    "Kambala",
+    "Katwa",
+    "Kilo",
+    "Komanda",
+    "Kyondo",
+    "Lita",
+    "Logo",
+    "Lolwa",
+    "Lubero",
+    "Lubunga (Tshopo)",
+    "Mabalako",
+    "Mahagi",
+    "Makiso Kisangani",
+    "Mambasa",
+    "Mandima",
+    "Mangala",
+    "Mangobo",
+    "Manguredjipa",
+    "Masereka",
+    "Miti Murhesa",
+    "Mongbwalu",
+    "Musienene",
+    "Mutwanga",
+    "Nia Nia",
+    "Nizi",
+    "Nyankunde",
+    "Oicha",
+    "Pawa",
+    "Rimba",
+    "Rungu",
+    "Rwampara",
+    "Tchomia",
+    "Tshopo",
+    "Viadana",
+    "Vuhovi",
+    "Wamba",
+    "Wanierukula"
+  ],
+  "forecast_horizons_weeks": [
+    1,
+    2
+  ],
+  "forecast_target_windows": [
+    {
+      "horizon": 1,
+      "window_start": "2026-09-06",
+      "window_end": "2026-09-12"
+    },
+    {
+      "horizon": 2,
+      "window_start": "2026-09-06",
+      "window_end": "2026-09-19"
+    }
+  ],
+  "cross_validation": {
+    "scheme": "leave-future-out (weekly origins)",
+    "n_folds": 14,
+    "n_folds_source": "in-memory (this run)",
+    "fold_cutoffs": [
+      "2026-05-10",
+      "2026-05-17",
+      "2026-05-24",
+      "2026-05-31",
+      "2026-06-07",
+      "2026-06-14",
+      "2026-06-21",
+      "2026-06-28",
+      "2026-07-05",
+      "2026-07-12",
+      "2026-07-19",
+      "2026-07-26",
+      "2026-08-02",
+      "2026-08-09"
+    ],
+    "fold_horizons": [
+      1,
+      2
+    ],
+    "n_folds_planned_current_grid": 14,
+    "planned_fold_cutoffs": [
+      "2026-05-10",
+      "2026-05-17",
+      "2026-05-24",
+      "2026-05-31",
+      "2026-06-07",
+      "2026-06-14",
+      "2026-06-21",
+      "2026-06-28",
+      "2026-07-05",
+      "2026-07-12",
+      "2026-07-19",
+      "2026-07-26",
+      "2026-08-02",
+      "2026-08-09"
+    ]
+  },
+  "generation_time_primary": "medium",
+  "code_version": {
+    "analysis_repo": "INRB-UMIE/BDBV2026-Analysis",
+    "commit": "80d7801d085560e23b9ee71b1b83d5852398443e",
+    "source": "recorded"
+  }
+}
