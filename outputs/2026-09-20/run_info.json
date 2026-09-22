@@ -1,7 +1,7 @@
 {
   "pipeline": "spatiotemporal",
   "conditional_variant": false,
-  "generated_at": "2026-09-21T07:50:46+0000",
+  "generated_at": "2026-09-22T18:31:05+0000",
   "linelist_snapshot": {
     "folder": "LINELIST_20092026",
     "processed_at": "2026-09-20T12:00:00",
@@ -21,7 +21,7 @@
   },
   "n_health_zones_total": 519,
   "n_health_zones_invaded": 64,
-  "n_confirmed_cases": 7627,
+  "n_confirmed_cases": 7747,
   "health_zones_invaded": [
     "Adja",
     "Ariwara",
@@ -106,7 +106,7 @@
   ],
   "cross_validation": {
     "scheme": "leave-future-out (weekly origins)",
-    "n_folds": 16,
+    "n_folds": 15,
     "n_folds_source": "in-memory (this run)",
     "fold_cutoffs": [
       "2026-05-11",
@@ -123,14 +123,13 @@
       "2026-07-27",
       "2026-08-03",
       "2026-08-10",
-      "2026-08-17",
-      "2026-08-24"
+      "2026-08-17"
     ],
     "fold_horizons": [
       1,
       2
     ],
-    "n_folds_planned_current_grid": 16,
+    "n_folds_planned_current_grid": 15,
     "planned_fold_cutoffs": [
       "2026-05-11",
       "2026-05-18",
@@ -146,8 +145,7 @@
       "2026-07-27",
       "2026-08-03",
       "2026-08-10",
-      "2026-08-17",
-      "2026-08-24"
+      "2026-08-17"
     ]
   },
   "generation_time_primary": "medium",
