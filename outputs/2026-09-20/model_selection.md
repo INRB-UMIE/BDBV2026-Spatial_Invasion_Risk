@@ -1,6 +1,6 @@
 # Model selection — spatiotemporal
 
-_Generated 2026-09-22T18:31:05+0000_
+_Generated 2026-09-23T17:40:52+0000_
 
 **Featured Bayesian model (CV: best non-spiky AUC-PR skill):** `Bayes-M10-med`
 **Best renewal model:** _none cross-validated in this evaluation_
