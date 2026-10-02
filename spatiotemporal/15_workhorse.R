@@ -21,9 +21,9 @@
 # actual (rare) invasion base rate — fixing the previous 1-exp(-R*Lambda)
 # overconfidence (R is a self-sustaining transmission number, NOT an import scale).
 #
-# Risk scores (at-risk zones only): absolute p_case, ascertainment-adjusted
-# p_infection (as a band across the rho grid), relative risk within each province
-# of interest (Ituri, Nord-Kivu, Haut-Uele) and relative risk nationwide.
+# Risk scores (at-risk zones only): absolute p_case on the CONFIRMED-case scale,
+# relative risk within each province of interest (Ituri, Nord-Kivu, Haut-Uele) and
+# relative risk nationwide. There is no ascertainment adjustment: see 00_config.R.
 # =============================================================================
 
 source(file.path(here::here(), "spatiotemporal", "00_config.R"))
@@ -82,61 +82,6 @@ affected_zones <- function(zone_week, cutoff) {
 # Learn the import coefficient beta from realised invasions
 # ---------------------------------------------------------------------------
 
-#' Fit the import coefficient beta by cloglog regression of invasion events on
-#' the mobility import force, pooled over all training weeks.
-#'
-#' For each training week t' (with a valid next week) and each zone at-risk at t'
-#' (no cases in weeks <= t'), we form (Lambda_i(t'), invaded_i(t'+1)) and fit
-#'   cloglog(P(invade)) = intercept + offset(log Lambda),  beta = exp(intercept).
-#' Optionally augments with standardised covariates (penalised via a ridge-like
-#' data augmentation) — off by default given the small number of events.
-#'
-#' @return list(beta, coef_cov = named vector or NULL, n_events, n_obs).
-fit_import_beta <- function(Y_wide, W, G_weekly, zones_all,
-                            covariate_mat = NULL, lambda_ridge = 1,
-                            week_weights = NULL) {
-  n_weeks <- ncol(Y_wide)
-  rows <- list()
-  for (t in seq_len(n_weeks - 1L)) {
-    Lambda_t <- compute_foi(Y_wide, W, G_weekly, t_idx = t + 1L, zones_all)
-    # affected through week t (cumulative)
-    aff <- rowSums(Y_wide[, seq_len(t), drop = FALSE] > 0) > 0
-    at_risk <- !aff & Lambda_t > 0        # need positive import force to be estimable
-    if (!any(at_risk)) next
-    invaded <- Y_wide[, t + 1L] > 0
-    # Q1 completeness weight: reliability of the outcome week t+1 (default 1).
-    w_t <- if (is.null(week_weights)) 1 else
-      week_weights[[min(t + 1L, length(week_weights))]]
-    rows[[length(rows) + 1L]] <- tibble::tibble(
-      zone    = zones_all[at_risk],
-      logLam  = log(Lambda_t[at_risk]),
-      invaded = as.integer(invaded[at_risk]),
-      w       = as.numeric(w_t)
-    )
-  }
-  d <- dplyr::bind_rows(rows)
-  n_events <- sum(d$invaded)
-  if (nrow(d) < 20L || n_events < 2L) {
-    # Fall back to a completeness-weighted moment estimate:
-    # beta = sum(w·events) / sum(w·Lambda over at-risk).
-    beta <- if (nrow(d) > 0)
-      max(sum(d$w * d$invaded) / sum(d$w * exp(d$logLam)), 1e-4) else 0.01
-    return(list(beta = beta, coef_cov = NULL, n_events = n_events, n_obs = nrow(d)))
-  }
-
-  fit <- tryCatch(
-    suppressWarnings(              # benign non-integer-weights note (see fit_import_model)
-      glm(invaded ~ 1, family = binomial(link = "cloglog"),
-          offset = d$logLam, data = d, weights = d$w)),
-    error = function(e) NULL
-  )
-  if (is.null(fit) || !is.finite(coef(fit)[1])) {
-    beta <- max(sum(d$w * d$invaded) / sum(d$w * exp(d$logLam)), 1e-4)
-    return(list(beta = beta, coef_cov = NULL, n_events = n_events, n_obs = nrow(d)))
-  }
-  beta <- exp(unname(coef(fit)[1]))
-  list(beta = beta, coef_cov = NULL, n_events = n_events, n_obs = nrow(d))
-}
 
 # ---------------------------------------------------------------------------
 # Covariate-augmented import model (Q2 covariates + Q6 reporting-rate)
@@ -196,27 +141,6 @@ fit_import_beta <- function(Y_wide, W, G_weekly, zones_all,
   out[!vapply(out, is.null, logical(1))]
 }
 
-#' Relative reporting-rate vector (Q6 reporting-rate structure).
-#'
-#' Turns a raw completeness proxy (e.g. health-site density: more infrastructure
-#' -> more complete confirmed-case ascertainment) into a per-zone relative
-#' reporting rate r_j, normalised to GEOMETRIC mean 1 (so it re-weights sources
-#' relative to one another without rescaling the overall import force — a global
-#' scale is absorbed by the learned intercept beta and is NOT identifiable) and
-#' bounded to [0.25, 4] to prevent any single under-reporting source from
-#' dominating. Source incidence is later inflated by 1/r_j, i.e. low-reporting
-#' zones exert MORE importation pressure than their observed counts suggest.
-.reporting_rate_vec <- function(report_rate, zones_all) {
-  if (is.null(report_rate)) return(NULL)
-  v <- as.numeric(report_rate[match(zones_all, names(report_rate))])
-  v[!is.finite(v) | v <= 0] <- NA_real_
-  gm <- exp(mean(log(v[is.finite(v) & v > 0])))          # geometric mean of valid
-  if (!is.finite(gm) || gm <= 0) return(NULL)
-  v[is.na(v)] <- gm                                       # impute missing at neutral
-  r <- v / gm
-  r <- pmin(pmax(r, 0.25), 4)                             # bound extreme adjustments
-  stats::setNames(r, zones_all)                           # named for safe alignment
-}
 
 #' log(1 + OSRM travel time to the nearest zone active through week `t`).
 #' Infinite (no active zone / unroutable) -> a large finite sentinel. `t` is
@@ -264,329 +188,32 @@ fit_import_beta <- function(Y_wide, W, G_weekly, zones_all,
   for (nm in c("log_pop", "healthsite_density", "ccvi", "positivity"))
     if (nm %in% cov_spec && !is.null(static[[nm]])) f[[nm]] <- static[[nm]]
   if ("d_min" %in% cov_spec) f$d_min <- .dmin_vec(Y_active, osrm, zones_all, t_for - 1L)
+  # TIME TREND on the import->invasion conversion (the `tv-trend` models). The week index
+  # itself is the covariate, so beta_t = exp(beta0 + gamma_w * z(week)) — a log-linear trend
+  # on the hazard. Deliberately implemented as an ORDINARY COVARIATE rather than as a new
+  # model class: build_invasion_design() then standardises it, .bayes_invasion_draws()
+  # re-standardises it on the forecast rows with the SAME center/scale, and the LFO closure,
+  # the stacking alignment and the hazard-ratio tables all work unchanged. It is constant
+  # across zones within a week (a pure time effect) and, being evaluated at t_for, it takes
+  # the FORECAST week's value on forecast rows — i.e. the trend extrapolates, which is the
+  # whole point. Note the offset log(Lambda) has a fixed coefficient of 1, so this term is
+  # not collinear with it: it absorbs systematic drift in how Lambda converts to invasions.
+  if ("week_idx" %in% cov_spec) f$week_idx <- rep(as.numeric(t_for), length(zones_all))
   if (length(f) == 0) return(NULL)
   m <- do.call(cbind, f); colnames(m) <- names(f); m
 }
 
-#' Fit the (optionally covariate-augmented) import model.
-#'
-#' @return list(intercept, coef [named, on standardised scale], center, scale,
-#'   cov_spec, n_events, n_obs). With cov_spec=NULL, coef is empty and
-#'   exp(intercept) is the scalar beta of fit_import_beta.
-fit_import_model <- function(Y_wide, W, G_weekly, zones_all,
-                             A_wide = NULL, static = NULL, osrm = NULL,
-                             cov_spec = NULL, week_weights = NULL, S_wide = NULL) {
-  if (is.null(cov_spec) || length(cov_spec) == 0) {
-    b <- fit_import_beta(Y_wide, W, G_weekly, zones_all, week_weights = week_weights)
-    return(list(intercept = log(max(b$beta, 1e-8)), coef = numeric(0),
-                center = numeric(0), scale = numeric(0), cov_spec = NULL,
-                n_events = b$n_events, n_obs = b$n_obs))
-  }
-  n_weeks <- ncol(Y_wide); rows <- list()
-  for (t in seq_len(n_weeks - 1L)) {
-    Lambda_t <- compute_foi(Y_wide, W, G_weekly, t_idx = t + 1L, zones_all)
-    aff <- rowSums(Y_wide[, seq_len(t), drop = FALSE] > 0) > 0
-    at_risk <- !aff & Lambda_t > 0
-    if (!any(at_risk)) next
-    X <- .feature_matrix(t + 1L, Y_wide, A_wide, W, G_weekly, static, osrm,
-                         zones_all, cov_spec, S_wide = S_wide)
-    # Q1 completeness weighting: each transition t->t+1 is weighted by the
-    # reporting completeness of its OUTCOME week t+1 (recent, right-truncated
-    # weeks carry a less certain invasion outcome and so count for less).
-    w_t <- if (is.null(week_weights)) 1 else
-      week_weights[[min(t + 1L, length(week_weights))]]
-    df <- data.frame(invaded = as.integer(Y_wide[at_risk, t + 1L] > 0),
-                     logLam  = log(Lambda_t[at_risk]),
-                     .w = as.numeric(w_t))
-    if (!is.null(X)) df <- cbind(df, as.data.frame(X[at_risk, , drop = FALSE]))
-    rows[[length(rows) + 1L]] <- df
-  }
-  d <- dplyr::bind_rows(rows)
-  feat_cols <- setdiff(names(d), c("invaded", "logLam", ".w"))
-  n_events <- sum(d$invaded)
-  # standardise features on the training set
-  center <- vapply(feat_cols, function(c) mean(d[[c]], na.rm = TRUE), numeric(1))
-  scale  <- vapply(feat_cols, function(c) { s <- stats::sd(d[[c]], na.rm = TRUE)
-    if (!is.finite(s) || s == 0) 1 else s }, numeric(1))
-  for (c in feat_cols) d[[c]] <- (d[[c]] - center[[c]]) / scale[[c]]
 
-  # too few events -> intercept-only moment estimate (ignore covariates)
-  if (nrow(d) < 25L || n_events < 3L) {
-    b <- fit_import_beta(Y_wide, W, G_weekly, zones_all, week_weights = week_weights)
-    return(list(intercept = log(max(b$beta, 1e-8)), coef = numeric(0),
-                center = numeric(0), scale = numeric(0), cov_spec = NULL,
-                n_events = n_events, n_obs = nrow(d)))
-  }
-  fml <- stats::as.formula(paste("invaded ~", paste(feat_cols, collapse = " + ")))
-  fit <- tryCatch(
-    # suppressWarnings: fractional completeness weights trip the benign
-    # "non-integer #successes" note; the fit is a valid weighted likelihood and
-    # the coefficient sanity guard below independently rejects any bad fit.
-    suppressWarnings(
-      stats::glm(fml, family = binomial("cloglog"), offset = d$logLam, data = d,
-                 weights = d$.w,
-                 method = if (requireNamespace("brglm2", quietly = TRUE))
-                   brglm2::brglmFit else "glm.fit")),
-    error = function(e) NULL)
-  cf <- if (is.null(fit)) NULL else coef(fit)
-  # Reject a diverged fit: with standardised features and Firth penalisation a
-  # sane coefficient is O(1) and the base-rate cloglog intercept is ~ -3; anything
-  # huge (in ANY coefficient, intercept included, since exp(intercept)=beta0 feeds
-  # the dispersion) means separation / collinearity with the import offset (e.g.
-  # alerts ~ confirmed). Fall back to intercept-only.
-  bad <- is.null(cf) || any(!is.finite(cf)) || any(abs(cf) > 15)
-  if (bad) {
-    b <- fit_import_beta(Y_wide, W, G_weekly, zones_all, week_weights = week_weights)
-    return(list(intercept = log(max(b$beta, 1e-8)), coef = numeric(0),
-                center = numeric(0), scale = numeric(0), cov_spec = NULL,
-                n_events = n_events, n_obs = nrow(d)))
-  }
-  # Coefficient standard errors (for parameter visualisation / CIs). Firth-
-  # penalised vcov where available; NA if the (co)variance is unavailable.
-  se_all <- tryCatch(sqrt(diag(stats::vcov(fit))), error = function(e) NULL)
-  list(intercept = unname(cf[1]), coef = cf[feat_cols],
-       intercept_se = if (!is.null(se_all)) unname(se_all[1]) else NA_real_,
-       se = if (!is.null(se_all)) se_all[feat_cols] else
-            stats::setNames(rep(NA_real_, length(feat_cols)), feat_cols),
-       center = center, scale = scale, cov_spec = feat_cols,
-       n_events = n_events, n_obs = nrow(d))
-}
-
-#' Per-zone import scale beta_i = exp(intercept + standardised-features %*% coef).
-.beta_vector <- function(model, t_for, Y_wide, A_wide, W, G, static, osrm,
-                         zones_all, Y_active = Y_wide, S_wide = NULL) {
-  if (length(model$coef) == 0)
-    return(rep(exp(model$intercept), length(zones_all)))
-  X <- .feature_matrix(t_for, Y_wide, A_wide, W, G, static, osrm, zones_all,
-                       model$cov_spec, Y_active = Y_active, S_wide = S_wide)
-  eta <- rep(model$intercept, length(zones_all))
-  for (c in model$cov_spec) {
-    xc <- (X[, c] - model$center[[c]]) / model$scale[[c]]
-    xc[!is.finite(xc)] <- 0
-    eta <- eta + model$coef[[c]] * xc
-  }
-  pmin(exp(eta), 1e6)
-}
 
 # ---------------------------------------------------------------------------
 # National renewal R (for forward projection of the import force at h>=2)
 # ---------------------------------------------------------------------------
 
-estimate_R_local <- function(Y_wide, G_weekly, t_idx) {
-  y <- colSums(Y_wide, na.rm = TRUE)
-  nT <- min(t_idx, length(y))
-  if (nT < 4L) return(1.5)
-  # Use the last STABLE week (nT-1); the final onset week is still truncation-low
-  # and would spuriously depress R. Average the two most recent stable transitions.
-  Rs <- c()
-  for (ref in c(nT - 1L, nT - 2L)) {
-    if (ref < 2L) next
-    Kk  <- min(length(G_weekly), ref - 1L)
-    lam <- sum(G_weekly[seq_len(Kk)] * y[ref - seq_len(Kk)])
-    if (lam > 0) Rs <- c(Rs, y[ref] / lam)
-  }
-  R <- if (length(Rs) > 0) mean(Rs) else 1.5
-  min(max(R, 0.5), 5)
-}
 
 # ---------------------------------------------------------------------------
 # The workhorse forecast
 # ---------------------------------------------------------------------------
 
-#' Forecast spatial invasion with the mobility-informed renewal workhorse.
-#'
-#' @param zone_week_nc nowcast-corrected zone-week tibble (health_zone,
-#'   week_start, confirmed, confirmed_nc).
-#' @param W            outflow mobility matrix (row-stochastic).
-#' @param gt_pmf_daily daily GT PMF.
-#' @param zones_all    canonical zone vector.
-#' @param t_idx        week index of the training cutoff.
-#' @param horizons     forecast horizons (weeks).
-#' @param obs          "poisson" or "negbin".
-#' @param rho          ascertainment (for the infection-scale score).
-#' @param mobility_id, gt_profile labels.
-#' @param training_cutoff Date of the cutoff week.
-#' @return tibble: health_zone, horizon, mu_case, p_case_invasion,
-#'   p_infection_invasion, was_active_before, method (+ q05..q95 count quantiles).
-forecast_workhorse <- function(zone_week_nc, W, gt_pmf_daily, zones_all,
-                               t_idx, horizons = LFO_HORIZONS,
-                               obs = "poisson", rho = ASCERTAINMENT_NOMINAL,
-                               mobility_id = MOBILITY_PRIMARY,
-                               gt_profile = GT_PRIMARY, training_cutoff = NULL,
-                               method_label = "Renewal",
-                               covariate_spec = NULL,          # Q2 covariate options
-                               nowcast_mode = "corrected",     # Q6: corrected | raw
-                               alert_col = "total_alerts",
-                               static_cov = NULL, osrm = NULL,
-                               report_rate = NULL,             # Q6: reporting-rate
-                               beta_weighting = "none",        # Q1: none|completeness
-                               susp_col = "suspected_nc") {    # suspected-case covariate source
-  weeks   <- sort(unique(zone_week_nc$week_start))
-  cutoff  <- weeks[min(t_idx, length(weeks))]
-  # Q6 nowcast/delay option: use the nowcast-corrected counts (default) or the
-  # raw right-censored counts, so the value of nowcasting can be evaluated.
-  count_col <- if (identical(nowcast_mode, "raw")) "confirmed" else "confirmed_nc"
-  Y_wide  <- .count_wide(zone_week_nc, zones_all, count_col)
-  G       <- daily_to_weekly_gt(gt_pmf_daily)
-  tmax    <- min(t_idx, ncol(Y_wide))
-
-  # Q6 reporting-rate structure (OPTIONAL): inflate the importation pressure from
-  # under-reporting SOURCE zones. Since Lambda_i = sum_j W[j,i]·(G⊛Y_j), dividing
-  # source row j of W by its relative reporting rate r_j is exactly equivalent to
-  # using true incidence Y_j/r_j in the import force, while leaving the observed
-  # Y_wide (used for the at-risk mask and the invasion OUTCOME) untouched. When
-  # report_rate is NULL this is a no-op (W_use == W).
-  r_rep <- .reporting_rate_vec(report_rate, zones_all)
-  W_use <- W
-  if (!is.null(r_rep)) {
-    rr <- r_rep[rownames(W)]; rr[is.na(rr)] <- 1   # align to W's actual row order
-    W_use <- W / rr                                # divides source row j by r_j
-  }
-
-  aff_vec <- rowSums(Y_wide[, seq_len(tmax), drop = FALSE] > 0) > 0
-  names(aff_vec) <- zones_all
-
-  # Alert (leading-indicator) matrix + static covariate features, only if needed.
-  needs_alert  <- any(c("alert_import", "alert_local") %in% covariate_spec)
-  A_train <- if (needs_alert)
-    .count_wide(zone_week_nc, zones_all, alert_col)[, seq_len(tmax), drop = FALSE] else NULL
-  # Forecast-week alert matrix: alerts are not projected, so pad with zero columns
-  # for the future weeks (compute_foi indexes columns up to t_for-1).
-  A_fore  <- if (!is.null(A_train))
-    cbind(A_train, matrix(0, nrow(A_train), max(horizons),
-                          dimnames = list(rownames(A_train), NULL))) else NULL
-  # Suspected-but-not-confirmed leading-indicator matrix (built like the alert matrix,
-  # only when a susp_* covariate is requested): the nowcast-corrected suspected series
-  # (susp_col; falls back to zeros if absent). Not projected forward, so pad the forecast
-  # weeks with zeros exactly as the alert matrix is, keeping compute_foi in-bounds.
-  needs_susp  <- any(c("susp_import", "susp_local") %in% covariate_spec)
-  S_train <- if (needs_susp)
-    .susp_wide(zone_week_nc, zones_all, prefer = susp_col)[, seq_len(tmax), drop = FALSE] else NULL
-  S_fore  <- if (!is.null(S_train))
-    cbind(S_train, matrix(0, nrow(S_train), max(horizons),
-                          dimnames = list(rownames(S_train), NULL))) else NULL
-  static  <- if (any(c("log_pop", "healthsite_density", "ccvi", "positivity") %in%
-                     covariate_spec)) .static_features(static_cov, zones_all) else NULL
-
-  # Q1 completeness weighting (OPTIONAL): weight each training week by its
-  # national reporting completeness (mean nowcast truncation weight), so recent
-  # right-truncated weeks — whose invasion outcomes are least certain — count for
-  # less when the import scale beta is calibrated. Default "none" => all weights 1.
-  week_w <- NULL
-  if (identical(beta_weighting, "completeness") &&
-      "trunc_weight" %in% names(zone_week_nc)) {
-    cw <- zone_week_nc %>%
-      dplyr::group_by(week_start) %>%
-      dplyr::summarise(w = mean(trunc_weight, na.rm = TRUE), .groups = "drop")
-    week_w <- cw$w[match(weeks, cw$week_start)][seq_len(tmax)]
-    week_w[!is.finite(week_w)] <- 1
-    week_w <- pmin(pmax(week_w, 0.05), 1)   # keep strictly positive, cap at 1
-  }
-
-  Yw_train <- Y_wide[, seq_len(tmax), drop = FALSE]
-  model   <- fit_import_model(Yw_train, W_use, G, zones_all, A_wide = A_train,
-                              static = static, osrm = osrm,
-                              cov_spec = covariate_spec, week_weights = week_w,
-                              S_wide = S_train)
-  beta0   <- exp(model$intercept)   # mean import scale (for dispersion + fallback)
-  # Pass the TRAINING matrix (no columns beyond the cutoff), so the no-leakage
-  # guarantee is structural rather than merely true of the current index arithmetic.
-  R_local <- estimate_R_local(Yw_train, G, tmax)
-
-  # NegBin dispersion from TEMPORAL residuals of the import model on training wks
-  theta <- NA_real_
-  if (obs == "negbin")
-    theta <- .workhorse_temporal_dispersion(Yw_train, W_use, G, zones_all, beta0, tmax)
-
-  # Current-week (cutoff week W) expected introductions per zone: the import force
-  # INTO week W from observed incidence, times the calibrated beta. This is the
-  # week-W analogue of the horizon-week mu below, and it lets a forecast be anchored
-  # to the analysis DATE (mid-week) rather than the week boundary — a uniform daily
-  # introduction hazard of mu_wk0/7 covers the days of the current week that still
-  # lie ahead of the analysis date (see anchor_windows_from_analysis_date,
-  # 22_daily_reissue.R). Masked to NA for already-affected zones like every other mu.
-  Lambda_wk0 <- compute_foi(Yw_train, W_use, G, t_idx = tmax, zones_all)
-  beta_wk0   <- .beta_vector(model, tmax, Yw_train, A_fore, W_use, G, static, osrm,
-                             zones_all, Y_active = Yw_train, S_wide = S_fore)
-  mu_wk0_vec <- as.numeric(beta_wk0 * Lambda_wk0)
-  mu_wk0_vec[aff_vec] <- NA_real_
-
-  # Forward-project incidence to build the import force at each horizon.
-  Yw <- Yw_train
-  mu_cum <- setNames(numeric(length(zones_all)), zones_all)  # cumulative introductions
-  results <- vector("list", length(horizons))
-  hmax <- max(horizons)
-  mu_by_h <- list()
-  for (h in seq_len(hmax)) {
-    t_for <- ncol(Yw) + 1L
-    Lambda_h <- compute_foi(Yw, W_use, G, t_idx = t_for, zones_all)
-    # Zone-specific import scale from the (optionally covariate-augmented) model.
-    # d_min uses the OBSERVED frontier (Yw_train), fixed over the forecast window,
-    # not the projected incidence in the growing Yw (which would spuriously mark
-    # fractional-risk frontier zones as already "active" from horizon 2 on).
-    beta_h   <- .beta_vector(model, t_for, Yw, A_fore, W_use, G, static, osrm,
-                             zones_all, Y_active = Yw_train, S_wide = S_fore)
-    mu_h     <- beta_h * Lambda_h               # expected introductions this week
-    mu_cum   <- mu_cum + mu_h
-    mu_by_h[[h]] <- mu_cum
-    # Project incidence forward for the NEXT horizon: local renewal + new imports.
-    own_foi <- .gweighted_own(Yw, G, t_for)
-    Y_next  <- R_local * own_foi + mu_h
-    Yw <- cbind(Yw, Y_next)
-  }
-
-  for (hi in seq_along(horizons)) {
-    h <- horizons[hi]
-    mu_case <- mu_by_h[[h]]                      # cumulative expected introductions
-    # PRIMARY forecast p_case is ascertainment-AGNOSTIC: it is P(first confirmed-case
-    # onset), estimated from observed invasions, and does NOT divide by rho.
-    p_case  <- .invasion_prob(mu_case, obs, theta)
-    # Secondary infection-scale score: rho is UNCERTAIN, so report a BAND across the
-    # ascertainment grid rather than one fixed value (Task 8). Lower rho => more
-    # unobserved infections => higher implied infection risk, so rho=max(grid) gives
-    # the lower band and rho=min(grid) the upper band; p_infection at nominal rho.
-    rho_lo <- max(ASCERTAINMENT_GRID); rho_hi <- min(ASCERTAINMENT_GRID)
-    p_inf     <- .invasion_prob(mu_case / max(rho,    1e-3), obs, theta)
-    p_inf_lo  <- .invasion_prob(mu_case / max(rho_lo, 1e-3), obs, theta)
-    p_inf_hi  <- .invasion_prob(mu_case / max(rho_hi, 1e-3), obs, theta)
-    # Mask affected zones -> NA (no invasion probability for already-affected zones)
-    p_case[aff_vec]  <- NA_real_
-    p_inf[aff_vec]   <- NA_real_
-    p_inf_lo[aff_vec] <- NA_real_
-    p_inf_hi[aff_vec] <- NA_real_
-    mu_case[aff_vec] <- NA_real_
-    # Count predictive quantiles, matched to the observation model (secondary
-    # count task); NegBin tail when obs="negbin" so they agree with p_case.
-    # mu_case is NA for affected zones, so mu_q (and every quantile) stays NA there
-    # — the "no invasion output for already-affected zones" invariant holds fully.
-    mu_q <- pmax(mu_case, 1e-6)
-    results[[hi]] <- tibble::tibble(
-      health_zone          = zones_all,
-      horizon              = h,
-      mu_forecast          = mu_case,
-      mu_wk0               = mu_wk0_vec,          # current-week introductions (analysis-date anchoring)
-      p_invasion           = p_case,             # kept for back-compat = p_case
-      p_case_invasion      = p_case,
-      p_infection_invasion = p_inf,
-      p_infection_lo       = p_inf_lo,   # ascertainment band (rho = max grid)
-      p_infection_hi       = p_inf_hi,   # ascertainment band (rho = min grid)
-      was_active_before    = unname(aff_vec),
-      q05 = .qcount(0.05, mu_q, obs, theta), q20 = .qcount(0.20, mu_q, obs, theta),
-      q25 = .qcount(0.25, mu_q, obs, theta), q75 = .qcount(0.75, mu_q, obs, theta),
-      q80 = .qcount(0.80, mu_q, obs, theta), q95 = .qcount(0.95, mu_q, obs, theta),
-      method               = method_label,
-      mobility_id          = mobility_id,
-      gt_profile           = gt_profile,
-      training_cutoff      = training_cutoff %||% cutoff
-    )
-  }
-  out <- dplyr::bind_rows(results)
-  attr(out, "beta") <- beta0
-  attr(out, "R_local") <- R_local
-  attr(out, "n_events") <- model$n_events
-  attr(out, "coef_cov") <- model$coef
-  out
-}
 
 .gweighted_own <- function(Yw, G, t_for) {
   n <- nrow(Yw); own <- numeric(n)
@@ -598,51 +225,8 @@ forecast_workhorse <- function(zone_week_nc, W, gt_pmf_daily, zones_all,
   own
 }
 
-.invasion_prob <- function(mu, obs, theta) {
-  mu <- pmax(mu, 0)
-  if (obs == "negbin" && is.finite(theta) && theta > 0) {
-    1 - (theta / (theta + mu))^theta
-  } else {
-    1 - exp(-mu)
-  }
-}
 
-# Count predictive quantile consistent with the observation model, so the
-# reported q05..q95 imply the SAME P(Y>=1) as p_case_invasion (NegBin tail when
-# obs="negbin", Poisson otherwise) rather than always using the Poisson tail.
-.qcount <- function(pr, mu, obs, theta) {
-  if (obs == "negbin" && is.finite(theta) && theta > 0)
-    stats::qnbinom(pr, size = theta, mu = mu)
-  else
-    stats::qpois(pr, mu)
-}
 
-# Dispersion from temporal residuals of the import model (mu vs realised new
-# cases) across training weeks, on at-risk zones with positive import force.
-.workhorse_temporal_dispersion <- function(Y_wide, W, G, zones_all, beta, t_max) {
-  res <- list()
-  for (t in seq_len(t_max - 1L)) {
-    Lam <- compute_foi(Y_wide, W, G, t_idx = t + 1L, zones_all)
-    aff <- rowSums(Y_wide[, seq_len(t), drop = FALSE] > 0) > 0
-    keep <- !aff & Lam > 0
-    if (!any(keep)) next
-    res[[length(res) + 1L]] <- tibble::tibble(mu = beta * Lam[keep],
-                                              y = Y_wide[keep, t + 1L])
-  }
-  d <- dplyr::bind_rows(res)
-  if (nrow(d) < 10L) return(10)
-  # Method-of-moments NB size. With heterogeneous means, E[(y-mu)^2] = E[mu] +
-  # E[mu^2]/theta, so the excess residual variance over the mean estimates
-  # E[mu^2]/theta and theta = E[mu^2] / excess. Using mean(mu)^2 here (instead of
-  # E[mu^2] = mean(mu^2)) would understate theta whenever mu varies across zones.
-  # MoM needs the mean SQUARED residual E[(y-mu)^2], not the central sample variance
-  # var(y-mu) (which subtracts the mean residual and understates the second moment when
-  # the forecast is biased); they coincide only when mean(y-mu)=0.
-  v <- mean((d$y - d$mu)^2, na.rm = TRUE); mbar <- mean(d$mu, na.rm = TRUE)
-  extra <- v - mbar
-  if (!is.finite(extra) || extra <= 0) return(50)  # ~Poisson
-  max(mean(d$mu^2, na.rm = TRUE) / extra, 0.1)
-}
 
 # ---------------------------------------------------------------------------
 # Risk scores (at-risk zones only)

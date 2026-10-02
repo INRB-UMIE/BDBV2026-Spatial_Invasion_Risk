@@ -34,15 +34,24 @@ cascade_enrich_reach <- function(reach, province_map, vuln, method_label) {
 
 cascade_write_reach_csv <- function(rs, path) {
   keep <- c("health_zone", "province", "horizon", "was_active_before",
-            "p_case_invasion", "p_lo", "p_hi", "p_establishment", "first_passage_week",
+            # p_sd is the posterior SD of the reach probability; it is computed in
+            # cascade_reach_table() but was never exported, so the honest posterior width never
+            # reached a consumer and p_lo/p_hi were the only signal of uncertainty.
+            "p_case_invasion", "p_lo", "p_hi", "p_sd", "p_establishment", "first_passage_week",
             "mu_forecast", "rr_nat", "rr_nat_rank", "rr01_nat",
             "rr_ituri", "rr_ituri_rank", "rr_nordkivu", "rr_nordkivu_rank",
             "rr_hautuele", "rr_hautuele_rank", "V", "priority", "priority_rank",
             "surveillance_gap", "healthcare_gap", "access_gap", "social_vulnerability",
             "healthcare_travel_min", "method")
+  # SIGNIFICANT DIGITS, not 4 decimal places — the identical defect that was fixed in
+  # .write_risk_csv() (run_all.R) and must not survive in the cascade's twin. round(x, 4)
+  # publishes every probability below 5e-5 as EXACTLY 0, and a renewal hazard gives
+  # p = 1 - exp(-mu) > 0 strictly, so each of those zeros is an artefact of the writer. In
+  # this file NA already means "not applicable" (an affected zone), so a printed 0 is read as
+  # a real, vanishing risk.
   out <- rs |> dplyr::select(dplyr::any_of(keep)) |>
     dplyr::rename(dplyr::any_of(c(p_case_lo = "p_lo", p_case_hi = "p_hi"))) |>
-    dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ round(.x, 4)))
+    dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ signif(.x, 6)))
   if (all(c("horizon", "p_case_invasion") %in% names(out)))
     out <- out |> dplyr::arrange(horizon, dplyr::desc(dplyr::coalesce(p_case_invasion, -1)))
   readr::write_csv(out, path)
@@ -67,7 +76,14 @@ cascade_write_reach_csv <- function(rs, path) {
   sp
 }
 .cascade_ggsave <- function(p, file, w = 9, h = 7.5) {
+  # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
+  # is not on the published allow-list. get0() so the helper still works standalone.
+  # Gate on the FULL destination path, not the bare stem: FIGURE_DROP entries are
+  # "<directory>/<stem>" and the raw/ exclusion inspects path components, neither of
+  # which a basename can match.
   path <- file.path(OUT_CASCADE, "figures", file)
+  .fk <- get0("figure_is_kept", ifnotfound = NULL)
+  if (is.function(.fk) && !.fk(path)) return(invisible(p))
   ggsave(paste0(path, ".pdf"), p, width = w, height = h)
   ggsave(paste0(path, ".png"), p, width = w, height = h, dpi = 150)
   invisible(path)
@@ -123,6 +139,10 @@ cascade_map_timetoinvasion <- function(rs, horizons = CASCADE_REPORT_HORIZONS,
 }
 
 # ---- 4. aggregate fan chart (new zones over time, per scenario) ------------
+#' @return the per-week median and 90% band that the ribbon draws (one row per scenario x week).
+#'   The function has always returned it; run_cascade.R assigned the result to `fan` and then
+#'   never used it, so the 90% credible band on a PUBLISHED figure existed only as pixels and no
+#'   reader could recover a number from it. The caller now writes it.
 cascade_fig_fanchart <- function(sims_by_scenario,
                                  file = "cascade_newzones_fanchart") {
   rows <- lapply(names(sims_by_scenario), function(sk) {
@@ -170,10 +190,19 @@ cascade_fig_gateway <- function(gateway_tbl, file = "cascade_gateway_knockout",
                                 top_n = 15L) {
   d <- head(gateway_tbl, top_n)
   d$health_zone <- factor(d$health_zone, levels = rev(d$health_zone))
+  has_ci <- all(c("delta_j_lo", "delta_j_hi") %in% names(d)) && any(is.finite(d$delta_j_lo))
   p <- ggplot(d, aes(delta_j, health_zone)) +
     geom_col(fill = "#b2182b") +
+    # The paired 90% interval. Drawn because the ranking of the trailing zones is not
+    # separated by this analysis, and a bare bar chart invites reading an order into it.
+    {if (has_ci) geom_linerange(aes(xmin = delta_j_lo, xmax = delta_j_hi),
+                                colour = "grey25", linewidth = 0.5)} +
+    geom_vline(xintercept = 0, colour = "grey55", linewidth = 0.3) +
     labs(title = "BDBV 2026 — gateway zones: onward-spread impact",
-         subtitle = "Delta_j = expected downstream invasions prevented if this source is contained (knockout).",
+         subtitle = paste("Delta_j = expected downstream invasions prevented if this source is",
+                          "contained (knockout).\nPaired contrast against a same-seed baseline;",
+                          "bars are 90% intervals. Zones whose interval spans zero are not",
+                          "separated by this analysis."),
          x = "expected downstream invasions attributable (Delta_j)", y = NULL) +
     theme_minimal(base_size = 12)
   .cascade_ggsave(p, file, w = 9, h = 6)
@@ -186,7 +215,11 @@ cascade_fig_corridors <- function(flux_net, file = "cascade_corridors") {
   dm <- as.data.frame(as.table(pm)); names(dm) <- c("source", "dest", "flux")
   p <- ggplot(dm, aes(dest, source, fill = flux)) + geom_tile(colour = "white") +
     scale_fill_viridis_c(option = "rocket", direction = -1, name = "expected\nseedings") +
-    labs(title = "BDBV 2026 — inter-province seeding flux (invasion corridors)",
+    # ASCII hyphen, not an em-dash: this title is rendered, and .cascade_ggsave writes the PDF
+    # on the base pdf device (ISOLatin1), which cannot encode U+2014 and substitutes a hyphen
+    # with a conversion warning — so the PDF and the 150-dpi PNG would otherwise disagree.
+    # cascade_corridors is a retained deliverable, so its title is not suppressed.
+    labs(title = "BDBV 2026 - inter-province seeding flux (invasion corridors)",
          subtitle = "Expected number of zone invasions seeded from source province to destination province.",
          x = "destination province", y = "source province") +
     theme_minimal(base_size = 11) +

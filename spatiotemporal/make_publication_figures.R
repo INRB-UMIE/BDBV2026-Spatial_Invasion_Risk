@@ -23,55 +23,52 @@ suppressPackageStartupMessages({
 sf::sf_use_s2(FALSE)
 options(dplyr.summarise.inform = FALSE)
 
-HERE      <- normalizePath(".")
+# Anchor to the repo via here::here(), NOT normalizePath(".") — that assumed the working
+# directory was the repo root, so running this from spatiotemporal/ (where every other
+# script in the suite is run from) sent HERE one level too deep and every path escaped
+# the repo. make_manuscript_figures.R was already fixed for the same fault.
+HERE      <- here::here()
 
-# Source the pipeline config so paths/constants (outbreak start, shapefile, provinces of interest,
-# epicentre zones, onset->sample delay rate, linelist discovery) come from the SINGLE source of
-# truth rather than being hard-coded here — otherwise they silently drift from the pipeline (e.g. a
-# pinned linelist folder goes stale). Falls back to local literals only if the config cannot load.
-.cfg_ok <- tryCatch({ source(file.path(HERE, "/spatiotemporal/00_config.R")); TRUE },
-                    error = function(e) { message("[figures] 00_config.R not sourced (",
-                                                  conditionMessage(e), "); using local fallbacks."); FALSE })
-.cfg <- function(name, default) if (.cfg_ok && exists(name)) get(name) else default
+# The pipeline config and data layer are REQUIRED, not optional. Paths, the outbreak
+# start, the epicentre zones, the delay resolver and load_linelist() all come from them,
+# and the figure must show the same case set as the model. The old ".cfg_ok" fallback
+# quietly redrew main-text panels on local literals when the config failed to load — a
+# figure that disagrees with its model, with one message in the log.
+source(file.path(HERE, "spatiotemporal", "00_config.R"))
+source(file.path(HERE, "spatiotemporal", "01_data_prep.R"))
+stopifnot(exists("OUT_DIR"), exists("OUTBREAK_START"), exists("EPICENTRE_ZONES"),
+          exists("load_linelist", mode = "function"),
+          exists("effective_onset_sample_delay", mode = "function"))
+.cfg <- function(name, default) if (exists(name)) get(name) else default
 
 OUT       <- .cfg("OUT_DIR", file.path(HERE, "outputs"))
-FIG_DIR   <- file.path(OUT, "key_outputs", "figures")
-PANEL_DIR <- file.path(FIG_DIR, "panels")
+# Probability-scale switch (forecast_scale.R). Default "recalibrated": the primary set.
+# FORECAST_SCALE=raw re-runs the identical build onto a raw/ sibling, same basenames.
+source(file.path(HERE, "spatiotemporal", "forecast_scale.R"))
+FIG_DIR   <- fs_out_dir(file.path(OUT, "key_outputs", "figures"))
+PANEL_DIR <- fs_out_dir(file.path(OUT, "key_outputs", "figures", "panels"))
 dir.create(PANEL_DIR, recursive = TRUE, showWarnings = FALSE)
 
-BEST_BAYES_FALLBACK <- "Bayes-M10-med"   # only used if the featured model cannot be derived
+BEST_BAYES_FALLBACK <- "Bayes-M14-fill-med"   # only if the featured model cannot be derived;
+                                              # the fill family is the default, so the fallback must name a kernel the default grid builds
 OUTBREAK_START <- .cfg("OUTBREAK_START", as.Date("2026-04-30"))
 ANALYSIS_DATE  <- .cfg("ANALYSIS_DATE", Sys.Date())        # as-of date; panels run up to here
-IMP_DELAY      <- round(1 / .cfg("DELAY_ONSET_SAMPLE_RATE", 0.228))   # onset<-sample imputation (days)
 SHP_PATH <- .cfg("SHAPEFILE_PATH",
                  file.path(HERE, "..", "data", "shapefiles", "DRC_Health_zones.shp"))
 PROV_INT  <- .cfg("PROVINCES_OF_INTEREST", c("Ituri", "Nord-Kivu", "Haut-Uele"))
-EPI_ZONES <- .cfg("EPICENTRE_ZONES", c("Bunia", "Mongbalu", "Rwampara"))
+# Canonical (post-2026-07 shapefile) spellings in the fallback too: "Mongbalu" is not
+# in the zone spine, so a fallback carrying it silently drops that origin.
+EPI_ZONES <- .cfg("EPICENTRE_ZONES", c("Bunia", "Mongbwalu", "Rwampara"))
 
-# Resolve the CURRENT processed linelist via latest.json (exactly as load_linelist() does), so the
-# figure always tracks the latest snapshot instead of a pinned LINELIST_<date> folder.
-LINELIST <- local({
-  lj <- .cfg("LINELIST_JSON", NA_character_)
-  ld <- .cfg("LINELIST_DIR",
-             file.path(HERE, "..", "data", "processed", "dhis2_linelist_processed"))
-  if (!is.na(lj) && file.exists(lj)) {
-    meta <- tryCatch(jsonlite::fromJSON(lj), error = function(e) NULL)
-    if (!is.null(meta$folder))
-      return(file.path(ld, meta$folder, "dhis2_processed_linelist.csv"))
-  }
-  # fallback: newest LINELIST_* folder on disk
-  cand <- list.files(ld, pattern = "^LINELIST_", full.names = TRUE)
-  if (length(cand)) file.path(sort(cand, decreasing = TRUE)[1], "dhis2_processed_linelist.csv")
-  else file.path(ld, "LINELIST_current", "dhis2_processed_linelist.csv")
-})
-message("[figures] linelist: ", LINELIST)
+# The line list is resolved and logged by load_linelist() (01_data_prep.R); this script
+# no longer resolves a path of its own.
 
 # -----------------------------------------------------------------------------
 # 1. DESIGN SYSTEM  (colourblind-safe; sequential = single perceptual hue)
 # -----------------------------------------------------------------------------
 INK <- "grey15"; MUTED <- "grey38"; FAINT <- "grey72"; GRID <- "grey92"
 AFFECTED_FILL <- "grey78"; NA_FILL <- "grey93"
-RR_FLOOR <- 1e-3   # pseudo-log floor for the log10 relative-risk map (absorbs exact-zero zones)
+RR_FLOOR <- 1e-3   # lower limit of the log10 relative-risk scale (log10 is undefined at 0)
 
 # Okabe-Ito (CVD-safe categorical); fixed province identity map
 OKABE <- c("#0072B2","#D55E00","#009E73","#CC79A7","#E69F00","#56B4E9","#F0E442","#000000")
@@ -82,59 +79,32 @@ SER_COL <- c("Mean predicted P"="#0072B2","Observed invasion fraction"="#111111"
              "Mean P at invaded zones"="#D55E00")
 HZ_COL  <- c("1"="#3B4CC0","2"="#B4413C")            # horizon 1 / 2
 
-# Intuitive, reader-friendly model names for the labelled Figure 2 variant. Keys are the
-# pipeline method codes (see 21_bayesian_renewal.R / bayes_default_grid): the mobility kernel
-# driving invasion risk (M4=gravity, M8=composite gravity, M9=multi-kernel ensemble,
-# M10=radiation-composite, M13=cohort gravity, M14=cohort radiation, M15=combined static,
-# M16=cohort+static, M17=all-kernel consensus) and the beta specification (-med = constant beta,
-# no covariates; -geo = geographic + social covariates modulate beta; -full = + healthsite density;
-# -dist = road-km deterrence; -susp = suspected-case indicators; -short/-long = generation-time
-# profile; ens-mean/median = stacked ensemble). "Bayes" is dropped (all models are Bayesian).
-# Every model fitted in the default grid (9 kernels x {med, geo}) has an entry so no raw code
-# leaks onto the axes; optional families (dist/full/susp/gen-time/ensemble) are covered too.
-MODEL_LABELS <- c(
-  # core mobility kernels, constant beta (no covariates)
-  "Bayes-M4-med"       = "Gravity",
-  "Bayes-M8-med"       = "Composite gravity",
-  "Bayes-M9-med"       = "Multi-kernel ensemble",
-  "Bayes-M10-med"      = "Radiation-composite",
-  "Bayes-M13-med"      = "Cohort gravity",
-  "Bayes-M14-med"      = "Cohort radiation",
-  "Bayes-M15-med"      = "Combined static",
-  "Bayes-M16-med"      = "Cohort + directed OD",
-  "Bayes-M17-med"      = "All-kernel consensus",
-  # same kernels with geographic + social covariates modulating beta
-  "Bayes-M4-geo"       = "Gravity + covariates",
-  "Bayes-M8-geo"       = "Composite gravity + covariates",
-  "Bayes-M9-geo"       = "Multi-kernel ensemble + covariates",
-  "Bayes-M10-geo"      = "Radiation-composite + covariates",
-  "Bayes-M13-geo"      = "Cohort gravity + covariates",
-  "Bayes-M14-geo"      = "Cohort radiation + covariates",
-  "Bayes-M15-geo"      = "Combined static + covariates",
-  "Bayes-M16-geo"      = "Cohort + directed OD + covariates",
-  "Bayes-M17-geo"      = "All-kernel consensus + covariates",
-  # road-distance (-dist) twins (ON by default): generic + cohort + consensus, with & without covariates.
-  # NOTE model ids: M17's twin is "Bayes-M17-dist-med"/"-geo" (carries the -med/-geo suffix), unlike the
-  # M13/M14 twins which are "Bayes-M13-dist"/"Bayes-M13-dist-geo". Keys MUST match the fitted labels exactly.
-  "Bayes-M4-dist"       = "Gravity (road-km)",
-  "Bayes-M4-dist-geo"   = "Gravity (road-km) + covariates",
-  "Bayes-M8-dist"       = "Composite gravity (road-km)",
-  "Bayes-M8-dist-geo"   = "Composite gravity (road-km) + covariates",
-  "Bayes-M10-dist"      = "Radiation-composite (road-km)",
-  "Bayes-M10-dist-geo"  = "Radiation-composite (road-km) + covariates",
-  "Bayes-M13-dist"      = "Cohort gravity (road-km)",
-  "Bayes-M13-dist-geo"  = "Cohort gravity (road-km) + covariates",
-  "Bayes-M14-dist"      = "Cohort radiation (road-km)",
-  "Bayes-M14-dist-geo"  = "Cohort radiation (road-km) + covariates",
-  "Bayes-M17-dist-med"  = "All-kernel consensus (road-km)",
-  "Bayes-M17-dist-geo"  = "All-kernel consensus (road-km) + covariates",
-  "Bayes-M8-short"     = "Composite gravity, short gen.",
-  "Bayes-M8-long"      = "Composite gravity, long gen.",
-  "Bayes-M8-full"      = "Composite gravity + full covariates",
-  "Bayes-M8-susp"      = "Composite gravity + suspected",
-  "Bayes-M8-full-susp" = "Composite gravity + cov. & susp.",
-  "Bayes-ens-mean"     = "Model ensemble (mean)",
-  "Bayes-ens-median"   = "Model ensemble (median)")
+# Reader-friendly model names for the labelled Figure 2 variant. These are GENERATED from the
+# method code by model_pretty_label() (00_config.R), which composes the name from the same
+# tokens bayes_default_grid() composes the label from — kernel family, road-km / source-fill /
+# origin-split qualifiers, covariate set, beta_t process, generation-time arm.
+#
+# IT USED TO BE A 100-ENTRY HAND-WRITTEN LOOKUP, and it drifted: 12 of the 57 cross-validated
+# models had no entry, so raw codes such as "Bayes-M8-dist-split-geo" were printed on the
+# published figure whose entire purpose is to avoid them, and each new model family had to be
+# transcribed here by hand. A derived name cannot fall behind the grid.
+# There is no table: build_fig2(model_labels = TRUE) calls model_pretty_label() on whatever
+# codes the panel actually holds.
+
+#' Thin a set of dated tick positions to at most `max_n` labels, always keeping the FIRST and
+#' the LAST.
+#'
+#' Dated forecast rounds accumulate as the outbreak runs, so any fixed rule ("every other
+#' round") eventually overprints. This picks evenly spaced positions across the sequence and
+#' pins the endpoints, which are the two the reader needs: the first round and the round the
+#' end-of-line labels annotate. Returns the dates themselves, so it can be passed straight to
+#' scale_x_date(breaks = ).
+.thin_date_breaks <- function(x, max_n = 5L) {
+  cs <- sort(unique(as.Date(x)))
+  if (length(cs) <= max_n) return(cs)
+  idx <- unique(c(1L, round(seq(1, length(cs), length.out = max_n)), length(cs)))
+  cs[sort(unique(idx))]
+}
 
 base_family <- "sans"
 
@@ -176,6 +146,14 @@ theme_map <- function(base = 8.6) {
 
 # save vector PDF + 600-dpi PNG
 save_dual <- function(p, name, w, h, dir = PANEL_DIR) {
+  # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
+  # is not on the published allow-list. get0() so the helper still works standalone.
+  .fk <- get0("figure_is_kept", ifnotfound = NULL)
+  # Gate on the FULL destination path, not the bare stem: FIGURE_DROP entries are
+  # "<directory>/<stem>" and the raw/ exclusion inspects path components, neither of
+  # which can match a basename.
+  if (is.function(.fk) && !.fk(file.path(dir, name))) return(invisible(p))
+  p <- fs_caption(p)                                 # scale statement (raw pass by default)
   pdf_dev <- "pdf"                                   # base pdf: core Helvetica, ASCII-safe
   ggsave(file.path(dir, paste0(name, ".pdf")), p, width = w, height = h,
          device = pdf_dev, bg = "white")
@@ -192,48 +170,45 @@ message("[load] shapefile, risk scores, LFO results, evaluation, linelist ...")
 shp <- st_read(SHP_PATH, quiet = TRUE) %>%
   mutate(.key = tolower(trimws(Nom)), .prov = as.character(PROVINCE))
 
-rs  <- read_csv(file.path(OUT, "key_outputs", "bayes_risk_scores_all_zones.csv"),
-                show_col_types = FALSE)
+rs  <- read_csv(fs_risk_csv(OUT), show_col_types = FALSE)
 lfo <- readRDS(file.path(OUT, "forecasts", "lfo_results.rds"))
 ev  <- read_csv(file.path(OUT, "diagnostics", "invasion_evaluation.csv"),
                 show_col_types = FALSE)
+# Put the selected scale into `p_invasion` ONCE, keeping the untouched values as
+# `p_invasion_raw`. Every expression below reads `p_invasion`, so the switch is total
+# rather than depending on each call site being edited consistently.
+fs_apply_lfo_scale(lfo)
+# NOTE on the discrimination columns used below (auc_pr_skill, auc_roc): they are read from
+# the RAW evaluation columns in BOTH passes, deliberately. Within a fold the recalibration
+# is strictly monotone, so AUC is EXACTLY invariant; the `*_recal` columns differ only
+# because POOLED AUC mixes folds carrying different prequential factors. Publishing a
+# "recalibrated AUC" that differs from the raw one would invite the reader to conclude that
+# recalibration changed discrimination, which is false. Brier, log score and reliability DO
+# change with the scale and are computed from the selected probabilities wherever they
+# appear. (make_manuscript_figures.R names the same choice as EV_SKILL/EV_ROC because it
+# quotes those numbers in a panel annotation; this suite does not, so there is nothing to
+# parameterise here.)
 
-# The featured Bayesian model is chosen by the pipeline's calibration-aware CV composite — the
-# summed within-horizon ranks of AUC-PR skill (discrimination) + mean rank-of-truth (operational) +
-# log-score (probabilistic accuracy), POOLED across both horizons; lower = better — over the
-# cross-validated SINGLE Bayesian models (ensembles excluded). This mirrors run_all.R's
-# best_invasion_model(), so the figures always track the current featured model; NOT the loo-stacking
-# weight, NEVER a hardcoded label.
+# The featured Bayesian model is the one the PIPELINE selected. It is read from
+# model_selection.json rather than recomputed here (see .pick_best_bayes below), so the figures
+# cannot track a different model from the pipeline, and the log-score axis, the eligibility
+# gates and the tie-break are whatever best_invasion_model() actually applied.
 .pick_best_bayes <- function(rs, lfo, ev, fallback) {
+  sel_path <- file.path(OUT_DIR, "key_outputs", "model_selection.json")
+  m <- NULL
+  if (file.exists(sel_path)) {
+    sel <- tryCatch(jsonlite::fromJSON(sel_path, simplifyVector = TRUE), error = function(e) NULL)
+    m <- tryCatch(sel$featured$bayesian$method, error = function(e) NULL)
+    if (is.null(m) || !length(m) || is.na(m[1]))
+      m <- tryCatch(sel$featured$headline$method, error = function(e) NULL)
+  }
+  if (!is.null(m) && length(m) && !is.na(m[1])) return(as.character(m[1]))
+  warning("[figures] model_selection.json is unreadable; falling back to the configured ",
+          "featured model. The figures may not track the pipeline's pick.", call. = FALSE)
   lfo_methods   <- unique(lfo$method)
   bayes_singles <- unique(lfo_methods[grepl("^Bayes", lfo_methods) & !grepl("-ens-", lfo_methods)])
-  need <- c("method", "horizon", "auc_pr_skill", "mean_rank_of_truth", "log_score")
-  if (length(bayes_singles) && all(need %in% names(ev))) {
-    # Discrimination-led with a spiky-model gate. Mirrors best_invasion_model() exactly: among
-    # methods covering the most horizons, drop those whose worst-horizon mean rank-of-truth exceeds
-    # 1.5x the field median, then take the highest total AUC-PR skill (ties: lower rank-of-truth,
-    # then lower log-score); gate falls back to the ungated set if it would leave nothing.
-    agg <- ev %>% filter(method %in% bayes_singles) %>%
-      group_by(method) %>%
-      summarise(n_h = dplyr::n_distinct(horizon), aps = sum(dplyr::coalesce(auc_pr_skill, 0)),
-                mrt_max = max(dplyr::coalesce(mean_rank_of_truth, Inf)),
-                mrt_sum = sum(dplyr::coalesce(mean_rank_of_truth, Inf)),
-                ls_sum  = sum(dplyr::coalesce(log_score, Inf)), .groups = "drop") %>%
-      filter(n_h == max(n_h))
-    if (nrow(agg)) {
-      finite_mrt <- agg$mrt_max[is.finite(agg$mrt_max)]
-      gate <- if (length(finite_mrt)) 1.5 * stats::median(finite_mrt) else Inf
-      keep <- agg %>% filter(mrt_max <= gate); if (!nrow(keep)) keep <- agg
-      return(keep %>% arrange(desc(aps), mrt_sum, ls_sum) %>% slice(1) %>% pull(method))
-    }
-  }
-  # fallbacks: the risk CSV's own method (if it is a CV single model), then any Bayes single, then literal
-  if ("method" %in% names(rs)) {
-    mb <- intersect(unique(stats::na.omit(rs$method)), bayes_singles)
-    if (length(mb) >= 1) return(mb[1])
-  }
-  if (length(bayes_singles)) return(bayes_singles[1])
   if (fallback %in% lfo_methods) return(fallback)
+  if (length(bayes_singles)) return(bayes_singles[1])
   fallback
 }
 BEST_BAYES <- .pick_best_bayes(rs, lfo, ev, BEST_BAYES_FALLBACK)
@@ -256,22 +231,29 @@ message(sprintf("[figures] Featured Bayesian model: %s; LFO %d folds, %d h=1 eve
 # mirrors compute_detection_curve() / naive_epicentre_inflow_scores() exactly.
 # -----------------------------------------------------------------------------
 NAIVE_LBL <- "Naive-epicentre-inflow"
-# Naive per-zone score = population-weighted epicentre outflow reaching each zone (case-blind).
+# CALL THE PIPELINE'S SCORER, do not re-derive it. This block used to hand-roll the
+# population-weighted epicentre-outflow score: it took `zall` from the WorldPop file rather
+# than the canonical zone spine, and it omitted the alias harmonisation that
+# naive_epicentre_inflow_scores() applies — so a non-canonical epicentre spelling (the
+# pre-2026-07 "Mongbalu" for "Mongbwalu") silently dropped an origin here and changed the
+# population weighting, while leaving every other figure's baseline untouched. It was the
+# fourth independent copy of one quantity.
+#
+# NOTE ON SCOPE: this panel's "Naive-epicentre-inflow" is a DIFFERENT series from the three
+# Baseline-* structural nulls the manuscript figures publish (gravity M4 / Flowminder cohort /
+# OSRM travel time, see run_all.R). It is the primary kernel's own epicentre inflow, kept here
+# as this suite's long-standing comparator; the manuscript set is pinned to specific matrices
+# on purpose and does not follow MOBILITY_PRIMARY.
 NAIVE_SCORES <- tryCatch({
-  W   <- readRDS(file.path(OUT, "mobility", sprintf("mobility_%s.rds", .cfg("MOBILITY_PRIMARY", "M8"))))
-  wp  <- read_csv(file.path(.cfg("WORLDPOP_DIR",
-                 file.path(HERE, "..", "data", "worldpop", "processed")),
-                 "worldpop__pop_count__static.csv"), show_col_types = FALSE)
-  pv  <- setNames(wp$pop_count, wp$nom); zall <- names(pv)
-  ez  <- intersect(as.character(EPI_ZONES), rownames(W))
-  if (!length(ez)) stop("no epicentre zones in mobility matrix")
-  p <- as.numeric(pv[match(ez, names(pv))]); good <- is.finite(p) & p > 0
-  src <- if (!any(good)) rep(1, length(ez)) else { p[!good] <- stats::median(p[good]); p }
-  score <- as.numeric(crossprod(src, W[ez, , drop = FALSE])); names(score) <- colnames(W)
-  out <- setNames(rep(0, length(zall)), zall)
-  cm  <- intersect(zall, names(score)); out[cm] <- score[cm]
-  out[intersect(zall, ez)] <- 0                       # epicentre = origin, never an at-risk target
-  out
+  if (!exists("naive_epicentre_inflow_scores", mode = "function"))
+    source(file.path(HERE, "spatiotemporal", "20_forecast_detail.R"))
+  stopifnot(exists("MOBILITY_PRIMARY"))
+  .pk  <- MOBILITY_PRIMARY
+  .pkf <- file.path(OUT, "mobility", sprintf("mobility_%s.rds", .pk))
+  if (!file.exists(.pkf))
+    .pkf <- file.path(OUT, "mobility", sprintf("mobility_%s.rds", sub("-fill$", "", .pk)))
+  W   <- readRDS(.pkf)
+  naive_epicentre_inflow_scores(W, EPI_ZONES, load_population(), rownames(W))
 }, error = function(e) { message("[figures] naive baseline unavailable (", conditionMessage(e),
                                  "); prioritisation panel drawn without it."); NULL })
 
@@ -319,57 +301,30 @@ join_map <- function(dat) {
 # -----------------------------------------------------------------------------
 # 3. FIGURE 1 DATA  (onset-dated confirmed cases; pipeline-consistent)
 # -----------------------------------------------------------------------------
-ll <- suppressWarnings(read_csv(LINELIST, show_col_types = FALSE, guess_max = 10000)) %>%
-  mutate(onset  = suppressWarnings(as.Date(date_of_symptom_onset)),
-         sample = suppressWarnings(as.Date(date_of_sample_collection)),
-         confirmed = final_mve_case_classification == "confirmed_case")
-
-# --- reconcile the figure's line list to the INSP sitrep (SAME top-up the model applies) ---
-# load_linelist() reconciles the DHIS2 line list to the sitrep's cumulative confirmed counts in
-# memory (.build_sitrep_confirmed_appends): for zones the sitrep confirms but the line list has not
-# caught up on — e.g. Oicha — it appends the shortfall as confirmed rows. This figure reads the
-# processed CSV DIRECTLY (it never calls load_linelist), so without this it would silently omit
-# those zones and disagree with the invasion model. We reuse the pipeline's OWN helper (single
-# source of truth — no duplicated logic) and backfill `province` from the shapefile, since the
-# helper leaves it blank (the model derives province from the spine, not the line list). The
-# appended rows carry a sample date and blank onset, so the fixed-delay date_index logic below
-# dates them exactly as it already dates any other appended confirmation.
-try({
-  if (!exists(".build_sitrep_confirmed_appends"))
-    source(file.path(HERE, "spatiotemporal", "01_data_prep.R"))
-  .al <- if (exists("ALIASES_PATH") && file.exists(ALIASES_PATH))
-           suppressWarnings(readr::read_csv(ALIASES_PATH, show_col_types = FALSE,
-                            col_types = readr::cols(.default = "c"))) else NULL
-  .app <- .build_sitrep_confirmed_appends(ll, .al)
-  if (nrow(.app) > 0) {
-    prov_lk <- shp %>% st_drop_geometry() %>%
-      transmute(.k = .key, province = .prov) %>% distinct(.k, .keep_all = TRUE)
-    .app <- .app %>%
-      mutate(.k = tolower(trimws(health_zone))) %>%
-      left_join(prov_lk, by = ".k") %>% dplyr::select(-.k) %>%
-      mutate(onset     = suppressWarnings(as.Date(date_of_symptom_onset)),
-             sample    = suppressWarnings(as.Date(date_of_sample_collection)),
-             confirmed = final_mve_case_classification == "confirmed_case")
-    ll <- dplyr::bind_rows(ll, .app)
-    message(sprintf("[fig1] sitrep top-up: +%d confirmed row(s) across %d zone(s): %s",
-                    nrow(.app), dplyr::n_distinct(.app$health_zone),
-                    paste(sort(unique(.app$health_zone)), collapse = ", ")))
-  }
-}, silent = TRUE)
-
-# date_index: usable onset, else sample - mean delay, clamped to outbreak-week floor
+# The line list is the PIPELINE's. load_linelist() resolves the latest processed export,
+# reconciles it to the INSP sitrep cumulative (appending the shortfall as confirmed rows
+# for zones the line list has not caught up on), and imputes a missing onset by DRAWING
+# from the fitted onset->sample delay (epidist marginal-truncation-corrected gamma),
+# seeded from RANDOM_SEED. This figure therefore shows exactly the case set, zone set and
+# onset dates the invasion model is fitted and scored on.
+#
+# This script used to read the processed CSV directly and shift every missing onset back
+# by a single ROUNDED MEAN delay. A fixed shift is a different estimator: it collapses a
+# right-skewed gamma (mean 7.67 d, SD 8.50 d) onto its mean, so the panel's arrival dates
+# and cumulative curve matched no table in the pipeline, and the caption had to carry a
+# standing disclaimer saying so. Both are now gone.
+ll <- load_linelist()
 wk_floor <- floor_date(OUTBREAK_START, "week", week_start = 1)
-ll <- ll %>% mutate(
-  onset_usable = !is.na(onset) & onset >= wk_floor & (is.na(sample) | onset <= sample) &
-                 (is.na(sample) | onset >= sample - 90),
-  date_index = as.Date(ifelse(onset_usable, onset,
-                              pmax(sample - IMP_DELAY, wk_floor)), origin = "1970-01-01"))
-conf <- ll %>% filter(confirmed, !is.na(date_index), date_index >= wk_floor,
+stopifnot(all(c("health_zone", "province", "date_index", "confirmed", "onset_usable") %in% names(ll)))
+
+conf <- ll %>% filter(confirmed %in% TRUE, !is.na(date_index), date_index >= wk_floor,
                       !is.na(health_zone))
-# Share of confirmed cases whose onset was imputed (for the caption; computed, not
-# hardcoded). NB this standalone figure uses a FIXED onset<-sample shift (IMP_DELAY)
-# for legibility; the pipeline itself draws the onset->sample delay per record.
+# Share of confirmed cases whose onset was imputed (for the caption; computed, not hardcoded).
 PCT_IMPUTED <- round(100 * mean(!conf$onset_usable, na.rm = TRUE), 1)
+# The delay the caption quotes is READ from the shared resolver — the same object
+# load_linelist() drew from — not a second estimate computed here.
+ONSET_SAMPLE_MEAN <- effective_onset_sample_delay()$mean
+stopifnot(is.finite(ONSET_SAMPLE_MEAN), ONSET_SAMPLE_MEAN > 0)
 
 # 1A cumulative confirmed per zone
 zone_cum <- conf %>% group_by(health_zone, province) %>%
@@ -553,9 +508,17 @@ build_fig1 <- function() {
                        limits = c(0, NA)) + xsc +
     labs(y = "Health zones with\n>=1 confirmed case",
          x = "Symptom-onset date", caption =
-         paste0("Onset imputed (fixed ", IMP_DELAY, "-day shift) for the ", PCT_IMPUTED,
-                "% of cases lacking a usable onset; pipeline draws the delay per record.")) +
-    theme_pub(16.5) + theme(plot.margin = margin(0,8,6,6),
+         # The panel and the pipeline now share one estimator, so the caption states it once.
+         sprintf(paste0("Onset imputed for the %s%% of confirmed cases lacking a usable onset, ",
+                        "by drawing the onset-to-sample delay per record from the fitted, ",
+                        "truncation-corrected distribution (gamma, mean %.1f d) — the same draw ",
+                        "the invasion model is fitted on."), PCT_IMPUTED, ONSET_SAMPLE_MEAN)) +
+    # theme_pub() blanks plot.caption, so this disclosure was COMPUTED AND DISCARDED — a main-text
+    # figure in which a quarter of the plotted onsets are imputed said nothing about it. Re-enable
+    # the caption for this panel only.
+    theme_pub(16.5) +
+    theme(plot.caption = element_text(size = 7.5, colour = MUTED, hjust = 0)) +
+    theme(plot.margin = margin(0,8,6,6),
                             axis.text.x = element_text(size = 13.5))
   p1b <- top / bot + plot_layout(heights = c(1, 0.78))
 
@@ -604,7 +567,12 @@ make_f1a_allflows_panel <- function() {
   kin <- if (nrow(kin)) kin[which.max(kin$prop), , drop = FALSE] else NULL
 
   arr <- grid::arrow(length = unit(0.05, "in"), type = "closed", angle = 18)
-  cap_share <- if (is.finite(ITURI_PCT)) sprintf(" ~%.0f%% within %s.", ITURI_PCT, ITURI_PROV) else ""
+  # cap_share was built here and NEVER USED: this panel deliberately blanks plot.title,
+  # plot.subtitle and plot.caption ("no embedded titles — see FIGURE_CAPTIONS.md", below), so
+  # the string was formatted and discarded on every run. The convention is right — the captions
+  # live outside the figure — so the dead line is removed rather than rendered. The number
+  # itself (ITURI_PCT, the share of the epicentre's short-trip outflow staying within Ituri)
+  # is still COMPUTED and LOGGED where it is derived, and is available for the caption text.
   p <- ggplot(mp) +
     geom_sf(aes(fill = bin), colour = "white", linewidth = 0.06) +
     # every destination arc; width = outflow share, DIRECTIONAL (arrow epicentre -> destination)
@@ -658,33 +626,114 @@ build_fig2 <- function(model_labels = NULL, file_suffix = "", fig_w = 11.4, fig_
   # Panel E is the per-fold top-K bar chart (build_topk_folds). topk_horizon selects the
   # forecast lead (1 or 2 weeks); topk_nrow wraps the fold facets over that many rows so a
   # long fold sequence stays legible (one row of 9 folds is too narrow to read).
-  # Optional intuitive per-model relabelling (panels A-C carry model names). When
-  # model_labels is supplied, the model codes on the y-axes / legend are swapped for
-  # reader-friendly names and a decoding caption is added; NULL = original codes.
-  relab <- function(v) if (is.null(model_labels)) v else
-    unname(ifelse(as.character(v) %in% names(model_labels), model_labels[as.character(v)], as.character(v)))
-  y_relabel <- if (is.null(model_labels)) NULL else scale_y_discrete(labels = function(v) relab(v))
-  yt_size   <- if (is.null(model_labels)) 11 else 8.2
+  # Optional intuitive per-model relabelling (panels A-C carry model names). With
+  # model_labels = TRUE the model codes on the y-axes / legend are swapped for reader-friendly
+  # names and a decoding caption is added; FALSE/NULL keeps the raw codes.
+  #
+  # The names are GENERATED from the code (model_pretty_label(), 00_config.R), not looked up:
+  # the hand-written table this replaced was missing 12 of the 57 cross-validated models, so
+  # raw codes such as "Bayes-M8-dist-split-geo" were printed on the one figure whose entire
+  # purpose is to avoid them. model_pretty_label() still warns, naming any code it cannot
+  # decode, so a genuinely new token shows up in the run log rather than only in the PDF.
+  .use_labels <- isTRUE(model_labels) ||
+                 (!is.null(model_labels) && !is.logical(model_labels) && length(model_labels) > 0)
+  relab <- function(v) {
+    v <- as.character(v)
+    if (!.use_labels) return(v)
+    model_pretty_label(v)
+  }
+  y_relabel <- if (!.use_labels) NULL else scale_y_discrete(labels = function(v) relab(v))
+  yt_size   <- if (!.use_labels) 11 else 8.2
 
   # --- 2A discrimination: AUC-PR skill for the Bayesian grid, h1 & h2 ---
-  d <- ev %>% filter(str_detect(method, "^Bayes"), horizon %in% c(1,2)) %>%
-    mutate(lo = pmax(auc_pr_lo,0)/base_rate, hi = auc_pr_hi/base_rate)
+  # PANEL-A/C MODEL SET. The cross-validated Bayesian grid is 54 models. Panels A and C each
+  # occupy ~4.2 in of canvas height inside the composite, so drawing all 54 gives ~0.08 in per
+  # row against 8.2pt labels (~0.11 in) — the y-axis rendered as a solid block of overprinted
+  # text and neither panel could be read. Show the leading N_MODELS by 1-week AUC-PR skill
+  # (plus the featured model, wherever it ranks) at a legible row pitch; the COMPLETE 54-model
+  # grid, on both metrics, is published separately as bayes_discrimination_summary_h{1,2}.
+  # A and C use the SAME model set so the two panels can be read against each other.
+  N_MODELS <- 20L
+  # THE CANDIDATE GRID ONLY. Panels A and C are a comparison BETWEEN models, so they must hold
+  # only models that competed: the cross-validated specifications. Two kinds of row were being
+  # drawn alongside them and should not be.
+  #   * SENSITIVITY ARMS (-gtshort/-gtlong, -tv*) are refits of ONE specification at a changed
+  #     assumption. Ranking them against the field invites the reader to treat "short
+  #     generation time" as a rival model, which is exactly what composing the grid at a single
+  #     anchor is designed to prevent, and they are barred from selection for the same reason.
+  #   * ENSEMBLES (-ens-) are combinations OF the grid, not members of it, so they cannot be
+  #     read as one more kernel-plus-covariate choice.
+  # Both remain fully scored and published: the arms in the sensitivity table, the ensembles in
+  # the evaluation table and in bayes_discrimination_summary, which is the all-methods figure.
+  .sens_re <- get0("INVASION_SELECTION_EXCLUDE", ifnotfound = "-(gtshort|gtlong|tv[a-z0-9]+)$")
+  # THE STRUCTURAL BASELINES BELONG IN THIS PANEL. Filtering to "^Bayes" dropped them by
+  # construction, so the discrimination panel showed the fitted grid ranked only against
+  # itself -- the reader could not see how much of the skill is the model rather than the
+  # geography. Derived from the evaluation table rather than named here, so a change to the
+  # baseline set reaches the figure instead of silently leaving a hard-coded name behind.
+  .eval_methods   <- unique(ev$method)
+  .eval_baselines <- sort(setdiff(.eval_methods, grep("^Bayes", .eval_methods, value = TRUE)))
+  message(sprintf("[fig2] structural baselines in the evaluation table: %s",
+                  if (length(.eval_baselines)) paste(.eval_baselines, collapse = ", ") else "NONE"))
+  .is_primary <- function(m) grepl("^Bayes", m) & !grepl(.sens_re, m) & !grepl("-ens-", m)
+  d <- ev %>% filter(horizon %in% c(1,2),
+                     .is_primary(method) | method %in% .eval_baselines) %>%
+    mutate(lo = pmax(auc_pr_lo,0)/base_rate, hi = auc_pr_hi/base_rate,
+           family = factor(ifelse(method %in% .eval_baselines,
+                                  "Structural baseline", "Primary specification"),
+                           levels = c("Primary specification", "Structural baseline")))
+  if (!nrow(d)) stop("[fig2] no candidate specifications left after excluding arms and ensembles")
+  # Rank and cap the PRIMARY specifications only; every baseline present is always kept, so
+  # the comparator set cannot be truncated away by a grid that grew.
+  .prim <- d %>% filter(family == "Primary specification")
+  keep_models <- .prim %>% filter(horizon == 1, is.finite(auc_pr_skill)) %>%
+    arrange(desc(auc_pr_skill)) %>% pull(method)
+  if (!length(keep_models))
+    keep_models <- .prim %>% filter(is.finite(auc_pr_skill)) %>%
+      arrange(desc(auc_pr_skill)) %>% pull(method) %>% unique()
+  n_grid  <- dplyr::n_distinct(.prim$method)      # primary specifications cross-validated
+  n_basel <- length(.eval_baselines)
+  if (n_grid > N_MODELS)
+    message(sprintf("[fig2] %d primary specifications exceed the N_MODELS=%d cap; showing the leading %d.",
+                    n_grid, N_MODELS, N_MODELS))
+  keep_models <- unique(c(head(keep_models, N_MODELS), intersect(BEST_BAYES, .prim$method),
+                          .eval_baselines))
+  d <- d %>% filter(method %in% keep_models)
   ord <- d %>% filter(horizon == 1) %>% arrange(auc_pr_skill) %>% pull(method)
   if (!length(ord)) ord <- d %>% arrange(auc_pr_skill) %>% pull(method) %>% unique()
+  # COMPLETE the level set. ord is built from the h=1 rows only, so any model present at h=2
+  # but not at h=1 (the featured model is added to keep_models independently of its h=1 row)
+  # would become a factor NA and be dropped from the panel silently, with only a ggplot
+  # "removed rows" warning that nobody reads in a batch log.
+  ord <- unique(c(setdiff(unique(d$method), ord), ord))
   d <- d %>% mutate(method = factor(method, levels = ord),
                     hz = factor(horizon))
   p2a <- ggplot(d, aes(auc_pr_skill, method, colour = hz)) +
     geom_vline(xintercept = 1, linetype = "22", colour = FAINT) +
     geom_linerange(aes(xmin = lo, xmax = hi), position = position_dodge(width = .55),
                    linewidth = .5, alpha = .55) +
-    geom_point(position = position_dodge(width = .55), size = 1.9) +
+    geom_point(aes(shape = family), position = position_dodge(width = .55), size = 1.9) +
     scale_colour_manual(values = HZ_COL, name = "Horizon",
                         labels = c("1 week","2 weeks")) +
+    scale_shape_manual(values = c("Primary specification" = 16, "Structural baseline" = 17),
+                       name = NULL, drop = FALSE) +
     scale_x_continuous(expand = expansion(mult = c(0.02, 0.08))) +
     labs(title = "Discrimination of the Bayesian invasion models",
          subtitle = "AUC-PR skill = average precision / base rate  (1 = no skill; higher = better)",
          x = "AUC-PR skill (x base rate)", y = NULL,
-         caption = "Points = pooled leave-future-out estimate; bars = 90% zone-cluster bootstrap CI.") +
+         caption = sprintf(paste0("Points = pooled leave-future-out estimate; bars = 90%% zone-cluster ",
+                                  "bootstrap CI. %s of the %d primary specifications (circles), ",
+                                  "ordered by 1-week skill, against %s (triangles). Sensitivity arms ",
+                                  "(generation-time and time-varying refits) and the ensembles are ",
+                                  "also cross-validated but are excluded here; all methods appear in ",
+                                  "bayes_discrimination_summary."),
+                           if (dplyr::n_distinct(.prim$method[.prim$method %in% keep_models]) >= n_grid)
+                             "All" else sprintf("The leading %d",
+                               dplyr::n_distinct(.prim$method[.prim$method %in% keep_models])),
+                           n_grid,
+                           if (n_basel) sprintf("the %d structural baseline%s", n_basel,
+                                                if (n_basel == 1L) "" else "s")
+                           else "no structural baseline (none in the evaluation table)")) +
     theme_pub(13.5) +
     theme(panel.grid.major.y = element_blank(),
           axis.text.y = element_text(size = yt_size, colour = INK)) +
@@ -712,7 +761,10 @@ build_fig2 <- function(model_labels = NULL, file_suffix = "", fig_w = 11.4, fig_
     scale_x_continuous(expand = expansion(mult = c(0.01, 0.02))) +
     labs(title = "Real-time prioritisation skill",
          subtitle = "Invasions caught vs a random watch-list of the same size (1 week ahead)",
-         x = "Zones actively monitored each week (K)",
+         # STATE THE HORIZON. theme_pub() blanks plot.subtitle, which was the only text naming
+         # this panel as the 1-week task — while panel E is the 2-week task. A reader saw one
+         # panel labelled "2 weeks ahead" and the rest unlabelled.
+         x = "Zones actively monitored each round (K), 1 week ahead",
          y = "Share of true invasions caught") +
     theme_pub(13.5)
 
@@ -723,10 +775,20 @@ build_fig2 <- function(model_labels = NULL, file_suffix = "", fig_w = 11.4, fig_
   # Lower = the truly-invaded zones sat nearer the TOP of the model's watch-list (a direct
   # operational readout, complementary to AUC-PR). Sourced from invasion_evaluation.csv
   # (mean_rank_of_truth); the two horizons are joined per model so the h1->h2 shift is visible.
-  mr <- ev %>% filter(str_detect(method, "^Bayes"), horizon %in% c(1,2),
-                      is.finite(mean_rank_of_truth))
+  # Same model set as panel A (keep_models), for the same legibility reason and so the two
+  # panels are read against one another rather than against two different subsets.
+  # Membership is keep_models, which now carries the structural baselines as well as the
+  # primary specifications, so panels A and C describe the SAME set of methods.
+  mr <- ev %>% filter(horizon %in% c(1,2), is.finite(mean_rank_of_truth),
+                      method %in% keep_models) %>%
+    mutate(family = factor(ifelse(method %in% .eval_baselines,
+                                  "Structural baseline", "Primary specification"),
+                           levels = c("Primary specification", "Structural baseline")))
   ord_mr <- mr %>% filter(horizon == 1) %>% arrange(desc(mean_rank_of_truth)) %>% pull(method)
   if (!length(ord_mr)) ord_mr <- mr %>% arrange(desc(mean_rank_of_truth)) %>% pull(method) %>% unique()
+  # Complete the level set, as for panel A: mean_rank_of_truth can be finite at h=2 and missing
+  # at h=1, and such a model would otherwise become a factor NA and vanish from the panel.
+  ord_mr <- unique(c(setdiff(unique(mr$method), ord_mr), ord_mr))
   mr <- mr %>% mutate(method = factor(method, levels = ord_mr), hz = factor(horizon))
   mr_seg <- mr %>% dplyr::select(method, horizon, mean_rank_of_truth) %>%
     pivot_wider(names_from = horizon, values_from = mean_rank_of_truth, names_prefix = "mr")
@@ -734,13 +796,20 @@ build_fig2 <- function(model_labels = NULL, file_suffix = "", fig_w = 11.4, fig_
     { if (all(c("mr1","mr2") %in% names(mr_seg)))
         geom_segment(data = mr_seg, aes(x = mr1, xend = mr2, y = method, yend = method),
                      colour = FAINT, linewidth = 0.5, na.rm = TRUE, inherit.aes = FALSE) } +
-    geom_point(aes(colour = hz), size = 2) +
+    geom_point(aes(colour = hz, shape = family), size = 2) +
     scale_colour_manual(values = HZ_COL, name = "Horizon", labels = c("1 week","2 weeks")) +
+    scale_shape_manual(values = c("Primary specification" = 16, "Structural baseline" = 17),
+                       name = NULL, drop = FALSE) +
     scale_x_continuous(expand = expansion(mult = c(0.03, 0.08))) +
     labs(title = "Ranking accuracy for the invaded zones",
          subtitle = "Mean rank of the truly-invaded zones among at-risk zones (lower = nearer the top)",
          x = "Mean rank of invaded zones (lower is better)", y = NULL,
-         caption = "Rank of every invaded zone (tie-averaged), meaned per fold then over folds.") +
+         caption = sprintf(paste0("Rank of every invaded zone (tie-averaged), meaned per fold then ",
+                                  "over folds. The same %d methods as panel A (%d primary ",
+                                  "specifications, circles; %d structural baselines, triangles)."),
+                           dplyr::n_distinct(mr$method),
+                           dplyr::n_distinct(mr$method[!mr$method %in% .eval_baselines]),
+                           dplyr::n_distinct(mr$method[mr$method %in% .eval_baselines]))) +
     theme_pub(13.5) +
     theme(panel.grid.major.y = element_blank(),
           axis.text.y = element_text(size = yt_size, colour = INK)) +
@@ -752,10 +821,14 @@ build_fig2 <- function(model_labels = NULL, file_suffix = "", fig_w = 11.4, fig_
   # out of the top of the watch-list over time. (A true alluvial needs ggalluvial, not a pipeline
   # dependency; the bump chart conveys the same ranking evolution and always renders.)
   prov_lk <- rs %>% distinct(health_zone, province)
-  N_TOP <- 25L; RANK_FLOOR <- 30L
+  # DECLUTTERED 2026-09-17 (streamlining brief: "tidy up panels D and E"). 25 tracked zones
+  # produced 25 overlapping trajectories plus 25 ggrepel end-labels in a panel ~7 in wide,
+  # and the x-axis drew a dated break at EVERY fold cutoff. Track the top 15 (the top-K
+  # convention used by every other panel in the suite) and thin the axis labels below.
+  N_TOP <- 15L; RANK_FLOOR <- 30L
   rk <- lfo %>% filter(method == BEST_BAYES, horizon == 1, is.finite(p_invasion),
                        !(was_active_before %in% TRUE)) %>%
-    mutate(cutoff = as.Date(cutoff)) %>%
+    mutate(cutoff = lfo_origin(cutoff)) %>%   # label/plot rounds by FORECAST ORIGIN
     group_by(cutoff) %>% mutate(rank = rank(-p_invasion, ties.method = "min")) %>% ungroup()
   p2f <- NULL
   if (nrow(rk) > 0 && dplyr::n_distinct(rk$cutoff) >= 2) {
@@ -779,17 +852,27 @@ build_fig2 <- function(model_labels = NULL, file_suffix = "", fig_w = 11.4, fig_
       scale_y_reverse(breaks = c(1,5,10,15,20,25,30),
                       labels = c("1","5","10","15","20","25","30+"),
                       expand = expansion(mult = c(0.04, 0.04))) +
-      scale_x_date(date_labels = "%d %b", breaks = sort(unique(traj$cutoff)),
+      # DATED TICKS, THINNED TO WHAT THE PANEL CAN ACTUALLY SHOW. Labelling every other round
+      # put 7 dates on a half-width panel and they overprinted ("19 May02 Jun16 Jun30 Jun...").
+      # The panel is ~6 in wide and a "19 May" label is ~0.55 in at this base size, so five
+      # labels is the honest ceiling; the points themselves still mark EVERY round, and the
+      # first and last are always labelled because they bound the trajectory the reader is
+      # asked to follow. .thin_date_breaks() keeps this correct as the fold count grows.
+      scale_x_date(date_labels = "%d %b",
+                   breaks = .thin_date_breaks(traj$cutoff, max_n = 5L),
                    expand = expansion(mult = c(0.03, 0.30))) +
       scale_colour_manual(values = PROV_COL, name = "Province", breaks = reg_levels,
                           na.value = "#7A7A7A") +
       labs(title = "Invasion-ranking evolution across forecast rounds",
-           subtitle = sprintf("Rank of each zone's 1-week invasion risk (1 = highest); the current top %d, tracked over folds", N_TOP),
-           x = "Forecast round (fold cutoff)", y = "Invasion-risk rank",
+           subtitle = sprintf("Rank of each zone's 1-week invasion risk (1 = highest); the current top %d, tracked over rounds", N_TOP),
+           x = "Forecast origin (as-of date)", y = "1-week invasion-risk rank (1 = highest)",
            caption = "Each line = a zone currently in the top watch-list; ranks worse than 30 shown at the 30+ baseline.") +
       theme_pub(13.5) +
       theme(legend.position = "right",
-            panel.grid.major.y = element_line(colour = GRID, linewidth = 0.3))
+            panel.grid.major.y = element_line(colour = GRID, linewidth = 0.3),
+            # A slight angle buys the width the thinning cannot: five horizontal dates still
+            # sit close on this panel once the ggrepel label gutter is subtracted.
+            axis.text.x = element_text(angle = 30, hjust = 1))
   }
   if (is.null(p2f))
     p2f <- ggplot() + annotate("text", x = 0, y = 0, label = "Ranking evolution unavailable\n(need >= 2 folds)",
@@ -803,18 +886,38 @@ build_fig2 <- function(model_labels = NULL, file_suffix = "", fig_w = 11.4, fig_
   # Bottom row: the top-K predicted invasion risks per fold, coloured by realised outcome
   # (the F_topk_folds bar chart, embedded without its standalone title). Spans full width;
   # topk_nrow wraps the fold facets over multiple rows for legibility.
+  # max_facets = 6: embedded in Figure 2 this row previously carried one narrow facet per
+  # fold (14 of them), at which width the per-zone labels are unreadable in print. Six evenly
+  # spaced rounds, first and last always kept, keep the trajectory legible. The standalone
+  # F_topk_folds_h1/h2 panels below still show every round.
   p_topk1 <- build_topk_folds(horizon = topk_horizon, facet_nrow = topk_nrow,
-                              save = FALSE, embed = TRUE)
+                              save = FALSE, embed = TRUE, max_facets = 6L)
 
   # Decoding caption for the reader-friendly labelled variant (added only when model_labels set).
-  cap2 <- if (is.null(model_labels)) NULL else stringr::str_wrap(paste0(
+  # The caption must decode the tokens the panels ACTUALLY carry. It used to list every token
+  # the grid can generate, including "+ suspected" and "ensemble", which panels A and C no
+  # longer show; a glossary for absent terms sends the reader looking for rows that are not
+  # there. Each clause is now gated on its token appearing in the drawn labels.
+  # relab() is the same function the y axis uses, so the glossary is gated on exactly the
+  # strings the reader sees rather than on the raw method codes.
+  .lab_txt <- paste(relab(unique(as.character(d$method))), collapse = " ")
+  .clause <- function(tok, txt) if (grepl(tok, .lab_txt, fixed = TRUE)) txt else NULL
+  cap2 <- if (!.use_labels) NULL else stringr::str_wrap(paste0(
     "Model = the spatial mobility kernel driving invasion risk: gravity / composite gravity / ",
-    "radiation-composite, their Flowminder cohort and combined-static counterparts, and multi-kernel ",
-    "or all-kernel consensus ensembles of these. \"+ covariates\" = geographic & social covariates ",
-    "modulate the import-to-invasion rate (base models use a single constant rate); \"road-km\" = ",
-    "road-distance rather than travel-time deterrence; \"+ suspected\" = suspected-case leading ",
-    "indicators; \"short/long gen.\" = assumed generation-time profile; \"ensemble\" = stacked average ",
-    "across models."),
+    "radiation-composite, their Flowminder cohort and relocation-OD counterparts, and the ",
+    "all-kernel consensus over these. ",
+    paste(Filter(Negate(is.null), list(
+      .clause("covariates", paste0(
+        "\"+ covariates\" = geographic & social covariates modulate the import-to-invasion rate ",
+        "(base models use a single constant rate)")),
+      .clause("road-km", "\"road-km\" = road-distance rather than travel-time deterrence"),
+      .clause("source-filled", paste0(
+        "\"source-cell fill\" = destinations the mobility source could not observe are taken ",
+        "from the base kernel rather than assumed zero")),
+      .clause("suspected", "\"+ suspected\" = suspected-case leading indicators"),
+      .clause("ensemble", "\"ensemble\" = mean / median across models"))),
+      collapse = "; "),
+    ". Sensitivity arms and ensembles are not shown here; see bayes_discrimination_summary."),
     width = 180)
 
   # No embedded figure title/subtitle — only the panel tags. Figure 2 carries the
@@ -879,12 +982,13 @@ build_fig3 <- function() {
   }
 
   # --- 3A relative-risk map (viridis; TRUE relative invasion risk on a log10 0-1 scale) ---
-  # rr01_nat is heavily right-skewed (~78% of at-risk zones < 0.01), so a linear 0-1 fill collapses
-  # the national map to a single dark hue. A log10 fill shows HONEST magnitudes (risk truly
-  # concentrated near the epicentre) while staying legible; the pseudo-log floor RR_FLOOR absorbs
-  # the ~0.4% of zones with exactly-zero relative risk (log(0) is undefined).
+  # rr01_nat is heavily right-skewed (relative risk is concentrated near the epicentre), so a
+  # linear 0-1 fill collapses the national map to a single dark hue. A log10 fill shows HONEST
+  # magnitudes while staying legible. log10 is undefined at 0 and unbounded below, so the scale
+  # is floored at RR_FLOOR: every zone at or below it renders in the floor colour and the first
+  # legend tick reads "<=0.001" rather than implying an exact value.
   sc_rank <- scale_fill_viridis_c(option="viridis", trans="log10", limits=c(RR_FLOOR, 1),
-              breaks=c(0.001,0.01,0.1,1), labels=c("0.001","0.01","0.1","1"),
+              breaks=c(0.001,0.01,0.1,1), labels=c("<=0.001","0.01","0.1","1"),
               na.value=NA_FILL, name="Relative\ninvasion risk\n(log, 0-1)", direction=1)
   a1 <- one_map(1, "rr_log", sc_rank, hz_lab(1)); a2 <- one_map(2, "rr_log", sc_rank, hz_lab(2))
   p3a <- (a1 | a2) + plot_layout(guides="collect") &
@@ -1001,8 +1105,12 @@ tidytext_scale_y <- function() scale_y_discrete(labels = function(z) sub("___.*$
 #' @param save    write the standalone F_topk_folds_h<h> panel (PDF+PNG).
 #' @param embed   drop the embedded title/subtitle and enlarge the base size so the
 #'   panel sits cleanly as a tagged row inside Figure 2 (which carries no titles).
+#' @param max_facets show at most this many forecast rounds, evenly spaced and ALWAYS
+#'   including the first and last. NA (default) keeps every round. Embedded in Figure 2 the
+#'   full set was 14 narrow facets whose per-zone labels were unreadable at print size; the
+#'   standalone F_topk_folds panels keep every round, since they have the width for it.
 build_topk_folds <- function(top_k = 12L, horizon = 1L, save = TRUE, embed = FALSE,
-                             facet_nrow = 1L) {
+                             facet_nrow = 1L, max_facets = NA_integer_) {
   OUT_HIT  <- "#D55E00"   # invaded (first case occurred)  — Okabe-Ito vermilion
   OUT_MISS <- "grey75"    # not invaded this round
   OUT_COL  <- c("Invaded (first case)" = OUT_HIT, "Not invaded" = OUT_MISS)
@@ -1014,8 +1122,26 @@ build_topk_folds <- function(top_k = 12L, horizon = 1L, save = TRUE, embed = FAL
 
   # top-K zones by predicted probability WITHIN each fold. Facet header = round + date only.
   d <- d %>% mutate(cutoff = as.Date(cutoff))
-  fold_ord <- sort(unique(d$cutoff))
-  lab_lk   <- setNames(sprintf("Round %d — %s", seq_along(fold_ord), format(fold_ord, "%d %b")),
+  fold_ord_all <- sort(unique(d$cutoff))
+  # Round NUMBERS are assigned over ALL folds before any subsetting, so a displayed facet
+  # keeps its true round index (dropping rounds must not renumber the survivors).
+  round_no <- setNames(seq_along(fold_ord_all), as.character(fold_ord_all))
+  fold_ord <- if (!is.na(max_facets) && length(fold_ord_all) > max_facets)
+    fold_ord_all[unique(round(seq(1, length(fold_ord_all), length.out = max_facets)))]
+    else fold_ord_all
+  if (length(fold_ord) < length(fold_ord_all))
+    message(sprintf("[topk_folds] showing %d of %d rounds (evenly spaced, first and last kept).",
+                    length(fold_ord), length(fold_ord_all)))
+  d <- d %>% filter(cutoff %in% fold_ord)
+  # Facet label: round number only when the panel is embedded (the dates are on panel D's
+  # axis and in the caption); round + date on the standalone panel, which has room.
+  # Round number AND date even when embedded. The justification for dropping the date ("the dates
+  # are on panel D's axis and in the caption") was false: panel D shows dates without round
+  # numbers, and the only surviving caption is the model-decoding text.
+  lab_lk   <- setNames(if (embed) sprintf("R%d - %s", round_no[as.character(fold_ord)],
+                                          format(lfo_origin(fold_ord), "%d %b"))
+                       else sprintf("Round %d - %s", round_no[as.character(fold_ord)],
+                                    format(lfo_origin(fold_ord), "%d %b")),
                        as.character(fold_ord))
 
   topk <- d %>% group_by(cutoff) %>%
@@ -1037,8 +1163,12 @@ build_topk_folds <- function(top_k = 12L, horizon = 1L, save = TRUE, embed = FAL
     scale_fill_manual(values = OUT_COL, name = NULL, drop = FALSE) +
     scale_x_continuous(labels = percent_format(1), limits = c(0, NA),
                        expand = expansion(mult = c(0, 0.06)), breaks = scales::pretty_breaks(3)) +
+    # The horizon must survive `embed = TRUE`. Embedded in Figure 2 this panel drops its title
+    # AND subtitle, which were the only text naming it as the 2-week task — while panel B's axis
+    # says "each week" and panels A/C carry a 1-week/2-week legend. A reader had no way to tell.
     labs(title = ttl, subtitle = sub,
-         x = "Predicted invasion probability, P(first case)", y = NULL) +
+         x = sprintf("Predicted invasion probability, P(first case), %d week%s ahead",
+                     horizon, if (horizon == 1L) "" else "s"), y = NULL) +
     theme_pub(base_sz) +
     # strip.clip = "off" keeps the per-round facet header from being clipped to its narrow strip
     theme(panel.grid.major.y = element_blank(),
@@ -1070,11 +1200,25 @@ ok2 <- run(build_fig2, "Figure 2")
 # Reader-friendly variant: intuitive model names on A/C, plus a 2-week-horizon panel E
 # with the per-fold facets wrapped over two rows (legible where a single row is too narrow).
 # The taller two-row panel E needs extra canvas height.
-ok2b <- run(function() build_fig2(model_labels = MODEL_LABELS, file_suffix = "_labelled",
+ok2b <- run(function() build_fig2(model_labels = TRUE, file_suffix = "_labelled",
                                   fig_w = 12.6, fig_h = 17.4,
                                   topk_horizon = 2L, topk_nrow = 2L), "Figure 2 (labelled)")
 ok3 <- run(build_fig3, "Figure 3")
 okt <- run(function() { build_topk_folds(horizon = 1L); build_topk_folds(horizon = 2L) },
            "Top-K per-fold outcome bars")
-message(sprintf("\n[done] Figure1:%s  Figure2:%s  Figure2-labelled:%s  Figure3:%s  TopKfolds:%s  ->  %s",
-                ok1, ok2, ok2b, ok3, okt, FIG_DIR))
+# `oka` was built and then never reported: Figure 1A (all outflows) could fail and leave no
+# trace in the [done] line at all. Every panel this script builds is listed here.
+message(sprintf(paste0("\n[done] Figure1:%s  Figure1A-allflows:%s  Figure2:%s  ",
+                       "Figure2-labelled:%s  Figure3:%s  TopKfolds:%s  ->  %s"),
+                ok1, oka, ok2, ok2b, ok3, okt, FIG_DIR))
+
+# A FAILED PANEL MUST FAIL THE SCRIPT -- see the same note in make_manuscript_figures.R.
+# `run()` catches so one broken panel does not cost the others, but reaching the end and
+# exiting 0 told run_all.R the suite was fine while the previous run's PDF stayed on disk.
+.panels <- c(Figure1 = ok1, `Figure1A-allflows` = oka, Figure2 = ok2,
+             `Figure2-labelled` = ok2b, Figure3 = ok3, TopKfolds = okt)
+if (any(!.panels))
+  stop(sum(!.panels), " of ", length(.panels), " panel(s) failed: ",
+       paste(names(.panels)[!.panels], collapse = ", "),
+       ". Their files on disk are from an earlier run -- see the messages above for each cause.",
+       call. = FALSE)

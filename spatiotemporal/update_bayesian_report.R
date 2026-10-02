@@ -18,7 +18,7 @@
 #   outputs/forecasts/bayes_stacking_weights.rds  loo predictive-stacking weights
 #   outputs/forecasts/bayes_risk_scores_current.rds  featured-model current forecast
 #   outputs/reports/invasion_report.md            (only) the total confirmed-case count
-#   00_config.R                                   ANALYSIS_DATE, ASCERTAINMENT grid
+#   00_config.R                                   ANALYSIS_DATE
 #   16_invasion_eval.R                            best_invasion_model() (featured pick)
 #
 # The featured single Bayesian model is chosen by the SAME calibration-aware CV
@@ -32,14 +32,14 @@
 # =============================================================================
 
 suppressWarnings(suppressMessages({
-  library(here); library(dplyr); library(readr); library(stringr)
+  library(here); library(dplyr); library(readr); library(stringr); library(jsonlite)
 }))
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0 ||
                             (length(a) == 1 && is.na(a))) b else a
 
 ST_DIR <- file.path(here::here(), "spatiotemporal")
-# Load config (paths, ANALYSIS_DATE, ascertainment grid) and the evaluation helpers
+# Load config (paths, ANALYSIS_DATE) and the evaluation helpers
 # (best_invasion_model) — the SAME selector the pipeline features with, so this report
 # can never disagree with run_all.R on which model is featured.
 suppressWarnings(suppressMessages({
@@ -122,6 +122,12 @@ inject <- function(txt, key, content) {
 # to leave the block unchanged (missing inputs).
 # ---------------------------------------------------------------------------
 blocks <- list()
+# The set of keys to inject is taken from the MARKERS IN THE REPORT (see the Apply section),
+# not from names(blocks). NEEDED because `blocks$k <- local({...})` DELETES the element when
+# the generator returns NULL (R drops a NULL assigned with `$`), so iterating names(blocks)
+# makes the "no data" branch unreachable: a block that silently failed to regenerate is
+# indistinguishable from one that was never meant to change, and the report ships whatever
+# stale text the marker still holds with no warning anywhere.
 
 # --- data_summary: intro one-liner (dates, at-risk/total, confirmed/affected) ------
 blocks$data_summary <- local({
@@ -142,9 +148,22 @@ blocks$data_summary <- local({
     if (!is.na(m[1, 2])) conf <- as.integer(gsub(",", "", m[1, 2]))
   }
   conf_txt <- if (is.na(conf)) "the confirmed" else format(conf, big.mark = ",")
-  sprintf(paste0("The live forecast (analysis date %s, cutoff %s) covers **%d at-risk zones** ",
+  # The CUTOFF is not the analysis date. This line filled both slots from `ad`, so it always
+  # asserted they coincide; the pipeline records them separately in run_info.json
+  # (linelist_cutoff_date = the last week-anchor start used for training, training_window_end =
+  # the last day carrying training data), and on the shipped run they differ (2026-09-01 vs
+  # 2026-09-07). They coincide only when the final week carries data, which run_all.R warns
+  # about precisely because it is not guaranteed.
+  .cut <- local({
+    ri <- file.path(O, "key_outputs", "run_info.json")
+    if (!file.exists(ri)) return(NA_character_)
+    v <- tryCatch(jsonlite::fromJSON(ri, simplifyVector = TRUE)$linelist_cutoff_date,
+                  error = function(e) NULL)
+    if (is.null(v) || length(v) != 1L || is.na(v)) NA_character_ else as.character(v)
+  })
+  sprintf(paste0("The live forecast (analysis date %s, training cutoff %s) covers **%d at-risk zones** ",
                  "out of %d, with %s confirmed cases across %d affected zones."),
-          ad, ad, at_risk, n_zones, conf_txt, affected)
+          ad, if (is.na(.cut)) ad else .cut, at_risk, n_zones, conf_txt, affected)
 })
 
 # --- sample_events: §1 sample-size caveat (events + base rates) --------------------
@@ -202,14 +221,39 @@ blocks$featured_pick <- local({
   fr2 <- if (!is.null(ev2)) ev2 %>% dplyr::filter(method == featured) else NULL
   if (!nrow(fr)) return(NULL)
   skill <- f1(fr$auc_pr_skill[1]); calib <- f1(fr$calibration_in_large[1])
+  # CHECK the superlative instead of asserting it. "the tightest calibration among the leaders"
+  # was hard-coded prose: on the shipped run Bayes-M16-fill-med was tighter (1.991 vs 2.033),
+  # and the leaderboard printed immediately above rounds both to 2.0x, so the table visibly tied
+  # while the prose claimed a win. Calibration-in-the-large is best at 1, so "tightest" means
+  # smallest |x - 1| among the same six models the leaderboard block lists.
+  calib_word <- local({
+    lead <- ev1 %>% dplyr::filter(grepl("^Bayes", method), !grepl("-ens-", method))
+    if ("partial_cv" %in% names(lead)) lead <- lead %>% dplyr::filter(!(partial_cv %in% TRUE))
+    lead <- lead %>% dplyr::arrange(dplyr::desc(auc_pr_skill)) %>% utils::head(6)
+    d <- abs(lead$calibration_in_large - 1)
+    if (!nrow(lead) || !any(is.finite(d))) "competitive"
+    else if (identical(lead$method[which.min(d)], featured)) "the tightest"
+    else "competitive"
+  })
   rank2 <- if (!is.null(fr2) && nrow(fr2)) f1(fr2$mean_rank_of_truth[1]) else "?"
-  auroc <- if ("auc_roc" %in% names(ev1)) f2(max(ev1$auc_roc, na.rm = TRUE)) else "0.99"
+  # NEVER fabricate the number. The fallback used to be the literal "0.99", so a run whose
+  # evaluation table lacked auc_roc would publish a discrimination figure nothing computed
+  # (and one that rounds the real value, ~0.98, upward).
+  # SAME FIELD AS THE LEADERBOARD. max() ran over EVERY h=1 row — the three structural
+  # baselines and any partial_cv rows included — so "best AUC-ROC" could be a rank-only
+  # comparator's number published as the Bayesian suite's discrimination. It lands on a
+  # Bayesian model on the current frame by luck, not by construction.
+  .ev1_elig <- ev1[grepl("^Bayes", ev1$method) &
+                     !(ev1$partial_cv %in% TRUE), , drop = FALSE]
+  if (!nrow(.ev1_elig)) .ev1_elig <- ev1
+  auroc <- if ("auc_roc" %in% names(.ev1_elig) && any(is.finite(.ev1_elig$auc_roc)))
+             f2(max(.ev1_elig$auc_roc, na.rm = TRUE)) else "not computed in this run"
   sprintf(paste0("The featured model is chosen by the **CV composite** (summed within-horizon ranks of ",
     "AUC-PR skill + mean rank-of-truth + log-score, pooled over both horizons): **%s** wins it, pairing ",
-    "solid discrimination (*h*=1 AUC-PR skill %s%s) with the tightest calibration (%s%s) among the leaders ",
+    "solid discrimination (*h*=1 AUC-PR skill %s%s) with %s calibration (%s%s) ",
     "and a strong mean rank of truth at *h*=2 (%s). Best AUC-ROC %s %s. The **loo stacking weights** are ",
     "used only to build the loo-stacked ENSEMBLE (`bayes_ensemble_*`), NOT to pick the featured single model."),
-    featured, skill, TIMES, calib, TIMES, rank2, "≈", auroc)
+    featured, skill, TIMES, calib_word, calib, TIMES, rank2, "≈", auroc)
 })
 
 # --- stacking_weights: §5 the loo-stacking weight spread ---------------------------
@@ -265,7 +309,7 @@ blocks$top_zones <- local({
             f3(d$p_case_invasion[i]), cri(d$p_lo[i], d$p_hi[i], 3),
             f1(d$rr_nat[i]), TIMES), character(1))
   cap <- sprintf(paste0("**Highest-risk at-risk zones (%s, next week, posterior mean [90 %% CrI]).** ",
-    "These are the top of the national invasion-rank map (**Figure 3A**), and their posterior spread ",
+    "These are the top of the national relative-invasion-risk map (**Figure 3A** of `key_outputs/figures/Figure3`; the rank map is `bayes_invasion_rank_map_national_h*`), and their posterior spread ",
     "is shown zone-by-zone in **Figure 3C** (1- vs 2-week merged); the companion uncertainty map ",
     "(**Figure 3B**) locates where those forecasts are least certain."), featured)
   paste(c(cap, "",
@@ -277,18 +321,29 @@ blocks$top_zones <- local({
 # Decode a Bayes-<...> label into a short human description so the sentence stays true
 # to the actually-featured model (kernel family / GT / covariates / road-distance).
 describe_bayes <- function(lbl) {
-  mob  <- sub("^Bayes-(M[0-9]+[a-z]?)(-dist)?.*$", "\\1", lbl)
-  fam  <- c(M4 = "gravity", M8 = "composite-gravity", M9 = "multi-kernel ensemble",
-            M10 = "radiation-composite", M11 = "inward meeting-location FOI")[mob]
-  fam  <- if (is.na(fam)) mob else fam
+  # Use the canonical parser (00_config.R): a local regex dropped the -fill / -split tokens
+  # and described a filled composite as its unfilled parent.
+  kern <- mobility_kernel_from_method(lbl)
+  base <- if (is.na(kern)) sub("^Bayes-", "", lbl)
+          else sub("-(dist|fill|split)", "", gsub("-(dist|fill|split)", "", kern))
+  fam  <- c(M4 = "gravity", M8 = "short-trip + gravity composite",
+            M9 = "multi-kernel ensemble", M10 = "short-trip + radiation composite",
+            M11 = "inward meeting-location FOI", M13 = "cohort + gravity composite",
+            M14 = "cohort + radiation composite", M15 = "symmetrised relocation OD",
+            M16 = "cohort + relocation OD composite",
+            M17 = "all-kernel consensus ensemble")[base]
+  fam  <- if (is.na(fam)) base else fam
   gt   <- if (grepl("-short", lbl)) "short" else if (grepl("-long", lbl)) "long" else "medium"
   cov  <- if (grepl("full-susp", lbl)) "full exogenous + suspected-case covariates"
           else if (grepl("-susp", lbl)) "suspected-case covariates"
           else if (grepl("-full", lbl)) "full exogenous covariates"
           else if (grepl("-geo", lbl))  "geo covariates"
           else "no covariates"
-  sprintf("the %s kernel%s with the %s generation-time profile, %s",
-          fam, if (grepl("-dist", lbl)) " on road distance" else "", gt, cov)
+  qual <- paste0(
+    if (!is.na(kern) && grepl("-dist", kern)) " on road distance" else "",
+    if (!is.na(kern) && grepl("-split", kern)) ", cohort rows split per origin" else "",
+    if (!is.na(kern) && grepl("-(fill|split)", kern)) ", with source-cell fill" else "")
+  sprintf("the %s kernel%s with the %s generation-time profile, %s", fam, qual, gt, cov)
 }
 blocks$featured_name <- local({
   if (is.null(featured) || is.na(featured)) return(NULL)
@@ -297,7 +352,7 @@ blocks$featured_name <- local({
           featured, describe_bayes(featured))
 })
 
-# --- targeting: §5 Figure 2C top-10 catch-rate vs random (operational lift) --------
+# --- targeting: §5 Figure 2B top-10 catch-rate vs random (operational lift) --------
 blocks$targeting <- local({
   if (is.null(ev1)) return(NULL)
   fr <- ev1 %>% dplyr::filter(method == featured)
@@ -306,9 +361,29 @@ blocks$targeting <- local({
   per_fold <- (fr$n_atrisk[1] %||% NA) / (fr$n_folds[1] %||% NA)   # at-risk zones per fold
   rnd <- if (is.finite(per_fold) && per_fold > 0) min(10 / per_fold, 1) else NA
   if (!is.finite(rec) || !is.finite(rnd) || rnd <= 0) return(NULL)
-  sprintf(paste0("**Operationally useful targeting (Figure 2C).** A top-10 watch-list catches ~%.0f %% ",
-                 "of the next invasions versus ~%.0f %% for a random list of the same size (a ~%.0f%s lift)."),
+  sprintf(paste0("**Operationally useful targeting (the prioritisation panel, Figure 2B of `key_outputs/figures/Figure2_labelled`).** A top-10 watch-list catches ~%.0f %% ",
+                 "of the next invasions per round (mean over folds; the panel's pooled curve reads slightly higher) versus ~%.0f %% for a random list of the same size (a ~%.0f%s lift)."),
           100 * rec, 100 * rnd, rec / rnd, TIMES)
+})
+
+# --- calibration: §5 calibration-in-the-large for the FEATURED model ---------------
+# Replaces a hand-written "~2-3x (2.6x for Bayes-M10-med)": both the magnitude and the model
+# name were literals that no longer tracked the featured pick or the current folds.
+# cal_in_large = mean(predicted p) / observed base rate over the leave-future-out rows, so
+# >1 is over-prediction and the ratio is read directly as the over-prediction factor.
+blocks$calibration <- local({
+  fp <- file.path(O, "diagnostics", "invasion_recalibration.csv")
+  if (is.null(featured) || is.na(featured) || !file.exists(fp)) return(NULL)
+  rc <- tryCatch(readr::read_csv(fp, show_col_types = FALSE), error = function(e) NULL)
+  if (is.null(rc) || !all(c("method","horizon","cal_in_large") %in% names(rc))) return(NULL)
+  r <- rc %>% dplyr::filter(method == featured, is.finite(cal_in_large)) %>%
+    dplyr::arrange(horizon)
+  if (!nrow(r)) return(NULL)
+  bits <- sprintf("%.1f%s at *h*=%d", r$cal_in_large, TIMES, as.integer(r$horizon))
+  sprintf(paste0("Over the leave-future-out folds the featured model **%s** over-predicts the ",
+                 "absolute invasion probability by %s (calibration-in-the-large = mean predicted ",
+                 "probability / observed base rate)."),
+          featured, paste(bits, collapse = " and "))
 })
 
 # --- priority: §5 vulnerability-adjusted preparedness priority list ----------------
@@ -321,22 +396,87 @@ blocks$priority <- local({
   sprintf("Top priorities are %s.", lst)
 })
 
+# --- onset_imputation: §1 share + mechanism, read from run_info.json --------
+# This sentence used to be hand-written ("~15 % ... onset = sample_date - Delta"). Both halves
+# went stale: the realised share is ~24 %, and the delay is now drawn from the shared
+# truncation-corrected EpiDist fit rather than a fixed shift. Deriving it from the run's own
+# metadata is the only way it cannot drift from the code again.
+blocks$onset_imputation <- local({
+  ri <- file.path(O, "key_outputs", "run_info.json")
+  if (!file.exists(ri)) return(NULL)
+  oi <- tryCatch(jsonlite::fromJSON(ri, simplifyVector = TRUE)$onset_imputation,
+                 error = function(e) NULL)
+  if (is.null(oi) || is.null(oi$mechanism) || is.na(oi$mechanism)) return(NULL)
+  pct  <- suppressWarnings(as.numeric(oi$confirmed_pct))
+  lpct <- suppressWarnings(as.numeric(oi$linelist_pct))
+  nsit <- suppressWarnings(as.numeric(oi$n_sitrep_rows))
+  share <- if (is.finite(pct)) sprintf("The %.0f %% of confirmed records that lack", pct)
+           else "Confirmed records that lack"
+  # Say what that percentage is made of. It is NOT all DHIS2 reporting incompleteness: the
+  # sitrep-reconciliation rows are a count reconciliation with no onset by construction, so
+  # quoting only the combined figure overstates line-list missingness.
+  split_sentence <- if (is.finite(pct) && is.finite(lpct) && is.finite(nsit) && nsit > 0)
+    sprintf(paste0(" That figure combines **%.0f %%** genuine missingness in the DHIS2 line ",
+                   "list with %s sitrep-reconciliation records, which carry no onset date by ",
+                   "construction and are therefore imputed in full."),
+            lpct, format(nsit, big.mark = ",")) else ""
+  # The fitted delay's mean and family are read from the fit summary the pipeline actually
+  # wrote, not asserted: the report previously claimed "mean ~5.9 d" where the deployed,
+  # truncation-corrected fit is materially longer.
+  fit_sentence <- local({
+    fp <- file.path(O, "diagnostics", "delay_fits", "dhis2_delay_fit_summary.csv")
+    if (!file.exists(fp)) return("")
+    f <- tryCatch(readr::read_csv(fp, show_col_types = FALSE), error = function(e) NULL)
+    if (is.null(f) || !nrow(f)) return("")
+    r <- f %>% dplyr::filter(delay == "onset_sample", estimator == "epidist_marginal",
+                             plotted %in% TRUE, is.finite(mean_d))
+    if (!nrow(r)) return("")
+    r <- r[1, ]
+    ci <- if (is.finite(r$mean_lo) && is.finite(r$mean_hi))
+            sprintf(" [%.1f, %.1f]", r$mean_lo, r$mean_hi) else ""
+    sprintf(paste0(" The deployed fit is a **%s** with a corrected mean of **%.1f d**%s ",
+                   "(n = %s complete pairs)."),
+            r$family, r$mean_d, ci, format(r$n, big.mark = ","))
+  })
+  sprintf(paste0("  %s an onset date receive an imputed onset `onset = sample_date - Delta`, ",
+                 "where the pipeline draws Delta **per record** via %s.%s%s"),
+          share, oi$mechanism, fit_sentence, split_sentence)
+})
+
 # ---------------------------------------------------------------------------
 # Apply
 # ---------------------------------------------------------------------------
 if (!file.exists(REPORT_PATH)) stop("[update_report] report not found: ", REPORT_PATH, call. = FALSE)
 orig <- paste(readLines(REPORT_PATH, warn = FALSE), collapse = "\n")
+# Cross-check generators against the report's own markers, both directions: a generator with no
+# marker would never be injected, and a marker with no generator would keep stale text forever.
+BLOCK_KEYS <- unique(stringr::str_match_all(orig, "<!-- AUTOGEN:([A-Za-z0-9_]+) -->")[[1]][, 2])
+# (A marker with no generator is the "stale" case; the loop below warns about each one.)
+.orphan_gen <- setdiff(names(blocks), BLOCK_KEYS)
+if (length(.orphan_gen))
+  stop("[update_report] generator(s) with no matching marker in the report (their output would ",
+       "be discarded): ", paste(.orphan_gen, collapse = ", "), call. = FALSE)
 txt  <- orig
-changed <- character(0)
-for (key in names(blocks)) {
-  content <- blocks[[key]]
-  if (is.null(content)) { message(sprintf("[update_report] %-16s : no data — left unchanged", key)); next }
+changed <- character(0); stale <- character(0)
+for (key in BLOCK_KEYS) {
+  content <- if (key %in% names(blocks)) blocks[[key]] else NULL
+  if (is.null(content)) {
+    message(sprintf("[update_report] %-16s : no data — marker left at its PREVIOUS content", key))
+    stale <- c(stale, key); next
+  }
   new <- inject(txt, key, content)
   # detect whether this block's region actually changed (compare the whole string is
   # coarse; instead re-extract the region after injection isn't trivial — compare texts)
   if (!identical(new, txt)) changed <- c(changed, key)
   txt <- new
 }
+
+# Announce every block that could NOT be regenerated. Each one leaves its marker holding the
+# previously-rendered text, which is indistinguishable from current text to any reader of the
+# published report — so it must be loud here.
+if (length(stale))
+  warning(sprintf("[update_report] %d block(s) had no data and keep their PREVIOUS content: %s",
+                  length(stale), paste(stale, collapse = ", ")), call. = FALSE, immediate. = TRUE)
 
 if (identical(txt, orig)) {
   message("[update_report] report already up to date (no marked block changed).")
@@ -356,3 +496,6 @@ writeLines(txt, REPORT_PATH)
 message(sprintf("[update_report] updated %d block(s): %s", length(changed), paste(changed, collapse = ", ")))
 message(sprintf("[update_report] featured model: %s | wrote %s (backup: %s)",
                 featured, basename(REPORT_PATH), basename(bak)))
+if (length(stale))
+  message(sprintf("[update_report] NOT regenerated (previous content retained): %s",
+                  paste(stale, collapse = ", ")))

@@ -9,7 +9,8 @@
 #   - build_M6()               travel-time decay matrix
 #   - build_M8()               composite epicentre/gravity matrix
 #   - .embed_od_to_519()       name-indexed OD embedding (shared by build_M3/build_M15)
-#   - build_M15()              combined inflow+outflow static kernel (symmetrised O + t(O))
+#   - build_M15()              symmetrised relocation-OD kernel O + t(O) (NOT inflow-informed:
+#                              no independent inflow table exists)
 #   - build_M17()              all-kernel consensus ensemble (convex mean + overlaid source rows)
 #
 # Most tests use small in-memory matrices so no data files are required; the one
@@ -475,7 +476,7 @@ test_that("M15 symmetrisation: S = O + t(O) is symmetric and yields a valid kern
   O["A", "B"] <- 10; O["B", "C"] <- 4; O["C", "A"] <- 7   # directed, asymmetric flow
   S <- O + t(O); diag(S) <- 0
 
-  expect_true(isSymmetric(S), info = "combined inflow+outflow (O + t(O)) must be symmetric")
+  expect_true(isSymmetric(S), info = "the symmetrised kernel O + t(O) must be symmetric")
   # symmetrisation fills the reciprocal edge B->A that the directed matrix lacked
   expect_equal(S["A", "B"], S["B", "A"])
   expect_true(S["B", "A"] > 0 && O["B", "A"] == 0)
@@ -536,4 +537,245 @@ test_that("build_M17: convex mean is row-stochastic with source rows overlaid", 
                info = "non-source rows must be a blend, not a single member")
   # Guard: fewer than two valid bases must error.
   expect_error(build_M17(list(a = mk()), epi, origins, zones, "M17_bad"))
+})
+
+# =============================================================================
+# 9. .resolve_source_labels() — raw source labels -> canonical zone names
+# =============================================================================
+
+test_that(".resolve_source_labels: exact names, province disambiguation, aliases, case", {
+  skip_if_missing(".resolve_source_labels")
+
+  zones <- c("Bunia", "Kilo", "Ngandajika", "Massa",
+             "Lubunga (Tshopo)", "Lubunga (Kasaï-Central)",
+             "Bili (Bas-Uele)", "Bili (Nord-Ubangi)")
+
+  # exact canonical name wins
+  expect_equal(.resolve_source_labels("Kilo", "Ituri", zones), "Kilo")
+
+  # colliding bare name is resolved BY PROVINCE, and punctuation/accents in the
+  # province label do not matter ("Kasaï Central" vs the canonical "Kasaï-Central")
+  expect_equal(.resolve_source_labels("Lubunga", "Tshopo", zones), "Lubunga (Tshopo)")
+  expect_equal(.resolve_source_labels("Lubunga", "Kasaï Central", zones),
+               "Lubunga (Kasaï-Central)")
+  expect_equal(.resolve_source_labels("Bili", "Nord-Ubangi", zones), "Bili (Nord-Ubangi)")
+
+  # a colliding bare name whose province matches NEITHER candidate is left
+  # unresolved — never folded into an arbitrary one (the upstream defect)
+  expect_true(is.na(.resolve_source_labels("Lubunga", "Haut-Uele", zones)))
+  expect_true(is.na(.resolve_source_labels("Lubunga", NA, zones)))
+
+  # committed label alias (province-verified upstream), then data/aliases.csv
+  expect_equal(.resolve_source_labels("Central Massa", "Kongo", zones), "Massa")
+  expect_equal(.resolve_source_labels("Foo", "X", zones, c(Foo = "Bunia")), "Bunia")
+
+  # unambiguous case/punctuation-insensitive last resort
+  expect_equal(.resolve_source_labels("NGandajika", "Lomami", zones), "Ngandajika")
+
+  # genuinely unknown stays NA
+  expect_true(is.na(.resolve_source_labels("Nowhere", "Nowhere", zones)))
+
+  # vectorised, and order preserved
+  expect_equal(.resolve_source_labels(c("Kilo", "Nowhere", "Bunia"),
+                                      c("Ituri", "X", "Ituri"), zones),
+               c("Kilo", NA, "Bunia"))
+})
+
+# =============================================================================
+# 10. compose_epicentre(fill=) — refilling cells the SOURCE could not observe
+# =============================================================================
+
+.fill_fixture <- function() {
+  zones <- c("A", "B", "C", "D", "E")          # A = the source origin
+  # Base kernel: row A spreads over B..E; other rows are arbitrary but valid.
+  base <- matrix(0, 5, 5, dimnames = list(zones, zones))
+  base["A", c("B", "C", "D", "E")] <- c(0.4, 0.3, 0.2, 0.1)
+  base["B", c("A", "C")] <- c(0.5, 0.5)
+  base["C", c("A", "B")] <- c(0.5, 0.5)
+  base["D", c("A")] <- 1
+  base["E", c("A")] <- 1
+  # Source kernel: origin A measured only D and E (B is a co-origin it cannot
+  # observe; C was never measured).
+  epi <- matrix(0, 5, 5, dimnames = list(zones, zones))
+  epi["A", c("D", "E")] <- c(0.75, 0.25)
+  attr(epi, "measured")       <- list(A = c("D", "E"))
+  attr(epi, "source_origins") <- list(A = c("A", "B"))
+  list(zones = zones, base = base, epi = epi)
+}
+
+test_that("compose_epicentre(fill='none') is the plain row replacement", {
+  skip_if_missing("compose_epicentre")
+  f <- .fill_fixture()
+  W <- compose_epicentre(f$base, f$epi, "A", f$zones, "T", fill = "none")
+  expect_equal(unname(W["A", ]), c(0, 0, 0, 0.75, 0.25))
+  expect_equal(unname(W["B", ]), unname(f$base["B", ]))   # non-source rows untouched
+})
+
+test_that("compose_epicentre(fill='origins') refills only the source's own origins", {
+  skip_if_missing("compose_epicentre")
+  f <- .fill_fixture()
+  W <- compose_epicentre(f$base, f$epi, "A", f$zones, "T", fill = "origins")
+  q <- f$base["A", "B"]                       # U = {B}; q = base mass on U = 0.4
+  expect_equal(unname(W["A", "B"]), q)                     # filled from the base
+  expect_equal(unname(W["A", "C"]), (1 - q) * 0)           # measured-zero stays zero
+  expect_equal(unname(W["A", "D"]), (1 - q) * 0.75)        # data rescaled by (1-q)
+  expect_equal(unname(W["A", "E"]), (1 - q) * 0.25)
+  expect_equal(sum(W["A", ]), 1)
+  expect_equal(W["A", "A"], 0)
+})
+
+test_that("compose_epicentre(fill='unmeasured') also refills never-measured zones", {
+  skip_if_missing("compose_epicentre")
+  f <- .fill_fixture()
+  W <- compose_epicentre(f$base, f$epi, "A", f$zones, "T", fill = "unmeasured")
+  q <- sum(f$base["A", c("B", "C")])          # U = {B, C}
+  expect_equal(unname(W["A", "B"]), unname(f$base["A", "B"]))
+  expect_equal(unname(W["A", "C"]), unname(f$base["A", "C"]))
+  expect_equal(unname(W["A", "D"]), (1 - q) * 0.75)
+  expect_equal(sum(W["A", ]), 1)
+})
+
+test_that("compose_epicentre: the q cap RESCALES the filled block so the row still sums to 1", {
+  skip_if_missing("compose_epicentre")
+  f <- .fill_fixture()
+  # Base row A puts 95% of its mass on the refilled set {B, C}.
+  f$base["A", ] <- 0
+  f$base["A", c("B", "C", "D", "E")] <- c(0.6, 0.35, 0.03, 0.02)
+  W <- compose_epicentre(f$base, f$epi, "A", f$zones, "T", fill = "unmeasured",
+                         q_max = 0.5)
+  expect_equal(sum(W["A", ]), 1)
+  expect_equal(sum(W["A", c("B", "C")]), 0.5)              # capped total
+  # ...and the cap preserves the base's RELATIVE split inside the filled block
+  expect_equal(unname(W["A", "B"] / W["A", "C"]), 0.6 / 0.35)
+  expect_equal(unname(W["A", "D"]), 0.5 * 0.75)            # data share is 1 - 0.5
+})
+
+test_that("compose_epicentre: degenerate inputs fall back rather than producing a bad row", {
+  skip_if_missing("compose_epicentre")
+  f <- .fill_fixture()
+
+  # (a) the source has no mass outside the refilled set -> keep the base row
+  f2 <- f; f2$epi["A", ] <- 0; f2$epi["A", "B"] <- 1
+  attr(f2$epi, "measured")       <- list(A = "B")
+  attr(f2$epi, "source_origins") <- list(A = c("A", "B"))
+  W <- suppressWarnings(compose_epicentre(f2$base, f2$epi, "A", f2$zones, "T",
+                                          fill = "origins"))
+  expect_equal(unname(W["A", ]), unname(f2$base["A", ]))
+
+  # (b) no metadata on the source kernel -> no fill, no error
+  f3 <- f; attr(f3$epi, "measured") <- NULL; attr(f3$epi, "source_origins") <- NULL
+  W3 <- suppressWarnings(compose_epicentre(f3$base, f3$epi, "A", f3$zones, "T",
+                                           fill = "origins"))
+  expect_equal(unname(W3["A", ]), c(0, 0, 0, 0.75, 0.25))
+
+  # (c) an all-zero base row -> q = 0, so the source profile survives unchanged
+  f4 <- f; f4$base["A", ] <- 0
+  W4 <- compose_epicentre(f4$base, f4$epi, "A", f4$zones, "T", fill = "origins")
+  expect_equal(unname(W4["A", ]), c(0, 0, 0, 0.75, 0.25))
+})
+
+test_that("compose_epicentre(fill=) keeps every mobility-matrix invariant", {
+  skip_if_missing("compose_epicentre")
+  skip_if_missing("assert_mobility_matrix")
+  f <- .fill_fixture()
+  for (lv in c("none", "origins", "unmeasured")) {
+    W <- compose_epicentre(f$base, f$epi, "A", f$zones, "T", fill = lv)
+    expect_silent(assert_mobility_matrix(W, f$zones, "T"))
+  }
+})
+
+# =============================================================================
+# 11. Left-censored gravity fit — the three-state form reduces to the two-state
+# =============================================================================
+
+test_that(".fit_gravity_censored: an explicit all-zeros mask with cens_lo=0 equals the implicit fit", {
+  skip_if_missing(".fit_gravity_censored")
+  set.seed(42)
+  n  <- 200
+  td <- data.frame(pop_i = runif(n, 1e4, 1e6), pop_j = runif(n, 1e4, 1e6),
+                   dist_ij = runif(n, 10, 600))
+  mu <- exp(-8 + 0.5 * log(td$pop_i) + 0.6 * log(td$pop_j) - 1.2 * log(td$dist_ij + 1))
+  td$flow <- rpois(n, mu)
+  td$flow[td$flow > 0 & td$flow < 15] <- 0          # mimic the suppression pattern
+  fml <- flow ~ log(pop_i) + log(pop_j) + log(dist_ij + 1)
+  start <- suppressWarnings(glm(fml, family = poisson(), data = td))
+  a <- .fit_gravity_censored(td, fml, 15L, start, "T")                       # implicit
+  b <- .fit_gravity_censored(td, fml, 15L, start, "T",
+                             cens_vec = td$flow < 15L, cens_lo = 0L)         # explicit
+  skip_if(is.null(a) || is.null(b), "censored fit did not converge on the fixture")
+  expect_equal(a$coefficients, b$coefficients, tolerance = 1e-8)
+  expect_equal(a$loglik, b$loglik, tolerance = 1e-8)
+  # cens_lo = 1 removes the P(Y = 0) mass from each censored cell's interval, so the
+  # same data can never score HIGHER under the narrower interval.
+  cc <- .fit_gravity_censored(td, fml, 15L, start, "T",
+                              cens_vec = td$flow < 15L, cens_lo = 1L)
+  skip_if(is.null(cc), "three-state fit did not converge on the fixture")
+  expect_lt(cc$loglik, a$loglik + 1e-6)
+})
+
+# =============================================================================
+# 12. summarise_matrix() — per-origin columns are keyed on the ORIGIN names
+# =============================================================================
+
+test_that("summarise_matrix: top-5 columns are named from the origins and are populated", {
+  skip_if_missing("summarise_matrix")
+  zones <- c("Bunia", "Mongbwalu", "Rwampara", "Lita")
+  W <- matrix(0, 4, 4, dimnames = list(zones, zones))
+  W["Bunia", c("Lita", "Rwampara")]     <- c(0.7, 0.3)
+  W["Mongbwalu", c("Lita", "Bunia")]    <- c(0.6, 0.4)
+  W["Rwampara", c("Lita")]              <- 1
+  W["Lita", c("Bunia")]                 <- 1
+  s <- summarise_matrix(W, "T", zones, c("Bunia", "Mongbwalu", "Rwampara"))
+  expect_true(all(c("top5_Bunia", "top5_Mongbwalu", "top5_Rwampara") %in% names(s)))
+  expect_false(any(vapply(s[grep("^top5_", names(s))], function(x) is.na(x[1]), logical(1))))
+  expect_false("top5_Mongbalu" %in% names(s))   # the pre-2026-07 spelling is gone
+})
+
+# =============================================================================
+# 13. Built kernels — regressions on the two data defects (skip without a build)
+# =============================================================================
+
+.mob_built <- function(id) {
+  p <- file.path(get0("OUT_MOBILITY", ifnotfound = ""), sprintf("mobility_%s.rds", id))
+  if (nzchar(p) && file.exists(p)) readRDS(p) else NULL
+}
+
+test_that("built kernels: Kilo is reachable from the epicentre (name-resolution regression)", {
+  W1 <- .mob_built("M1")
+  skip_if(is.null(W1), "mobility matrices not built in this environment")
+  skip_if(!all(c("Bunia", "Kilo") %in% rownames(W1)), "zone spine does not carry these zones")
+  expect_gt(W1["Bunia", "Kilo"], 0)
+  for (id in c("M8", "M13", "M14")) {
+    W <- .mob_built(id)
+    if (!is.null(W)) expect_gt(W["Bunia", "Kilo"], 0)
+  }
+})
+
+test_that("built kernels: the fill variants restore the provider-excluded origin cells", {
+  Wf <- .mob_built("M14-fill"); W0 <- .mob_built("M14")
+  skip_if(is.null(Wf) || is.null(W0), "fill variants not built in this environment")
+  pairs <- list(c("Beni", "Butembo"), c("Makiso Kisangani", "Mangobo"))
+  for (p in pairs) {
+    if (all(p %in% rownames(W0))) {
+      expect_equal(unname(W0[p[1], p[2]]), 0)   # classic kernel asserts zero
+      expect_gt(Wf[p[1], p[2]], 0)              # fill variant does not
+    }
+  }
+  expect_equal(unname(rowSums(Wf)[rowSums(Wf) > 0]),
+               rep(1, sum(rowSums(Wf) > 0)), tolerance = 1e-9)
+})
+
+test_that("built kernels: every manifest entry has a kernel file on disk", {
+  man_p <- file.path(get0("OUT_MOBILITY", ifnotfound = ""), "mobility_manifest.csv")
+  skip_if(!nzchar(man_p) || !file.exists(man_p), "no manifest in this environment")
+  man <- readr::read_csv(man_p, show_col_types = FALSE)
+  fs  <- sub("^mobility_(.*)\\.rds$", "\\1",
+             list.files(dirname(man_p), pattern = "^mobility_.*\\.rds$"))
+  # SUBSET, not set equality: the manifest exists precisely so a consumer can ignore
+  # kernel files left behind by an earlier run (a kernel since switched off, or from
+  # another branch), so extra .rds files on disk are the expected case, not a failure.
+  expect_true(all(man$matrix_id %in% fs),
+              info = paste("manifest entries with no file:",
+                           paste(setdiff(man$matrix_id, fs), collapse = ", ")))
+  expect_gt(nrow(man), 0L)
 })

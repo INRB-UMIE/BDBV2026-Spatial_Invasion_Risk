@@ -25,9 +25,13 @@ suppressPackageStartupMessages({
   library(tidyverse); library(sf); library(patchwork); library(scales)
 })
 
+# NOTE: base R >= 4.4 ships `%||%`, so `exists("%||%")` is TRUE and the NA-aware definition
+# below NEVER installed — `NA %||% "fallback"` returned NA. That is why .lk() exists. Give the
+# NA-aware helper its OWN name so it is always available, and keep %||% as base's NULL-coalesce.
 if (!exists("%||%"))
-  `%||%` <- function(a, b) if (is.null(a) || length(a) == 0 ||
-                              (length(a) == 1 && is.na(a))) b else a
+  `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
+#' NULL/NA/length-safe coalesce: returns `b` unless `a` is a single non-NA value.
+`%|NA|%` <- function(a, b) if (is.null(a) || length(a) != 1L || is.na(a)) b else a
 if (!exists("OKABE_ITO"))
   OKABE_ITO <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00",
                  "#56B4E9", "#F0E442", "#000000")
@@ -58,8 +62,29 @@ if (!exists("theme_inv"))
 # Province label for a row: the province, or "Unknown" if missing.
 .prov_label <- function(province) ifelse(is.na(province) | province == "", "Unknown", province)
 .fd_save <- function(p, path, w = 9, h = 6) {
+  # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
+  # is not on the published allow-list. get0() so the helper still works standalone.
+  .fk <- get0("figure_is_kept", ifnotfound = NULL)
+  if (is.function(.fk) && !.fk(path)) return(invisible(p))
   if (file.exists(path)) suppressWarnings(file.remove(path))
   tryCatch(ggplot2::ggsave(path, p, width = w, height = h, device = "pdf",
+                           limitsize = FALSE),
+           error = function(e) warning("[viz] ", basename(path), ": ",
+                                       conditionMessage(e)))
+  if (file.exists(path)) message("[viz] saved -> ", basename(path))
+  invisible(p)
+}
+
+# Raster twin of .fd_save, for figures that also need a bitmap (slides, Word, the
+# manuscript submission portal). 600 dpi on an opaque white ground, matching the
+# PNG convention used by the key-output figure modules.
+.fd_save_png <- function(p, path, w = 9, h = 6, dpi = 600) {
+  # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
+  # is not on the published allow-list. get0() so the helper still works standalone.
+  .fk <- get0("figure_is_kept", ifnotfound = NULL)
+  if (is.function(.fk) && !.fk(path)) return(invisible(p))
+  if (file.exists(path)) suppressWarnings(file.remove(path))
+  tryCatch(ggplot2::ggsave(path, p, width = w, height = h, dpi = dpi, bg = "white",
                            limitsize = FALSE),
            error = function(e) warning("[viz] ", basename(path), ": ",
                                        conditionMessage(e)))
@@ -76,14 +101,19 @@ if (!exists("theme_inv"))
 # the model grid grows.
 .MOB_DESC <- c(
   M8  = "M8 composite — outbreak-specific short-trip flows from the epicentre cluster (Flowminder) for epicentre origins, calibrated gravity elsewhere (recommended)",
-  M4  = "M4 gravity — negative-binomial gravity GLM on the national origin-destination matrix (power-law distance deterrence)",
+  M4  = "M4 gravity — negative-binomial gravity GLM fitted to the national Flowminder relocation matrix (monthly home-location changes, not trips; power-law distance deterrence)",
   M4b = "M4b gravity — as M4 but with exponential distance deterrence",
   M9  = "M9 multi-kernel — average of gravity, radiation and travel-time-decay kernels",
   M10 = "M10 radiation-composite — parameter-free radiation model blended with epicentre short-trip flows",
-  M3  = "M3 — raw Flowminder national origin-destination flows",
+  M3  = "M3 — raw Flowminder national relocation flows (monthly home-location changes, not trips)",
   M5  = "M5 radiation model (Simini et al. 2012)",
   M6a = "M6a travel-time exponential-decay kernel",
-  M6b = "M6b travel-time power-law-decay kernel")
+  M6b = "M6b travel-time power-law-decay kernel",
+  M13 = "M13 cohort-composite — Flowminder cohort presence rows for the cohort origins, calibrated gravity elsewhere",
+  M14 = "M14 cohort-radiation composite — Flowminder cohort presence rows, parameter-free radiation elsewhere",
+  M15 = "M15 symmetrised relocation OD — O + t(O) from one directed relocation table (not inflow-informed)",
+  M16 = "M16 cohort + relocation OD — cohort presence rows, directed Flowminder relocation flows (coverage gaps filled) elsewhere",
+  M17 = "M17 all-kernel consensus — equal-weight mean of the relocation OD (gap-filled), gravity and radiation kernels, cohort rows overlaid")
 .GT_DESC <- c(
   medium = "GT-Medium (mean 15.3 d, sd 9.3 d; Zaire EBOV serial interval, WHO Ebola Response Team 2014 NEJM)",
   short  = "GT-Short (mean 12.0 d, sd 6.5 d; low-end sensitivity, below Nash 2024 pooled 95% CI)",
@@ -93,11 +123,17 @@ if (!exists("theme_inv"))
   ccvi         = "CCVI socioeconomic vulnerability index",
   positivity   = "zone test positivity",
   d_min        = "travel time to the nearest currently-affected zone",
+  week_idx     = "calendar week index (log-linear time trend in the import coefficient)",
+  sd_week      = "SD of the weekly random intercept (week-to-week variation in beta)",
   alert_import = "mobility-weighted suspected-alert pressure imported from other zones",
   alert_local  = "local suspected-alert count",
   susp_import  = "mobility-weighted suspected-but-not-confirmed case pressure imported from other zones",
   susp_local   = "local preceding-week suspected-but-not-confirmed case count",
-  log_healthsite_count = "healthcare-site density")
+  # KEYED "healthsite_density", the name every model and the covariate screen actually use
+  # (run_all.R:541/550, the -full covariate set). The key was "log_healthsite_count", which
+  # matches nothing, so .lk() fell through to the raw variable name and the published model
+  # specification listed three covariates in prose and one as a bare identifier.
+  healthsite_density = "healthcare-site density (facilities per capita)")
 # Method-name -> covariate set / special structure (mirrors the run_all grid).
 .VARIANT_SPEC <- list(
   "Renewal-M8-geo"      = list(cov = c("log_pop", "ccvi", "d_min")),
@@ -124,6 +160,18 @@ if (!exists("theme_inv"))
 
 describe_model_spec <- function(method) {
   m <- as.character(method)
+  # GUARD the empty case. as.character(NULL) is character(0), so every grepl() below returns
+  # logical(0) and the first `if (is_ens)` threw "argument is of length zero". run_all.R passes
+  # primary_method = NULL whenever the frequentist arm did not run — which is the DEFAULT — so
+  # write_model_details_report() aborted on the default path. The abort is swallowed by vwrap(),
+  # with the result that outputs/reports/model_specification.md was never regenerated (it sat
+  # six weeks stale, naming a model the pipeline no longer selects) and the selection section
+  # was silently missing from the current invasion report.
+  if (!length(m) || is.na(m[1]) || !nzchar(m[1]))
+    return(list(kernel = NA_character_, generation_time = NA_character_,
+                observation = NA_character_, covariates = NA_character_,
+                calibration = NA_character_, nowcast = NA_character_,
+                notes = "no model of this family was fitted in this run"))
   is_renewal <- grepl("^Renewal", m)
   is_ens     <- grepl("^Ensemble", m)
 
@@ -144,16 +192,27 @@ describe_model_spec <- function(method) {
       calibration = if (grepl("mean", m))
         "linear opinion pool: p = mean over members (Vincent-averaged count quantiles)"
         else "median of member probabilities (robust combiner)",
-      nowcast = "epinowcast-corrected members",
+      # The DEPLOYED nowcast is apply_nowcast_correction() (run_all.R:321), the deterministic
+      # delay-CDF right-truncation correction, on BOTH the fold and the deployment paths.
+      # epinowcast was retained only as the sensitivity arm on 2026-09-17; naming it here
+      # published a false "Incidence input / nowcast" line for every model.
+      nowcast = "right-truncation-corrected members (deterministic delay-CDF nowcast)",
       notes = "pre-specified member set; no selection on the test folds"))
   }
   # Bayesian renewal grid (Bayes-<mob>-<gt/cov/link>): same mechanistic model as the
   # frequentist renewal, fit with brms — so it must be DESCRIBED, not dumped into the
   # "Comparator / NA" bucket (the featured Bayesian model routinely wins overall).
   if (grepl("^Bayes", m)) {
+    # Keyed on the model's OWN kernel id so a filled / split / road-distance composite is
+    # never described as its unfilled travel-time parent.
+    kern <- mobility_kernel_from_method(m)
+    base <- if (is.na(kern)) NA_character_ else gsub("-(dist|fill|split)", "", kern)
     mobn <- c(M1 = "short-trip", M4 = "gravity", M8 = "composite-gravity",
               M9 = "multi-kernel ensemble", M10 = "radiation-composite",
-              M11 = "inward meeting-location FOI")
+              M11 = "inward meeting-location FOI", M13 = "cohort + gravity composite",
+              M14 = "cohort + radiation composite", M15 = "symmetrised relocation OD",
+              M16 = "cohort + relocation OD composite",
+              M17 = "all-kernel consensus ensemble")
     cov_desc <- if (grepl("-full", m)) "full exogenous set (log-pop, CCVI, health-site density, travel-time-to-affected)"
                 else if (grepl("-geo", m)) "geographic exogenous set (log-pop, CCVI, travel-time-to-affected)"
                 else "none (intercept-only import hazard)"
@@ -161,16 +220,27 @@ describe_model_spec <- function(method) {
            else "Complementary log-log with log(Lambda) offset (renewal hazard: p = 1 - exp(-beta*Lambda))"
     return(list(
       family = "Bayesian mobility-informed renewal (brms; posterior)",
-      # mob_key strips the "-dist" suffix for the description lookup, so re-attach a
-      # road-distance note for the OSRM-km kernels (their offset uses km deterrence, not travel time).
+      # Keyed on the model's own kernel: the base family, then every kernel qualifier
+      # (road-distance deterrence, source-cell fill, cohort origin-split). Without the
+      # fill/split notes a filled composite was described exactly like its unfilled parent.
       mobility = {
-        .mob_base <- .lk(mobn, mob_key, mob_key %||% "n/a")
-        if (grepl("-dist", m)) paste0(.mob_base, " (OSRM road-distance deterrence)") else .mob_base
+        .k <- if (is.na(base)) mob_key else base
+        .mob_base <- .lk(mobn, .k, .k %|NA|% "n/a")
+        paste0(.mob_base,
+               if (!is.na(kern) && grepl("-dist", kern)) " (OSRM road-distance deterrence)" else "",
+               if (!is.na(kern) && grepl("-split", kern)) "; cohort rows split per origin" else "",
+               if (!is.na(kern) && grepl("-(fill|split)", kern)) "; source-cell fill" else "")
       },
       gt = gt_key, observation = lnk, covariates = cov_desc,
       calibration = "posterior; weakly-informative priors (Intercept~Normal(-3,2), coefs~Normal(0,1)); loo predictive stacking for the ensemble",
-      nowcast = "epinowcast-corrected training counts",
-      notes = "Bayesian analogue of the frequentist renewal model; featured Bayesian model = highest loo predictive-stacking weight"))
+      # The DEPLOYED nowcast is apply_nowcast_correction() (run_all.R:321), the deterministic
+      # delay-CDF right-truncation correction, on BOTH the fold and the deployment paths.
+      # epinowcast was retained only as the sensitivity arm on 2026-09-17; naming it here
+      # published a false "Incidence input / nowcast" line for every model.
+      nowcast = "right-truncation-corrected training counts (deterministic delay-CDF nowcast)",
+      notes = paste("Bayesian analogue of the frequentist renewal model; the featured Bayesian",
+                    "model is chosen by the leave-future-out CV composite (NOT by the loo",
+                    "predictive-stacking weight, which defines the stacked ensemble only)")))
   }
   if (!is_renewal) {
     cmp <- c(hhh4 = "Endemic-epidemic hhh4 (Held & Paul); neighbourhood-coupled autoregression",
@@ -192,37 +262,53 @@ describe_model_spec <- function(method) {
                  else paste(vapply(covs, function(c) .lk(.COV_DESC, c, c), ""),
                             collapse = "; "),
     calibration = "import coefficient beta fit by complementary-log-log regression of realised invasions on log(import force) => p = 1 - exp(-beta * Lambda), calibrated to the rare base rate",
-    nowcast = vs$nowcast %||% "epinowcast right-truncation correction",
+    # See the note above: the deployed nowcast is the deterministic delay-CDF correction.
+    nowcast = vs$nowcast %||% "deterministic delay-CDF right-truncation correction",
     notes = vs$note %||% NA_character_)
 }
 
 #' Markdown paragraph describing HOW the best model is chosen.
 describe_selection <- function() {
+  # KEEP IN STEP WITH best_invasion_model() (16_invasion_eval.R). This text is appended to
+  # the invasion report and written to model_specification.md, and it described the RETIRED
+  # "highest total AUC-PR skill" rule long after selection moved to the CV composite — so the
+  # published methods statement named a different criterion from the one that picked the
+  # featured model (and, through it, the cascade kernel). It also quoted a fixed "~15 invasion
+  # events", which the accruing record left far behind; the count is deliberately no longer
+  # hard-coded here (invasion_evaluation.csv carries it per horizon).
+  .axis <- if (isTRUE(get0("INVASION_SELECT_ON_RECAL", ifnotfound = FALSE)))
+    "the RECALIBRATED log score (16b removes calibration-in-the-large, so this axis measures refinement)"
+  else "the raw log score"
   c("## How the models are selected", "",
     "Every model is scored in the **same** leave-future-out cross-validation on the",
     "at-risk zones only (no already-affected zone ever counts), pooled across folds.",
-    "Selection is **discrimination-led with a spiky-model gate** (not by any single",
+    "Selection is by a **three-axis CV composite with a spiky-model gate** (not by any single",
     "metric, and never by count-WIS, which would reward predicting zero everywhere):",
     "",
     "1. **AUC-PR skill** — Average Precision divided by the invasion base rate:",
     "   how well the model concentrates the few invasions at the top of its ranking;",
     "2. **Mean rank of the invaded zone** — how near the top the zones that actually",
     "   invaded were placed (operational targeting);",
-    "3. **Log-score** — a proper score that penalises over-confident probabilities.",
+    "3. **Log-score** — a proper score that penalises over-confident probabilities;",
+    sprintf("   this run scores %s.", .axis),
     "",
     "Among models present at BOTH horizons, any whose worst-horizon mean rank-of-truth",
     "exceeds 1.5x the field median is first dropped as **spiky** (high AUC-PR driven by a",
-    "few top hits while the rest are scattered). The winner is the highest **total AUC-PR",
-    "skill** (pooled across horizons) among the survivors; ties are broken by lower total",
-    "rank-of-truth, then lower log-score. Requiring both horizons stops a model winning by",
-    "performing well at 1-week while sitting out the 2-week task.",
+    "few top hits while the rest are scattered), as are models cross-validated on fewer",
+    "folds than the field (an incomparable denominator). Within each horizon the survivors",
+    "are then RANKED on each of the three axes; the three ranks are summed within horizon",
+    "and across horizons, and the **lowest total wins**. Ties are broken by higher total",
+    "AUC-PR skill, then lower total rank-of-truth, then lower log score. Requiring both",
+    "horizons stops a model winning by performing well at 1-week while sitting out the",
+    "2-week task.",
     "",
     "The **best-fitting model** is the best over ALL families on this composite;",
     "the **best renewal model** is the best *mobility-informed renewal* variant (so",
     "the featured risk product is an interpretable, mechanistic model).",
-    "With only ~15 invasion events the differences between the leading models are",
-    "within cross-validation noise — hence the pre-specified ensemble is reported",
-    "alongside the single best model.", "")
+    "With only a few tens of invasion events, differences between the leading models are",
+    "small relative to cross-validation noise — hence the pre-specified ensemble is reported",
+    "alongside the single best model, and the last origins are held out for a separate",
+    "optimism check.", "")
 }
 
 #' Append a "best-model specification" + "selection" section to a report file
@@ -281,8 +367,17 @@ write_model_details_report <- function(best_method, primary_method, eval_tbl,
       if (!is.na(s$notes)) sprintf("- **Note:** %s", s$notes) else NULL,
       sprintf("- **Cross-validated skill (h=1):** %s", perf), "")
   }
-  same <- identical(as.character(best_method), as.character(primary_method))
-  blocks <- if (same)
+  # A NULL primary_method means "no renewal model was fitted", not "a different model". Treat
+  # it as absent rather than as a second featured model, otherwise the report advertises a
+  # "Best renewal model" section for a family the run did not fit.
+  .have_primary <- length(as.character(primary_method)) == 1L &&
+                   !is.na(primary_method) && nzchar(as.character(primary_method))
+  same <- .have_primary && identical(as.character(best_method), as.character(primary_method))
+  blocks <- if (!.have_primary)
+    c(paste0("The headline model (best over all families) is the featured model; no ",
+             "frequentist renewal model was fitted in this run."), "",
+      spec_block("Featured model", best_method))
+  else if (same)
     c(paste0("The headline model (best over all families) is **also** the primary ",
              "mobility-informed renewal model:"), "",
       spec_block("Best-fitting model", best_method))
@@ -328,174 +423,15 @@ write_model_details_report <- function(best_method, primary_method, eval_tbl,
 # Q4 — forecast uncertainty from ensemble-member disagreement
 # ---------------------------------------------------------------------------
 
-#' Per-zone forecast uncertainty as the spread across ensemble members.
-#'
-#' For each (health_zone, horizon) returns the min / median / max / mean of the
-#' invasion probability across the member models — the structural uncertainty
-#' band. Already-affected zones (was_active_before) are dropped (no invasion
-#' probability by construction). Works on the current forecast OR on one LFO
-#' fold (any long tibble with method + prob_col + optional cutoff).
-#'
-#' @param fc long forecast tibble containing the members.
-#' @param members member method names whose spread defines the band.
-#' @param prob_col probability column (default "p_invasion").
-#' @param by extra grouping columns (e.g. "cutoff" for the space-time version).
-ensemble_member_uncertainty <- function(fc, members, prob_col = "p_invasion",
-                                        by = character(0)) {
-  if (!prob_col %in% names(fc))
-    prob_col <- intersect(c("p_invasion", "p_case_invasion"), names(fc))[1]
-  keep <- fc$method %in% members
-  if ("was_active_before" %in% names(fc)) keep <- keep & !(fc$was_active_before %in% TRUE)
-  d <- fc[keep, , drop = FALSE]
-  d <- d[is.finite(d[[prob_col]]), , drop = FALSE]
-  if (nrow(d) == 0) return(NULL)
-  grp <- c("health_zone", "horizon", by)
-  grp <- intersect(grp, names(d))
-  carry <- intersect(c("is_new_invasion", "province"), names(d))
-  d %>% dplyr::rename(.p = dplyr::all_of(prob_col)) %>%
-    dplyr::group_by(dplyr::across(dplyr::all_of(grp))) %>%
-    dplyr::summarise(
-      p_lo = min(.p), p_med = stats::median(.p), p_hi = max(.p),
-      p_mean = mean(.p), n_members = dplyr::n(),
-      dplyr::across(dplyr::all_of(carry), ~ dplyr::first(.x)),
-      .groups = "drop") %>%
-    dplyr::mutate(p_width = p_hi - p_lo)
-}
-
-#' Q4 — current forecast for the top at-risk zones WITH an uncertainty band.
-#' Each member model is a hollow dot, so the disagreement is visible as several
-#' marks; the shaded range spans their min-max, the filled dot is the ensemble
-#' median, and the black tick is the best renewal model. Members differ mainly in
-#' the mobility kernel (M8 epicentre-flow vs M4 gravity vs M9/M10), so a zone one
-#' member rates ~0 and others rate ~10% shows a wide, informative spread.
-plot_forecast_uncertainty <- function(fc, members, primary_method = NULL,
-                                       province_map = NULL, horizon = 1L,
-                                       top_n = 20L, save = TRUE, window_txt = "") {
-  unc <- ensemble_member_uncertainty(fc, members, "p_invasion")
-  if (is.null(unc)) return(invisible(NULL))
-  unc <- unc %>% dplyr::filter(horizon == !!horizon)
-  if (!"province" %in% names(unc) && !is.null(province_map))
-    unc <- unc %>% dplyr::left_join(
-      province_map %>% dplyr::transmute(health_zone = nom, province), by = "health_zone")
-  if (!"province" %in% names(unc)) unc$province <- NA_character_
-  unc <- unc %>% dplyr::mutate(region = .prov_label(province))
-  top <- unc %>% dplyr::arrange(dplyr::desc(p_med)) %>% head(top_n) %>%
-    dplyr::mutate(health_zone = factor(health_zone, levels = rev(health_zone)))
-  zlev <- levels(top$health_zone)
-
-  # Individual member estimates for the displayed zones (one dot per member), so
-  # the disagreement reads as several marks rather than one flat band.
-  mem_pts <- fc %>% dplyr::filter(method %in% members, horizon == !!horizon,
-                                  !(was_active_before %in% TRUE),
-                                  is.finite(p_invasion), health_zone %in% zlev) %>%
-    dplyr::transmute(health_zone = factor(health_zone, levels = zlev),
-                     method, p = p_invasion)
-
-  prim <- NULL
-  if (!is.null(primary_method)) {
-    prim <- fc %>% dplyr::filter(method == primary_method, horizon == !!horizon,
-                                 !(was_active_before %in% TRUE)) %>%
-      dplyr::transmute(health_zone, p_prim = p_invasion) %>%
-      dplyr::filter(health_zone %in% zlev) %>%
-      dplyr::mutate(health_zone = factor(health_zone, levels = zlev))
-  }
-  p <- ggplot(top, aes(p_med, health_zone)) +
-    geom_linerange(aes(xmin = p_lo, xmax = p_hi, colour = region),
-                   linewidth = 2.6, alpha = 0.22) +
-    geom_point(data = mem_pts, aes(p, health_zone), shape = 21, size = 1.9,
-               fill = "white", colour = "grey30", stroke = 0.5, alpha = 0.9) +
-    geom_point(aes(colour = region), size = 3.1) +
-    { if (!is.null(prim) && nrow(prim) > 0)
-        geom_point(data = prim, aes(p_prim, health_zone),
-                   shape = 124, size = 3.8, colour = "black") else NULL } +
-    scale_colour_manual(values = .prov_colours(top$region), name = "Province") +
-    scale_x_continuous(labels = scales::percent_format(accuracy = 1),
-                       expand = expansion(mult = c(0.03, 0.05))) +
-    labs(title = sprintf("Next-%dw invasion probability with ensemble uncertainty", horizon),
-         subtitle = paste0("Hollow dots = ", length(members),
-                           " member models | filled = ensemble median | range = min-max",
-                           if (!is.null(prim)) " | tick = best renewal model" else ""),
-         x = "P(first confirmed case)", y = NULL,
-         caption = paste0("Uncertainty = disagreement across pre-specified members (differing mobility kernel / GT / observation); at-risk zones only. ", window_txt)) +
-    theme_inv(11) + theme(legend.position = "top",
-                          plot.caption = element_text(colour = "grey40", size = 8))
-  if (save) .fd_save(p, file.path(OUT_REPORTS, sprintf("forecast_uncertainty_h%d.pdf", horizon)),
-                     w = 9.5, h = 7)
-  invisible(p)
-}
-
-#' Q4 — space-AND-time forecast trajectories WITH uncertainty.
-#' For the zones that actually invaded during the CV window (the operationally
-#' informative stories), plot the predicted invasion probability across fold
-#' cutoffs (time) as a median line + member-spread ribbon, one panel per zone
-#' (space), with the realised invasion week marked. Shows whether — and how
-#' confidently — each first case was anticipated.
-plot_spacetime_forecast <- function(lfo_results, members, province_map = NULL,
-                                     horizon = 1L, max_zones = 12L, save = TRUE) {
-  if (is.null(lfo_results) || !"cutoff" %in% names(lfo_results)) return(invisible(NULL))
-  unc <- ensemble_member_uncertainty(
-    lfo_results %>% dplyr::filter(horizon == !!horizon), members,
-    "p_invasion", by = "cutoff")
-  if (is.null(unc) || nrow(unc) == 0) return(invisible(NULL))
-  unc <- unc %>% dplyr::mutate(cutoff = as.Date(cutoff))
-
-  # Prefer zones that invaded during the window AND have a real (>=2-week)
-  # forecast lead-up, so every panel shows a trajectory climbing toward the
-  # invasion mark rather than a lone point. Rank by number of pre-invasion
-  # observations, then peak risk; fall back to highest-risk zones if none.
-  stats <- unc %>% dplyr::group_by(health_zone) %>%
-    dplyr::summarise(n_cut = dplyr::n_distinct(cutoff),
-                     invaded = any(is_new_invasion %in% 1),
-                     peak = max(p_med, na.rm = TRUE), .groups = "drop")
-  multi <- stats %>% dplyr::filter(invaded, n_cut >= 2) %>%
-    dplyr::arrange(dplyr::desc(peak))
-  if (nrow(multi) >= 4) {
-    invaded <- multi %>% head(max_zones) %>% dplyr::pull(health_zone)
-  } else {
-    # too few multi-week stories: take invaded zones by lead-up length then risk,
-    # or (no invasions at all) the highest-risk at-risk zones.
-    pool <- stats %>% dplyr::filter(invaded)
-    if (nrow(pool) == 0) pool <- stats
-    invaded <- pool %>% dplyr::arrange(dplyr::desc(n_cut), dplyr::desc(peak)) %>%
-      head(max_zones) %>% dplyr::pull(health_zone)
-  }
-  dd <- unc %>% dplyr::filter(health_zone %in% invaded)
-  if (!"province" %in% names(dd) && !is.null(province_map))
-    dd <- dd %>% dplyr::left_join(
-      province_map %>% dplyr::transmute(health_zone = nom, province), by = "health_zone")
-  if (!"province" %in% names(dd)) dd$province <- NA_character_
-  dd <- dd %>% dplyr::mutate(region = .prov_label(province))
-  ev <- dd %>% dplyr::filter(is_new_invasion %in% 1)
-  prov_pal <- .prov_colours(dd$region)
-
-  p <- ggplot(dd, aes(cutoff, p_med)) +
-    geom_ribbon(aes(ymin = p_lo, ymax = p_hi, fill = region), alpha = 0.25) +
-    geom_line(aes(colour = region), linewidth = 0.7) +
-    geom_point(aes(colour = region), size = 1.1) +
-    { if (nrow(ev) > 0) geom_vline(data = ev, aes(xintercept = cutoff),
-             linetype = "22", colour = "grey35", linewidth = 0.4) else NULL } +
-    { if (nrow(ev) > 0) geom_point(data = ev, aes(cutoff, p_med),
-             shape = 4, size = 2.6, stroke = 1, colour = "black") else NULL } +
-    facet_wrap(~ health_zone, scales = "free_y", ncol = 3) +
-    scale_colour_manual(values = prov_pal, name = "Province") +
-    scale_fill_manual(values = prov_pal, name = "Province") +
-    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
-    labs(title = sprintf("Forecast invasion probability across space and time — Frequentist ensemble (h=%dw)", horizon),
-         subtitle = "Median line + member-spread ribbon per zone | dashed line & cross = week the first case actually occurred",
-         x = "Forecast date (fold cutoff)", y = "P(first case) with ensemble uncertainty",
-         caption = "Zones that invaded during cross-validation; a band rising to the mark = an anticipated invasion.") +
-    theme_inv(11) + theme(legend.position = "top",
-                          strip.text = element_text(face = "bold", size = 9),
-                          plot.caption = element_text(colour = "grey40", size = 8))
-  if (save) .fd_save(p, file.path(OUT_MAPS, sprintf("spacetime_forecast_uncertainty_h%d.pdf", horizon)),
-                     w = 11, h = 8)
-  invisible(p)
-}
-
 # ---------------------------------------------------------------------------
-# Q1 — visualise the ENSEMBLE forecast on the map (vs the best renewal model), and a
-#      companion map of WHERE the models disagree (spatial uncertainty).
+# FREQUENTIST-ENSEMBLE VIZ — REMOVED
 # ---------------------------------------------------------------------------
+# ensemble_member_uncertainty(), plot_forecast_uncertainty() and plot_spacetime_forecast()
+# visualised the MEMBER SPREAD of the frequentist renewal ensemble (min/median/max of
+# p_invasion across pre-specified Renewal-M* members). That ensemble no longer exists —
+# ENSEMBLE_MEMBERS was permanently empty and its call sites in run_all.R have been removed —
+# so all three were unreachable. The Bayesian posterior 90% CrI maps are the equivalent
+# product and are rendered by the Bayesian suite.
 
 # Internal masked choropleth on the same key/mask convention as 17's map.
 # `affected_keys` (lower/trimmed zone names) are shown as dark grey even when
@@ -535,75 +471,73 @@ plot_spacetime_forecast <- function(lfo_results, members, province_map = NULL,
     theme(plot.title = element_text(face = "bold", size = 11), legend.position = "right")
 }
 
-#' Q1 — side-by-side Ituri maps: best renewal model vs ensemble (same colour
-#' scale), plus a third panel of member disagreement (spatial uncertainty).
-plot_forecast_map_panel <- function(fc, members, primary_method,
-                                    ensemble_method = "Ensemble-mean",
-                                    shapefile = NULL, horizon = 1L, save = TRUE) {
-  if (is.null(shapefile)) shapefile <- tryCatch(sf::st_read(SHAPEFILE_PATH, quiet = TRUE),
-                                                error = function(e) NULL)
-  if (is.null(shapefile)) return(invisible(NULL))
-  prim <- fc %>% dplyr::filter(method == primary_method, horizon == !!horizon)
-  ens  <- fc %>% dplyr::filter(method == ensemble_method, horizon == !!horizon)
-  if (nrow(prim) == 0 || nrow(ens) == 0) return(invisible(NULL))
-  # Common colour scale across the two forecast panels for honest comparison.
-  lim <- c(0, max(0.05, stats::quantile(c(prim$p_invasion, ens$p_invasion), 0.99, na.rm = TRUE)))
-  unc <- ensemble_member_uncertainty(fc %>% dplyr::filter(horizon == !!horizon),
-                                     members, "p_invasion")
-  # Shared already-affected mask (from any model carrying was_active_before) so
-  # all panels grey out the SAME zones regardless of which rows each retains.
-  aff_keys <- fc %>% dplyr::filter(horizon == !!horizon, was_active_before %in% TRUE) %>%
-    dplyr::pull(health_zone) %>% trimws() %>% tolower() %>% unique()
-
-  p1 <- .fd_map(prim, shapefile, sprintf("Best renewal model\n%s", primary_method),
-                ituri_only = TRUE, lim = lim, affected_keys = aff_keys)
-  p2 <- .fd_map(ens, shapefile, sprintf("Ensemble\n%s", ensemble_method),
-                ituri_only = TRUE, lim = lim, affected_keys = aff_keys)
-  panels <- list(p1, p2)
-  if (!is.null(unc)) {
-    p3 <- .fd_map(unc, shapefile, "Member disagreement\n(min-max width)",
-                  prob_col = "p_width", ituri_only = TRUE, palette = "viridis",
-                  legend_name = "Uncertainty", affected_keys = aff_keys)
-    panels <- c(panels, list(p3))
-  }
-  out <- patchwork::wrap_plots(panels, nrow = 1) +
-    patchwork::plot_annotation(
-      title = sprintf("Ituri invasion forecast: best model vs FREQUENTIST ensemble, with spatial uncertainty (h=%dw)", horizon),
-      subtitle = sprintf("Best model: %s | ensemble: %s | grey = already affected (Bayesian analogues: bayes_ensemble_* maps + posterior-CrI figures)",
-                         primary_method %||% "renewal", ensemble_method),
-      theme = ggplot2::theme(plot.title = element_text(face = "bold", size = 13)))
-  if (save) .fd_save(out, file.path(OUT_MAPS, sprintf("forecast_ensemble_panel_h%d.pdf", horizon)),
-                     w = 15, h = 5.6)
-  invisible(out)
-}
-
-# ---------------------------------------------------------------------------
-# Q1 — key parameter estimates: the mobility import coefficient + a covariate
-#      association screen (the full candidate range, each estimable)
-# ---------------------------------------------------------------------------
-
-.PARAM_LABEL <- c(
-  alert_import = "Imported alert pressure (mobility-weighted)",
-  alert_local  = "Local suspected alerts",
-  susp_import  = "Imported suspected-case pressure (mobility-weighted)",
-  susp_local   = "Local suspected (not-confirmed) cases",
-  log_pop      = "Population size (log)",
-  ccvi         = "Socioeconomic vulnerability (CCVI)",
-  positivity   = "Test positivity",
-  d_min        = "Travel time to nearest affected zone",
-  healthsite_density = "Health-facility density")
+# plot_forecast_map_panel() — REMOVED with the frequentist ensemble above: it drew the
+# best-renewal-model vs ensemble side-by-side panel plus the member-disagreement map.
 
 #' Build the invasion design matrix (one row per at-risk zone-week transition):
 #' `invaded`, the mobility import offset `logLam`, and the STANDARDISED candidate
 #' covariates — exactly the rows fit_import_model uses. Returns the design plus
 #' the baseline import coefficient beta0 (intercept-only cloglog).
+# ---------------------------------------------------------------------------
+# ROLLING AS-OF PREDICTORS (2026-09-22)
+# ---------------------------------------------------------------------------
+# Session memo for the as-of count matrix. The 18 model closures each call
+# build_invasion_design() on the SAME fold data, so without this the 90 per-transition
+# reconstructions would be repeated once per model (1,620 calls instead of 90). Keyed on the
+# issue date plus a hash of the line list and the delay, so a different fold, snapshot or
+# truncation can never be served a stale matrix. parent = emptyenv() so a typo'd key cannot
+# resolve up the search path.
+.asof_memo <- new.env(parent = emptyenv())
+
+#' Confirmed counts as they were KNOWN at the end of a given week, nowcast-corrected.
+#' @return zones x weeks matrix, or NULL if the reconstruction fails.
+.asof_counts_wide <- function(ll, zones_all, issue_date, delay, week_spine) {
+  # Fingerprint the line list by row count AND the sum of its onset dates: two snapshots of
+  # equal size would otherwise collide on nrow alone, and a collision here serves one fold's
+  # counts to another. Cheap enough to recompute per call (one pass over a date column).
+  .llfp <- c(nrow(ll), sum(as.numeric(suppressWarnings(as.Date(ll$date_of_symptom_onset))),
+                           na.rm = TRUE))
+  key <- paste0(format(as.Date(issue_date)), "_",
+                substr(rlang::hash(list(.llfp, zones_all, delay, week_spine)), 1L, 12L))
+  hit <- .asof_memo[[key]]
+  if (!is.null(hit)) return(hit)
+  tw <- tryCatch(suppressMessages(suppressWarnings(
+          reaggregate_asof(ll, zones_all, as.Date(issue_date), week_spine = week_spine))),
+        error = function(e) NULL)
+  if (is.null(tw) || !nrow(tw)) return(NULL)
+  nc <- tryCatch(suppressMessages(suppressWarnings(
+          apply_nowcast_correction(tw, analysis_date = as.Date(issue_date), delay = delay))),
+        error = function(e) NULL)
+  if (is.null(nc)) return(NULL)
+  out <- .count_wide(nc, zones_all, "confirmed_nc")
+  assign(key, out, envir = .asof_memo)
+  out
+}
+
 build_invasion_design <- function(zone_week_nc, mobility_matrices, gt_pmfs,
                                   covariates, osrm_mat, zones_all,
                                   mob = "M8", gt = "medium",
+                                  # `positivity` REMOVED from the default (2026-09-17). Every
+                                  # caller that matters already excluded it by passing an
+                                  # explicit list (run_all.R:494, :1549) because it is circular
+                                  # and full-data static; leaving it in the DEFAULT meant any
+                                  # other caller silently reinstated it. It is additionally
+                                  # NA-everywhere on real DHIS2 data — see the positivity guard
+                                  # in 01_data_prep.R::aggregate_to_zone_week().
                                   candidates = c("alert_import", "alert_local",
                                                  "susp_import", "susp_local", "log_pop",
-                                                 "healthsite_density", "ccvi", "positivity",
-                                                 "d_min")) {
+                                                 "healthsite_density", "ccvi",
+                                                 "d_min"),
+                                  # ROLLING AS-OF PREDICTORS. NULL (the default) keeps the
+                                  # historic behaviour exactly: the import force for every
+                                  # transition is computed from ONE count matrix, the fold's
+                                  # as-of counts at its own origin. Supply a line list and the
+                                  # regime's truncation to compute each transition's import
+                                  # force from the counts that were KNOWN at that transition.
+                                  # See the block above build_invasion_design() for why.
+                                  rolling_ll = NULL, rolling_delay = NULL,
+                                  rolling_floor = get0("ROLLING_PREDICTOR_FLOOR",
+                                                       ifnotfound = 3L)) {
   Y_wide <- .count_wide(zone_week_nc, zones_all, "confirmed_nc")
   G <- daily_to_weekly_gt(gt_pmfs[[gt]]); W <- mobility_matrices[[mob]]
   A_wide <- .count_wide(zone_week_nc, zones_all, "total_alerts")
@@ -611,9 +545,72 @@ build_invasion_design <- function(zone_week_nc, mobility_matrices, gt_pmfs,
   # series, raw fallback), for the susp_import / susp_local covariates — like the alert matrix.
   S_wide <- .susp_wide(zone_week_nc, zones_all)
   static <- .static_features(covariates, zones_all)
+  # WHY ROLLING PREDICTORS EXIST. The import force is built from nowcast-corrected counts, and
+  # the generation-time kernel puts 31% of its weight on the most recent week -- exactly the
+  # week the nowcast inflates most (3.45x at a fold origin, 5.92x deployed). With one count
+  # matrix per fold, every TRAINING transition's predictors are complete weeks (multiplier ~1)
+  # while the FORECAST's predictor carries that inflation, so beta0 is calibrated against a
+  # lambda about 2x smaller than the one it is applied to. Measured on the 12 folds: pooled
+  # observed/expected 0.497 with the shared matrix, 0.930 with raw counts -- the two arms
+  # differing by exactly the 1.978x inflation. That artefact is what the recalibration delta
+  # (~0.4) was silently absorbing.
+  #
+  # THE FLOOR IS LOAD-BEARING, not a tidy-up. At small t the as-of reconstruction is very
+  # sparse, lambda is tiny, and the few invasions that did occur imply a huge beta0 (2.14 at
+  # the first fold against 0.20 at the last). Those rows dominate the fit. Measured pooled
+  # observed/expected under rolling predictors: 0.440 with no floor -- WORSE than changing
+  # nothing -- against 0.741 at t >= 3 on the realised brms run. Never run this without a
+  # floor. (An earlier note here said 1.071; that came from an ML harness where four early
+  # folds separated, gave beta0 = 0 and predicted zero events. brms regularises them.)
+  .roll <- !is.null(rolling_ll) && !is.null(rolling_delay) &&
+           exists("reaggregate_asof", mode = "function")
+  .wk <- suppressWarnings(as.Date(colnames(Y_wide)))
+  if (.roll && anyNA(.wk)) {
+    warning("[design] rolling predictors need dated columns on the count matrix; ",
+            "falling back to the shared matrix.", call. = FALSE)
+    .roll <- FALSE
+  }
+  # THE FLOOR MUST NEVER EMPTY A FOLD. It skips sparse early transitions, which costs a
+  # long fold almost nothing -- but the EARLIEST fold has only two transitions, so a floor of
+  # 3 skipped both and the fold produced no training rows and therefore NO FORECASTS AT ALL.
+  # That silently removed the first round from every Bayesian model while the structural
+  # baselines, which use no design, kept it: the earliest weeks of the outbreak went
+  # uncross-validated, and the common-support alignment then (correctly) withheld that round
+  # from the baselines too, so it vanished from the comparison entirely.
+  #
+  # Capping the floor at the number of available transitions is safe for the thing the floor
+  # protects. The import force enters the hazard as `offset(logLam)` with its coefficient
+  # FIXED at 1 (21_bayesian_renewal.R), so the only term a sparse early fold destabilises is
+  # the INTERCEPT -- and an intercept shifts every zone identically on the cloglog scale.
+  # Within-fold ranking (top-K, AUC-PR, rank-of-truth, the prioritisation panels) is therefore
+  # untouched by an unstable beta_0; only the probability LEVEL moves, which is exactly what
+  # the one-parameter recalibration of 16b exists to correct. One transition still supplies a
+  # row per at-risk zone (~500), so the design is not thin in rows, only in import force.
+  .nT <- ncol(Y_wide) - 1L
+  .t0 <- if (.roll) min(max(1L, as.integer(rolling_floor)), max(1L, .nT)) else 1L
+  if (.roll && .t0 < max(1L, as.integer(rolling_floor)))
+    message(sprintf(paste0("[design] rolling floor %d capped to %d: this fold has only %d ",
+                           "transition(s). The fold is KEPT (an unstable intercept cannot ",
+                           "move the within-fold ranking); its probability level is carried ",
+                           "by the recalibration factor."),
+                    as.integer(rolling_floor), .t0, .nT))
   rows <- list()
   for (t in seq_len(ncol(Y_wide) - 1L)) {
-    Lam <- compute_foi(Y_wide, W, G, t_idx = t + 1L, zones_all)
+    if (.roll && t < .t0) next
+    # The import force for transition t -> t+1. Under rolling predictors it comes from the
+    # counts known at the END of week t (week_start + 6, the same origin convention used
+    # everywhere else); otherwise from the single shared matrix.
+    Y_lam <- Y_wide
+    if (.roll) {
+      Y_lam <- .asof_counts_wide(rolling_ll, zones_all, .wk[t] + 6L, rolling_delay,
+                                 week_spine = .wk[seq_len(t)])
+      if (is.null(Y_lam) || ncol(Y_lam) < 1L) next
+    }
+    # compute_foi() reads weeks strictly BEFORE t_idx, indexed against the matrix it is given.
+    # Shared matrix: the target week sits at column t + 1.
+    # Rolling matrix: it holds weeks 1..t only, so the target week is the column after the end.
+    .t_idx <- if (.roll) ncol(Y_lam) + 1L else t + 1L
+    Lam <- compute_foi(Y_lam, W, G, t_idx = .t_idx, zones_all)
     aff <- rowSums(Y_wide[, seq_len(t), drop = FALSE] > 0) > 0
     ar  <- !aff & Lam > 0
     if (!any(ar)) next
@@ -638,68 +635,13 @@ build_invasion_design <- function(zone_week_nc, mobility_matrices, gt_pmfs,
        center = center, scale = scale, mob = mob, gt = gt)
 }
 
-#' For each candidate covariate, its UNIVARIATE association with invasion, both
-#' MARGINAL (raw) and ADJUSTED for the mobility import force (offset). The
-#' marginal HR is always estimable; the adjusted fit can separate (HR -> 0/Inf)
-#' when a covariate has no identifiable signal beyond mobility — that is itself the
-#' finding, flagged rather than hidden.
-covariate_associations <- function(design) {
-  d <- design$d
-  fit1 <- function(f, use_off) {
-    fm <- stats::as.formula(paste("invaded ~", f))
-    m <- tryCatch(suppressWarnings(stats::glm(fm, binomial("cloglog"),
-           offset = if (use_off) d$logLam else NULL, data = d,
-           method = if (requireNamespace("brglm2", quietly = TRUE)) brglm2::brglmFit else "glm.fit")),
-         error = function(e) NULL)
-    if (is.null(m)) return(c(hr = NA, lo = NA, hi = NA, p = NA))
-    cf <- coef(m)[f]; se <- tryCatch(summary(m)$coefficients[f, 2], error = function(e) NA)
-    pv <- tryCatch(summary(m)$coefficients[f, 4], error = function(e) NA)
-    c(hr = exp(unname(cf)), lo = exp(unname(cf) - 1.96 * se),
-      hi = exp(unname(cf) + 1.96 * se), p = unname(pv))
-  }
-  purrr::map_dfr(design$feat, function(f) {
-    mg <- fit1(f, FALSE); aj <- fit1(f, TRUE)
-    tibble::tibble(term = f, label = unname(.PARAM_LABEL[f]) %||% f,
-      hr = mg["hr"], lo = mg["lo"], hi = mg["hi"], p = mg["p"],
-      hr_adj = aj["hr"], p_adj = aj["p"],
-      adj_status = dplyr::case_when(
-        !is.finite(aj["hr"]) | aj["hr"] > 20 | aj["hr"] < 0.05 ~ "separates (no added signal)",
-        aj["p"] < 0.05 ~ "still significant",
-        TRUE ~ "attenuated (mediated by mobility)"))
-  })
-}
-
-#' Q1 — covariate association screen: the marginal invasion hazard-ratio per +1 SD
-#' for every candidate covariate (all estimable), with 95% CIs, annotated by what
-#' happens after adjusting for the mobility import force (the dominant driver).
-plot_model_parameters <- function(assoc, best_method, beta0 = NA, n_events = NA,
-                                  save = TRUE) {
-  if (is.null(assoc) || nrow(assoc) == 0) {
-    message("[params] no covariate associations to plot"); return(invisible(NULL)) }
-  d <- assoc %>% dplyr::filter(is.finite(hr)) %>% dplyr::arrange(hr) %>%
-    dplyr::mutate(label = factor(label, levels = label),
-                  dir = ifelse(hr >= 1, "associated with higher risk", "associated with lower risk"))
-  p <- ggplot(d, aes(hr, label, colour = dir)) +
-    geom_vline(xintercept = 1, linetype = "22", colour = "grey45") +
-    geom_linerange(aes(xmin = lo, xmax = hi), linewidth = 0.8, na.rm = TRUE) +
-    geom_point(size = 3) +
-    geom_text(aes(x = hi, label = paste0("  ", adj_status)), hjust = 0, size = 2.7,
-              colour = "grey35", na.rm = TRUE) +
-    scale_colour_manual(values = c(`associated with higher risk` = OKABE_ITO[2],
-                                   `associated with lower risk` = OKABE_ITO[1]), name = NULL) +
-    scale_x_log10(expand = expansion(mult = c(0.05, 0.35))) +
-    labs(title = sprintf("Invasion drivers — %s", best_method),
-         subtitle = sprintf("Mobility import force is the dominant driver (offset, beta0=%.3g); bars = marginal HR per +1 SD, text = effect after adjusting for mobility (%s events)",
-                            beta0, n_events),
-         x = "Marginal invasion hazard ratio per +1 SD  (log scale; >1 = higher risk)", y = NULL,
-         caption = stringr::str_wrap("Univariate complementary-log-log fits (Firth-penalised, 95% CI). The import force already carries most population/distance structure, so several covariates add little (or separate) once it is conditioned on.", width = 150)) +
-    theme_inv(11) + theme(legend.position = "top",
-                          plot.subtitle = element_text(size = 8.5, colour = "grey30"),
-                          plot.caption = element_text(colour = "grey40", size = 8, hjust = 0),
-                          plot.caption.position = "plot")
-  if (save) .fd_save(p, file.path(OUT_REPORTS, "best_model_parameters.pdf"), w = 10.5, h = 5)
-  invisible(p)
-}
+# covariate_associations() and plot_model_parameters() — REMOVED. They ran the Firth-penalised
+# cloglog covariate-association SCREEN (marginal hazard ratios with 95% Wald CIs, separation
+# flags) on build_invasion_design()'s output and drew it. Both were reachable only from the
+# frequentist branch of run_all.R, which is gone; the surviving covariate evidence is the
+# BAYESIAN posterior, traced over folds by compute_bayes_params_over_time() and published as
+# key_outputs/bayes_params_over_time.csv. build_invasion_design() itself is retained — the
+# Bayesian suite builds every one of its designs with it.
 
 #' National effective reproduction number R(t) from the renewal estimate
 #' (EpiNow2), with 60% and 90% credible bands and the three GT-profile means for
@@ -707,6 +649,30 @@ plot_model_parameters <- function(assoc, best_method, beta0 = NA, n_events = NA,
 #' week ahead for the 2-week invasion horizon); this plots it explicitly.
 plot_rt <- function(rt_primary, rt_all = NULL, save = TRUE) {
   if (is.null(rt_primary) || nrow(rt_primary) == 0) return(invisible(NULL))
+  # ESTIMATES ONLY. EpiNow2 projects 7 days past the data (forecast_opts(horizon = 7)), and
+  # those rows are tagged type == "forecast". Plotting them in the same ink as the estimates
+  # showed a week of projection as if it were inference — and it is the most eye-catching part
+  # of the curve, being the part that moves. Drop it here and in the GT-sensitivity overlay.
+  .tail_removed <- TRUE
+  .est_only <- function(x) {
+    if (is.null(x) || !nrow(x)) return(x)
+    # !%in% "forecast", NOT != : base-R logical indexing with an NA returns an all-NA PHANTOM
+    # ROW rather than dropping it.
+    if ("type" %in% names(x)) return(x[!x$type %in% "forecast", , drop = FALSE])
+    # No `type` column: every cached R(t) object written before RT_CACHE_VERSION 6 lacks it.
+    # Fall back to the as-of date, as run_all.R and 44_reff_epinow2_check.R both do — silently
+    # returning the input would leave EpiNow2's 7-day forecast tail drawn in the same ink as the
+    # estimates while the caption claims it was excluded.
+    .cut <- suppressWarnings(as.Date(get0("ANALYSIS_DATE", ifnotfound = NA)))
+    if (length(.cut) == 1L && !is.na(.cut))
+      return(x[as.Date(x$date) <= .cut, , drop = FALSE])
+    .tail_removed <<- FALSE
+    warning("[rt] no `type` column and no ANALYSIS_DATE: the EpiNow2 forecast tail cannot be excluded.",
+            call. = FALSE)
+    x
+  }
+  rt_primary <- .est_only(rt_primary)
+  if (!nrow(rt_primary)) return(invisible(NULL))
   d <- rt_primary %>% dplyr::mutate(date = as.Date(date))
   p <- ggplot(d, aes(date, R_mean)) +
     geom_hline(yintercept = 1, linetype = "22", colour = "grey40") +
@@ -714,7 +680,7 @@ plot_rt <- function(rt_primary, rt_all = NULL, save = TRUE) {
     geom_ribbon(aes(ymin = R_lo_60, ymax = R_hi_60), fill = OKABE_ITO[1], alpha = 0.30)
   if (!is.null(rt_all) && length(rt_all) > 1) {
     others <- dplyr::bind_rows(lapply(names(rt_all), function(nm) {
-      x <- rt_all[[nm]]; if (is.null(x) || !nrow(x)) return(NULL)
+      x <- .est_only(rt_all[[nm]]); if (is.null(x) || !nrow(x)) return(NULL)
       dplyr::mutate(x, date = as.Date(date), gt = nm) }))
     p <- p + geom_line(data = others, aes(date, R_mean, linetype = gt),
                        colour = "grey30", linewidth = 0.4, inherit.aes = FALSE) +
@@ -725,7 +691,9 @@ plot_rt <- function(rt_primary, rt_all = NULL, save = TRUE) {
     labs(title = "National effective reproduction number R(t)",
          subtitle = "Renewal (EpiNow2) estimate | shaded = 60% & 90% credible intervals | R=1 = growth/decline threshold",
          x = NULL, y = "R(t)",
-         caption = "A renewal-model output on the national onset series; also used to project one week of incidence for the 2-week invasion horizon.") +
+         caption = paste0("A renewal-model output on the national onset series; also used to project one week of incidence for the 2-week invasion horizon. ",
+                          if (.tail_removed) "Estimates only: EpiNow2's 7-day forecast tail is excluded."
+                          else "WARNING: the 7-day forecast tail could NOT be identified and is included.")) +
     theme_inv(11) + theme(plot.caption = element_text(colour = "grey40", size = 8, hjust = 0))
   if (save) .fd_save(p, file.path(OUT_DIAGNOSTICS, "rt_national.pdf"), w = 9, h = 4.6)
   invisible(p)
@@ -805,12 +773,64 @@ compute_vulnerability_index <- function(covariates, zones_all = NULL, osrm_mat =
   # Equal-weight mean over the AVAILABLE pillars (access axis is dropped if no OSRM
   # matrix is supplied, so behaviour is unchanged for callers that omit it).
   pillars <- c("surveillance_gap", "healthcare_gap", "access_gap", "social_vulnerability")
-  pillars <- pillars[vapply(pillars, function(p) !all(is.na(d[[p]])), logical(1))]
+  # DROP DEGENERATE PILLARS, not just all-NA ones (2026-09-17).
+  #
+  # Every one of the 519 zones has at least one health facility (min healthsite_count = 5), so
+  # the `hcount > 0 -> t_access = 0` override above zeroes the ENTIRE access axis: t_access is 0
+  # for all 519 zones, hence access_gap is 0 for all of them. The old filter kept it (it is not
+  # all-NA), so V was the mean of THREE informative pillars and one constant zero — i.e. exactly
+  # 3/4 of the intended index. Verified against outputs/forecasts/bayes_risk_scores_current.rds:
+  # max|V - 0.75 * mean(3 informative pillars)| = 5.6e-17, published V range [0.014, 0.734]
+  # against a correct [0.019, 0.978].
+  #
+  # This deflated the published V column and compressed the x-axis of the retained
+  # bayes_priority_scatter panels (a percent-formatted axis topping out at 73%). `priority` and
+  # all ranks were UNAFFECTED — the constant 3/4 cancels in the priority rescale and in rank(V).
+  #
+  # A zero-variance axis carries no information about which zone is worse off, so averaging it in
+  # can only dilute. Keep a pillar only if it is neither all-NA nor constant.
+  .informative <- function(p) {
+    v <- d[[p]]
+    !all(is.na(v)) && is.finite(stats::sd(v, na.rm = TRUE)) && stats::sd(v, na.rm = TRUE) > 0
+  }
+  .dropped <- pillars[!vapply(pillars, .informative, logical(1))]
+  pillars  <- pillars[vapply(pillars, .informative, logical(1))]
+  if (length(.dropped))
+    message(sprintf("[vulnerability] %d pillar(s) dropped as uninformative (all-NA or zero variance): %s; V is the mean of the remaining %d.",
+                    length(.dropped), paste(.dropped, collapse = ", "), length(pillars)))
+  if (!length(pillars))
+    stop("[vulnerability] no informative pillar remains; V cannot be formed.", call. = FALSE)
+  # Publish the pillar set that ACTUALLY formed V, so captions and the methods description
+  # derive it instead of asserting a fixed count. The published caption used to name four
+  # pillars including "healthcare access (travel time to nearest facility)" while the access
+  # axis is constant on this data and is dropped just above — so the retained
+  # bayes_priority_scatter panels described an index component that does not enter the index.
+  .V_LABELS <- c(surveillance_gap     = "surveillance (facility density)",
+                 healthcare_gap       = "healthcare (facilities per capita)",
+                 access_gap           = "healthcare access (travel time to nearest facility)",
+                 social_vulnerability = "CCVI deprivation")
+  assign(".V_PILLARS", pillars, envir = .GlobalEnv)
+  assign(".V_PILLAR_LABELS", unname(ifelse(pillars %in% names(.V_LABELS),
+                                           .V_LABELS[pillars], pillars)),
+         envir = .GlobalEnv)
   M <- as.matrix(d[, pillars, drop = FALSE])
   # Equal-weight mean over the available pillars; a zone with EVERY pillar NA gets V = NA (not
   # NaN, which rowMeans(na.rm=TRUE) would otherwise return and then propagate into priority).
   d$V <- ifelse(rowSums(is.finite(M)) == 0L, NA_real_, rowMeans(M, na.rm = TRUE))
   d
+}
+
+#' One sentence naming the pillars that actually formed V on THIS run, from the set
+#' .attach_vulnerability() published. Falls back to the full nominal list only when the
+#' index has not been built yet (standalone use), and never asserts a pillar count.
+.v_pillar_sentence <- function() {
+  labs <- get0(".V_PILLAR_LABELS", ifnotfound = NULL)
+  if (is.null(labs) || !length(labs))
+    labs <- c("surveillance (facility density)", "healthcare (facilities per capita)",
+              "healthcare access (travel time to nearest facility)", "CCVI deprivation")
+  joined <- if (length(labs) == 1L) labs else
+    paste0(paste(labs[-length(labs)], collapse = ", "), " and ", labs[length(labs)])
+  sprintf("Vulnerability = mean percentile gap in %s.", joined)
 }
 
 #' Q2 + Q3 — attach 0-1 relative-risk indices and the vulnerability-adjusted
@@ -856,8 +876,12 @@ add_risk_indices <- function(risk_scores, vuln,
 #' Q3 — hazard-vs-vulnerability scatter: where a zone sits on likelihood (y) and
 #' vulnerability/capacity (x); the diagonal is the priority score. Top-priority
 #' zones (upper right) are labelled.
+#' @param show_title FALSE drops the plot title AND subtitle (the caption stays). The
+#'   published bayes_priority_scatter panels carry their caption in the manuscript text, so
+#'   in-figure titles duplicate it; other callers keep titles for at-a-glance diagnostics.
 plot_priority_scatter <- function(rs, horizon = 1L, top_n = 12L, save = TRUE, window_txt = "",
-                                  file = "priority_scatter", model_label = "") {
+                                  file = "priority_scatter", model_label = "",
+                                  show_title = TRUE) {
   d <- rs %>% dplyr::filter(horizon == !!horizon, !(was_active_before %in% TRUE),
                             is.finite(V), is.finite(rr01_nat))
   if (nrow(d) == 0) return(invisible(NULL))
@@ -872,12 +896,16 @@ plot_priority_scatter <- function(rs, horizon = 1L, top_n = 12L, save = TRUE, wi
     scale_size_area(max_size = 8, name = "Priority") +
     scale_x_continuous(limits = c(0, 1), labels = scales::percent_format(accuracy = 1)) +
     scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
-    labs(title = sprintf("Preparedness priority: invasion likelihood x vulnerability (h=%dw)%s",
-                         horizon, if (nzchar(model_label)) paste0(" — ", model_label) else ""),
-         subtitle = "Upper-right = likely to be invaded AND vulnerable/under-resourced = highest priority",
+    labs(title = if (show_title)
+           sprintf("Preparedness priority: invasion likelihood x vulnerability (h=%dw)%s",
+                   horizon, if (nzchar(model_label)) paste0(" — ", model_label) else "")
+         else NULL,
+         subtitle = if (show_title)
+           "Upper-right = likely to be invaded AND vulnerable/under-resourced = highest priority"
+         else NULL,
          x = "Vulnerability & capacity gap (0-1; higher = more vulnerable, less prepared)",
          y = "Relative invasion risk (0-1; 1 = highest)",
-         caption = paste0("Vulnerability = mean percentile gap in surveillance (facility density), healthcare (facilities per capita), healthcare access (travel time to nearest facility) and CCVI deprivation. ", window_txt)) +
+         caption = paste0(.v_pillar_sentence(), " ", window_txt)) +
     theme_inv(11) + theme(legend.position = "right",
                           plot.caption = element_text(colour = "grey40", size = 8))
   if (save) {
@@ -886,10 +914,22 @@ plot_priority_scatter <- function(rs, horizon = 1L, top_n = 12L, save = TRUE, wi
     # Also place the priority scatter in key_outputs/ (in ADDITION to reports) so it ships
     # with the headline deliverables — copied here at save time, not only via the end-of-run
     # key_outputs manifest, so it is present even on a partial run.
-    .ko <- file.path(get0("OUT_DIR", ifnotfound = dirname(OUT_REPORTS)), "key_outputs")
-    dir.create(.ko, showWarnings = FALSE, recursive = TRUE)
-    if (file.exists(.pp))
-      file.copy(.pp, file.path(.ko, basename(.pp)), overwrite = TRUE)
+    # ASK THE GATE before copying. .fd_save() returns early when figure_is_kept() refuses,
+    # WITHOUT clearing a stale target, so an unconditional copy republished whatever an earlier
+    # run had left in reports/ into the published key-outputs bundle — every run, with a fresh
+    # mtime, and outside the reach of the end-of-run archive sweep (which does not cover
+    # key_outputs/ itself or OUT_REPORTS). Copy only a file this gate would write, and clear
+    # any stale copy otherwise.
+    .ko  <- file.path(get0("OUT_DIR", ifnotfound = dirname(OUT_REPORTS)), "key_outputs")
+    .fk  <- get0("figure_is_kept", ifnotfound = NULL)
+    .keep <- !is.function(.fk) || isTRUE(.fk(.pp))
+    .dst <- file.path(.ko, basename(.pp))
+    if (.keep && file.exists(.pp)) {
+      dir.create(.ko, showWarnings = FALSE, recursive = TRUE)
+      file.copy(.pp, .dst, overwrite = TRUE)
+    } else if (file.exists(.dst)) {
+      file.remove(.dst)
+    }
   }
   invisible(p)
 }
@@ -962,15 +1002,31 @@ describe_priority_index <- function() {
     "that asks not just *how likely* a zone is to be invaded but *how badly it would",
     "go*. It multiplies the invasion hazard by a transparent **vulnerability &",
     "capacity index** V in [0,1] (1 = most vulnerable / least prepared), the equal-",
-    "weight mean of the available percentile-ranked pillars (four when an OSRM travel-time",
-    "matrix is supplied, as in the default run; the healthcare-access axis is dropped otherwise):", "",
-    "1. **Surveillance gap** = 1 - rank(health-facility density) — detection reach",
-    "   (dedicated PCR-testing data covers only ~4% of zones, so facility density is",
-    "   the robust per-zone surveillance proxy);",
-    "2. **Healthcare gap** = 1 - rank(health facilities per capita) — treatment load;",
-    "3. **Healthcare access gap** = rank(road travel time to the nearest zone with a facility;",
-    "   own-facility zones = 0) — physical reach of care, distinct from facility density/per-capita;",
-    "4. **Social vulnerability** = rank(CCVI socioeconomic deprivation).", "",
+    # The pillar list is DERIVED from the run, not asserted. This used to promise "four when an
+    # OSRM travel-time matrix is supplied, as in the default run" — which is precisely the case
+    # where the access axis IS dropped: every one of the 519 zones has a facility, so t_access
+    # is 0 everywhere and the zero-variance pillar is excluded by .attach_vulnerability().
+    # V is therefore a THREE-pillar mean on the shipped data, and the numbered list below marks
+    # any nominal pillar that did not enter it.
+    sprintf("weight mean of the percentile-ranked pillars that carry information on this run (%d of 4 below):",
+            length(get0(".V_PILLARS", ifnotfound = c("surveillance_gap", "healthcare_gap",
+                                                     "access_gap", "social_vulnerability")))), "",
+    local({
+      used <- get0(".V_PILLARS", ifnotfound = c("surveillance_gap", "healthcare_gap",
+                                                "access_gap", "social_vulnerability"))
+      mark <- function(k) if (k %in% used) "" else " *(dropped this run: no variation across zones)*"
+      c(paste0("1. **Surveillance gap** = 1 - rank(health-facility density) — detection reach",
+               mark("surveillance_gap")),
+        "   (dedicated PCR-testing data covers only ~4% of zones, so facility density is",
+        "   the robust per-zone surveillance proxy);",
+        paste0("2. **Healthcare gap** = 1 - rank(health facilities per capita) — treatment load;",
+               mark("healthcare_gap")),
+        "3. **Healthcare access gap** = rank(road travel time to the nearest zone with a facility;",
+        paste0("   own-facility zones = 0) — physical reach of care, distinct from facility density/per-capita;",
+               mark("access_gap")),
+        paste0("4. **Social vulnerability** = rank(CCVI socioeconomic deprivation).",
+               mark("social_vulnerability")))
+    }), "",
     "`priority = (invasion risk, 0-1) x V`, rescaled so 1 is the top priority. Being",
     "multiplicative, a zone must be BOTH at material risk of invasion AND vulnerable",
     "to score highly — a well-resourced zone that is likely to be invaded, or a",
@@ -1011,14 +1067,37 @@ describe_priority_index <- function() {
     mobn <- c(M1 = "short-trip", M4 = "gravity", M8 = "composite-gravity",
               M9 = "multi-kernel ensemble", M10 = "radiation-composite",
               M11 = "inward meeting-location FOI",
-              M13 = "cohort+gravity", M14 = "cohort+radiation")[mob]
+              M13 = "cohort+gravity", M14 = "cohort+radiation",
+              # M15/M16/M17 were missing, so the Flowminder-static family rendered as bare
+              # matrix ids in every legend that uses this decoder.
+              # M16 composes the cohort rows with the DIRECTED OD kernel M3, not with the
+              # symmetrised static M15 (03_mobility_matrices.R); "cohort+static" named the
+              # wrong base kernel in every legend that uses this decoder.
+              M15 = "combined-static", M16 = "cohort+relocation OD",
+              M17 = "all-kernel consensus")[mob]
     # OSRM road-DISTANCE deterrence variant (vs the default travel-time deterrence).
     if (grepl("-dist", cc) && !is.na(mobn)) mobn <- paste0(mobn, ", road-distance")
+    # SOURCE-CELL FILL twin: without this it decodes to exactly its unfilled parent's string.
+    if (grepl("-fill", cc) && !is.na(mobn)) mobn <- paste0(mobn, ", source-cell fill")
+    # ORIGIN-SPLIT cohort kernel (always filled by construction).
+    if (grepl("-split", cc) && !is.na(mobn)) mobn <- paste0(mobn, ", origin-split cohort, source-cell fill")
     gt   <- if (grepl("-short", cc)) "short GT" else if (grepl("-long", cc)) "long GT" else "med GT"
     cov  <- if (grepl("-full", cc)) " · +full covariates" else
             if (grepl("-geo", cc)) " · +geo covariates" else ""
     lnk  <- if (grepl("-logit", cc)) " · logit link" else if (grepl("-probit", cc)) " · probit link" else ""
-    sprintf("%s  —  %s · %s%s%s", cc, if (is.na(mobn)) mob else mobn, gt, cov, lnk)
+    # TIME-VARYING beta family. Without this a "-tv*" model decodes to exactly the same
+    # string as its fixed-beta base kernel, so two genuinely different models would be
+    # indistinguishable in every legend and in the parameter-panel key. Every process in
+    # the grid must appear here: until 2026-09-23 only trend and week did, so an ar1, rw1
+    # or gp arm silently carried its base kernel's label.
+    .tvlab <- c(trend = "time-trend", week = "weekly-varying", rw1 = "random-walk",
+                ar1 = "AR(1)", gp = "Gaussian-process")
+    .tvhit <- regmatches(cc, regexpr("-tv[a-z0-9]+$", cc))
+    tvv  <- if (length(.tvhit)) {
+      .k <- sub("^-tv", "", .tvhit)
+      sprintf(" · %s β", if (.k %in% names(.tvlab)) .tvlab[[.k]] else .k)
+    } else ""
+    sprintf("%s  —  %s · %s%s%s%s", cc, if (is.na(mobn)) mob else mobn, gt, cov, lnk, tvv)
   }, character(1))
 }
 
@@ -1033,7 +1112,7 @@ describe_priority_index <- function() {
 plot_bayes_parameters <- function(params, weights = NULL, window_txt = "", save = TRUE,
                                   top_n = 6L) {
   if (is.null(params) || !nrow(params)) return(invisible(NULL))
-  lab <- function(t) unname(.PARAM_LABEL[t]) %||% t
+  lab <- function(t) .lk(.PARAM_LABEL, t, t)
   # description WITHOUT the leading "Bayes-… — " code prefix, for the legend rows.
   descr_of <- function(code) sub("^.*?  —  ", "", .bayes_model_label(code))
 
@@ -1138,7 +1217,7 @@ plot_bayes_parameters <- function(params, weights = NULL, window_txt = "", save 
 plot_bayes_posterior_densities <- function(draws, window_txt = "", save = TRUE) {
   if (is.null(draws) || !nrow(draws) || !requireNamespace("ggridges", quietly = TRUE))
     return(invisible(NULL))
-  lab <- function(t) unname(.PARAM_LABEL[t]) %||% t
+  lab <- function(t) .lk(.PARAM_LABEL, t, t)
   b0 <- draws %>% dplyr::filter(is_intercept) %>% dplyr::mutate(mlab = .bayes_model_label(model))
   b0$mlab <- stats::reorder(b0$mlab, b0$hr, FUN = stats::median)
   pA <- ggplot(b0, aes(x = hr, y = mlab)) +
@@ -1293,50 +1372,51 @@ plot_bayes_stacking <- function(weights, save = TRUE) {
 
 #' Refit the (identifiable, exogenous) covariate cloglog GLM at each fold cutoff
 #' to trace how the estimated invasion drivers move as the outbreak accrues.
-compute_params_over_time <- function(zone_week_outbreak, cutoffs, mobility_matrices,
-                                     gt_pmfs, covariates, osrm_mat, zones_all,
-                                     mob = "M8", gt = "medium",
-                                     cov_spec = c("log_pop", "ccvi", "d_min"),
-                                     nowcast_fn = NULL) {
-  if (is.null(nowcast_fn)) nowcast_fn <- get0("apply_nowcast_correction")
-  purrr::map_dfr(cutoffs, function(cut) {
-    zw <- zone_week_outbreak %>% dplyr::filter(week_start <= cut)
-    zwn <- tryCatch(nowcast_fn(zw, analysis_date = cut + 7), error = function(e) zw)
-    des <- tryCatch(build_invasion_design(zwn, mobility_matrices, gt_pmfs, covariates,
-             osrm_mat, zones_all, mob = mob, gt = gt, candidates = cov_spec),
-             error = function(e) NULL)
-    if (is.null(des) || des$n_events < 2L) return(NULL)
-    m <- tryCatch(suppressWarnings(stats::glm(
-      stats::as.formula(paste("invaded ~", paste(des$feat, collapse = " + "))),
-      family = binomial("cloglog"), offset = des$d$logLam, data = des$d,
-      method = if (requireNamespace("brglm2", quietly = TRUE)) brglm2::brglmFit else "glm.fit")),
-      error = function(e) NULL)
-    if (is.null(m)) return(NULL)
-    co <- summary(m)$coefficients
-    terms <- intersect(des$feat, rownames(co))
-    tibble::tibble(cutoff = as.Date(cut), n_events = des$n_events, term = terms,
-      hr = exp(co[terms, 1]),
-      lo = exp(co[terms, 1] - 1.96 * co[terms, 2]),
-      hi = exp(co[terms, 1] + 1.96 * co[terms, 2]))
-  })
+# Shared as-of training slice for the over-time refits (params / beta / Bayesian params).
+#
+# 2026-09-17: these refits used to do `zone_week_outbreak %>% filter(week_start <= cut)`,
+# i.e. slice the FINAL onset-bucketed counts. That folds in cases reported only AFTER the
+# fold's forecast moment and then inflates them again with the nowcast — the training-side
+# revision leak that run_invasion_lfo() (16_invasion_eval.R) re-aggregates the line list to
+# avoid. The over-time traces were therefore on a different footing from the LFO folds they
+# are plotted against. Mirrors the LFO's fallback behaviour exactly: warn loudly, degrade to
+# the final-count slice rather than erroring.
+.asof_train_slice <- function(zone_week_outbreak, cut, linelist = NULL, zones_all = NULL) {
+  if (!is.null(linelist) && exists("reaggregate_asof") && !is.null(zones_all)) {
+    tr <- tryCatch(
+      reaggregate_asof(linelist, zones_all, cut + 6,
+                       week_spine = sort(unique(zone_week_outbreak$week_start))[
+                         sort(unique(zone_week_outbreak$week_start)) <= cut]),
+      error = function(e) {
+        warning(sprintf("[over-time] cutoff %s: reaggregate_asof failed (%s); this cutoff falls back to the final-count (revision-leaky) slice.",
+                        format(cut), conditionMessage(e)), call. = FALSE); NULL })
+    if (!is.null(tr)) return(dplyr::filter(tr, week_start <= cut))
+  }
+  dplyr::filter(zone_week_outbreak, week_start <= cut)
 }
 
-#' Parameter estimates over time (fold cutoffs): HR + 95% CI per driver.
 plot_params_over_time <- function(pot, save = TRUE, file = "params_over_time",
-                                  model_label = "") {
+                                  model_label = "", show_title = TRUE) {
   if (is.null(pot) || !nrow(pot)) return(invisible(NULL))
-  pot <- pot %>% dplyr::mutate(label = vapply(term, function(t) unname(.PARAM_LABEL[t]) %||% t, character(1)))
-  p <- ggplot(pot, aes(cutoff, hr)) +
+  # x is the FORECAST ORIGIN (cutoff + 6), not the training week's start.
+  pot <- pot %>% dplyr::mutate(label = vapply(term, function(t) .lk(.PARAM_LABEL, t, t), character(1)),
+                               origin = lfo_origin(cutoff))
+  p <- ggplot(pot, aes(origin, hr)) +
     geom_hline(yintercept = 1, linetype = "22", colour = "grey45") +
     geom_ribbon(aes(ymin = lo, ymax = hi), fill = OKABE_ITO[1], alpha = 0.18) +
     geom_line(colour = OKABE_ITO[1], linewidth = 0.7) + geom_point(size = 1.2) +
     facet_wrap(~ label, scales = "free_y") +
     scale_y_log10() +
-    labs(title = sprintf("Invasion-driver estimates over time (refit at each fold cutoff)%s",
-                         if (nzchar(model_label)) paste0(" — ", model_label) else ""),
-         subtitle = "Hazard ratio per +1 SD with 95% CI / 90% CrI; x = forecast date (training data grows left to right)",
-         x = "Fold cutoff (forecast date)", y = "Hazard ratio per +1 SD (log scale)",
-         caption = "Identifiable exogenous drivers only (log_pop, CCVI, d_min); shows whether/when each effect stabilises. Note: the design is re-standardised per fold, so the +1 SD unit varies slightly across cutoffs.") +
+    labs(title = if (show_title)
+           sprintf("Invasion-driver estimates over time (refit at each forecast round)%s",
+                   if (nzchar(model_label)) paste0(" — ", model_label) else "")
+         else NULL,
+         subtitle = if (show_title)
+           "Hazard ratio per +1 SD with 95% CI / 90% CrI; x = forecast date (training data grows left to right)"
+         else NULL,
+         x = "Forecast origin (as-of date)", y = "Hazard ratio per +1 SD (log scale)",
+         caption = sprintf("Identifiable exogenous drivers only (%s); shows whether/when each effect stabilises. Note: the design is re-standardised per fold, so the +1 SD unit varies slightly across cutoffs.",
+                           paste(get0("BAYES_GEO_COVARIATES", ifnotfound = c("ccvi", "d_min")), collapse = ", "))) +
     theme_inv(11) + theme(plot.caption = element_text(colour = "grey40", size = 8, hjust = 0))
   if (save) .fd_save(p, file.path(OUT_DIAGNOSTICS, sprintf("%s.pdf", file)), w = 10, h = 5)
   invisible(p)
@@ -1358,6 +1438,7 @@ plot_predobs_over_folds <- function(lfo_results, method, horizon = 1L, save = TR
       n_atrisk = dplyr::n(), n_inv = sum(is_new_invasion), .groups = "drop") %>%
     dplyr::mutate(cutoff = as.Date(cutoff))
   long <- by_fold %>%
+    dplyr::mutate(cutoff = lfo_origin(cutoff)) %>%
     dplyr::select(cutoff, `Mean predicted P` = mean_pred,
                   `Observed invasion fraction` = obs_frac,
                   `Mean P at invaded zones` = pred_at_invaded) %>%
@@ -1371,7 +1452,7 @@ plot_predobs_over_folds <- function(lfo_results, method, horizon = 1L, save = TR
     scale_y_continuous(labels = scales::percent_format(accuracy = 0.1)) +
     labs(title = sprintf("Predicted vs observed invasion over folds — %s (h=%dw)", method, horizon),
          subtitle = "Each point = one fold (forecast date). Well-calibrated: mean predicted ~ observed fraction; discriminating: P at invaded zones > mean.",
-         x = "Fold cutoff (forecast date)", y = "Probability / fraction",
+         x = "Forecast origin (as-of date)", y = "Probability / fraction",
          caption = "At-risk zones only, per fold; the invaded-zone line is NA where a fold had no invasion.") +
     theme_inv(11) + theme(legend.position = "top",
                           plot.caption = element_text(colour = "grey40", size = 8, hjust = 0))
@@ -1386,73 +1467,9 @@ plot_predobs_over_folds <- function(lfo_results, method, horizon = 1L, save = TR
 #' Tag a method name with its inferential family.
 .model_family <- function(m) ifelse(grepl("^Bayes", m), "Bayesian", "Frequentist")
 
-#' Model-ranking comparison: AUC-PR skill per method coloured by inferential family,
-#' so the Bayesian suite is ranked ON THE SAME leave-future-out folds as the
-#' frequentist models and the two paradigms are directly comparable.
-plot_freq_bayes_ranking <- function(eval_tbl, horizon = 1L, save = TRUE) {
-  if (is.null(eval_tbl) || !nrow(eval_tbl) || !"auc_pr_skill" %in% names(eval_tbl))
-    return(invisible(NULL))
-  d <- eval_tbl %>% dplyr::filter(horizon == !!horizon, is.finite(auc_pr_skill)) %>%
-    dplyr::mutate(family = .model_family(method),
-                  method = stats::reorder(method, auc_pr_skill))
-  if (!nrow(d)) return(invisible(NULL))
-  p <- ggplot(d, aes(auc_pr_skill, method, colour = family)) +
-    geom_vline(xintercept = 1, linetype = "22", colour = "grey55") +
-    geom_segment(aes(x = 1, xend = auc_pr_skill, yend = method), linewidth = 0.5) +
-    geom_point(size = 2.6) +
-    scale_colour_manual(values = c(Frequentist = OKABE_ITO[1], Bayesian = OKABE_ITO[2]), name = NULL) +
-    labs(title = sprintf("Frequentist vs Bayesian model skill (h=%dw)", horizon),
-         subtitle = "AUC-PR skill (Average Precision / base rate) on the same LFO folds; dashed = no skill (1)",
-         x = "AUC-PR skill (x base rate)", y = NULL,
-         caption = "Both paradigms fit the SAME cloglog renewal invasion model; only the estimation (penalised MLE vs posterior) differs.") +
-    theme_inv(11) + theme(legend.position = "top",
-                          plot.caption = element_text(colour = "grey40", size = 8, hjust = 0))
-  if (save) .fd_save(p, file.path(OUT_DIAGNOSTICS, sprintf("freq_vs_bayes_ranking_h%d.pdf", horizon)), w = 9, h = 6)
-  invisible(p)
-}
-
-#' Per-zone agreement between the frequentist featured forecast and the Bayesian
-#' stacked posterior — a robustness check that the two paradigms flag the same
-#' at-risk zones. Points on the diagonal = agreement.
-plot_freq_bayes_agreement <- function(freq_rs, bayes_stack, province_map = NULL,
-                                      horizon = 1L, save = TRUE) {
-  if (is.null(freq_rs) || is.null(bayes_stack)) return(invisible(NULL))
-  fcol <- if ("p_case_invasion" %in% names(freq_rs)) "p_case_invasion" else "p_invasion"
-  a <- freq_rs %>% dplyr::filter(horizon == !!horizon, !(was_active_before %in% TRUE)) %>%
-    dplyr::transmute(health_zone, p_freq = .data[[fcol]])
-  b <- bayes_stack %>% dplyr::filter(horizon == !!horizon, !(was_active_before %in% TRUE)) %>%
-    dplyr::transmute(health_zone, p_bayes = p_invasion)
-  d <- dplyr::inner_join(a, b, by = "health_zone") %>%
-    dplyr::filter(is.finite(p_freq), is.finite(p_bayes))
-  if (!nrow(d)) return(invisible(NULL))
-  if (!is.null(province_map))
-    d <- d %>% dplyr::left_join(province_map %>% dplyr::transmute(health_zone = nom, province),
-                                by = "health_zone")
-  if (!"province" %in% names(d)) d$province <- NA_character_
-  d$region <- .prov_label(d$province)
-  rho <- suppressWarnings(stats::cor(d$p_freq, d$p_bayes, method = "spearman"))
-  # Shared axis maximum + coord_equal so the dashed y=x line is a TRUE 45-degree reference
-  # (otherwise independent x/y ranges make points look off-diagonal when they in fact agree).
-  .axmax <- max(d$p_freq, d$p_bayes, 0.02, na.rm = TRUE) * 1.05
-  p <- ggplot(d, aes(p_freq, p_bayes, colour = region)) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey55") +
-    geom_point(size = 2, alpha = 0.78) +
-    scale_colour_manual(values = .prov_colours(d$region), name = "Province") +
-    scale_x_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, .axmax)) +
-    scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, .axmax)) +
-    coord_equal(xlim = c(0, .axmax), ylim = c(0, .axmax)) +
-    labs(title = sprintf("Frequentist vs Bayesian invasion probability (h=%dw)", horizon),
-         subtitle = sprintf("At-risk zones; Spearman rho = %.2f. On the diagonal = the paradigms agree.",
-                            ifelse(is.finite(rho), rho, NA_real_)),
-         x = "Frequentist featured P(first case)", y = "Bayesian stacked P(first case)") +
-    theme_inv(11) + theme(legend.position = "right")
-  if (save) .fd_save(p, file.path(OUT_DIAGNOSTICS, sprintf("freq_vs_bayes_agreement_h%d.pdf", horizon)), w = 8.5, h = 6.5)
-  invisible(p)
-}
-
-# ---------------------------------------------------------------------------
-# Task 7 — per-province masked invasion maps (Ituri, Nord-Kivu, Haut-Uele, ...)
-# ---------------------------------------------------------------------------
+# plot_freq_bayes_ranking() and plot_freq_bayes_agreement() — REMOVED. They compared the two
+# inferential paradigms (AUC-PR skill by family; per-zone p_case agreement with a Spearman
+# correlation). With no frequentist arm the comparison is a model against itself.
 
 #' One masked invasion choropleth per province of interest (province zoom + a
 #' national context panel), so the frontier can be read within Nord-Kivu and
@@ -1497,9 +1514,11 @@ plot_province_risk_maps <- function(rs, shapefile = NULL, horizon = 1L,
 #' darker-blue a zone, the more it is BOTH likely to be invaded AND poorly resourced (the
 #' operational hot-corner). This shows the two dimensions the priority score
 #' multiplies, without collapsing them to a single number.
+#' @param show_title FALSE drops the panel title and subtitle (caption retained).
 plot_prob_vuln_choropleth <- function(rs, shapefile = NULL, horizon = 1L,
                                       province_zoom = "Ituri", window_txt = "",
-                                      save = TRUE, file = NULL, model_label = "") {
+                                      save = TRUE, file = NULL, model_label = "",
+                                      show_title = TRUE) {
   if (is.null(shapefile)) shapefile <- tryCatch(sf::st_read(SHAPEFILE_PATH, quiet = TRUE),
                                                 error = function(e) NULL)
   if (is.null(shapefile) || !"V" %in% names(rs)) return(invisible(NULL))
@@ -1550,10 +1569,14 @@ plot_prob_vuln_choropleth <- function(rs, shapefile = NULL, horizon = 1L,
     geom_sf(aes(fill = bikey), colour = "grey80", linewidth = 0.12) +
     geom_sf(data = dplyr::filter(m, affected), fill = "grey55", colour = "grey80", linewidth = 0.12) +
     scale_fill_manual(values = bipal, na.value = "grey92", guide = "none") +
-    labs(title = sprintf("%s — invasion risk x vulnerability (h=%dw)%s",
-                         province_zoom %||% "National", horizon,
-                         if (nzchar(model_label)) paste0(" — ", model_label) else ""),
-         subtitle = "Darker blue = both likelier to be invaded AND more vulnerable/under-resourced (national quartiles, 4x4)",
+    labs(title = if (show_title)
+           sprintf("%s — invasion risk x vulnerability (h=%dw)%s",
+                   province_zoom %||% "National", horizon,
+                   if (nzchar(model_label)) paste0(" — ", model_label) else "")
+         else NULL,
+         subtitle = if (show_title)
+           "Darker blue = both likelier to be invaded AND more vulnerable/under-resourced (national quartiles, 4x4)"
+         else NULL,
          caption = window_txt) +
     ggplot2::theme_void(base_size = 11) +
     theme(plot.title = element_text(face = "bold", size = 12),
@@ -1584,9 +1607,80 @@ plot_prob_vuln_choropleth <- function(rs, shapefile = NULL, horizon = 1L,
 #' zones each week, what fraction of the zones that actually get invaded do we
 #' catch?" — i.e. sensitivity/recall at a fixed weekly alert budget, with the
 #' matching precision (share of monitored zones that were truly invaded).
-compute_detection_curve <- function(lfo_results, method, horizon = 1L, ks = 1:25) {
+# 90% fold-cluster bootstrap interval for a per-fold statistic. The seed is offset by the
+# budget k so neighbouring points on the curve are not driven by one shared resample (which
+# would make the ribbon artificially smooth), while the whole curve stays reproducible.
+.detc_boot_ci <- function(v, n_boot, seed, k) {
+  v <- v[is.finite(v)]
+  if (!length(v) || !is.finite(n_boot) || n_boot < 2L || length(v) < 2L)
+    return(c(NA_real_, NA_real_))
+  .old <- if (exists(".Random.seed", envir = globalenv())) get(".Random.seed", envir = globalenv()) else NULL
+  on.exit(if (!is.null(.old)) assign(".Random.seed", .old, envir = globalenv()), add = TRUE)
+  set.seed(as.integer((as.numeric(seed) + 7919 * k) %% 2147483647))
+  bs <- vapply(seq_len(n_boot), function(i) mean(v[sample.int(length(v), length(v), TRUE)]), numeric(1))
+  unname(stats::quantile(bs, c(0.05, 0.95), names = FALSE, na.rm = TRUE))
+}
+
+#' @param n_boot fold-cluster bootstrap replicates for the recall interval (0 = none).
+#'   The resampling unit is the FOLD, matching evaluate_invasion()'s cluster bootstrap and
+#'   the structure of the data: zone-weeks within a fold share the same epidemic state and
+#'   the same at-risk set, so a binomial (e.g. Wilson) interval on the pooled hit count
+#'   treats hundreds of dependent rows as independent and is badly anticonservative. The
+#'   manuscript prioritisation panel drew exactly such a Wilson ribbon.
+#' @param seed bootstrap seed, so the published interval is reproducible.
+#' @param common_support restrict to the (fold x zone) cells EVERY scored method covers
+#'   (invasion_common_cells(), 16_invasion_eval.R). TRUE by default and it must stay that way
+#'   for anything the manuscript prints: the random-targeting reference below is `k /
+#'   n_atrisk`, so a method scored on its own larger row set gets a different reference line
+#'   and a different denominator from the evaluation table it is printed beside.
+#' @param support_cells the shared support to use, already resolved. SUPPLY THIS whenever the
+#'   table passed in is not the one evaluate_invasion() scored. run_all.R appends rank-only
+#'   baseline rows to a local copy (`lfo_fig3`) before building the curves, and those rows
+#'   carry NA wherever the baseline has no score for a zone. Deriving the support from that
+#'   copy would drop those cells for EVERY method and hand the curves a smaller support than
+#'   the evaluation table -- reintroducing, from the other side, the mismatch this argument
+#'   exists to prevent. Passing the cells resolved from the SCORED table pins the two together.
+compute_detection_curve <- function(lfo_results, method, horizon = 1L, ks = 1:25,
+                                    n_boot = 400L, seed = get0("RANDOM_SEED", ifnotfound = 20260704L),
+                                    common_support = TRUE, support_cells = NULL) {
+  # Resolved from the FULL table, before the single-method filter below -- the shared support
+  # is a property of the whole grid, not of this method.
+  .cells <- if (!is.null(support_cells)) {
+    support_cells
+  } else if (isTRUE(common_support)) {
+    if (!exists("invasion_common_cells", mode = "function"))
+      stop("[detection] common_support = TRUE but invasion_common_cells() is not loaded ",
+           "(16_invasion_eval.R). Silently skipping the restriction would publish a curve ",
+           "whose k / n_atrisk reference does not match the evaluation table printed beside ",
+           "it. Source 16_invasion_eval.R, or pass support_cells, or set common_support = FALSE.",
+           call. = FALSE)
+    invasion_common_cells(lfo_results, horizon)
+  } else NULL
   d <- lfo_results %>% dplyr::filter(method == !!method, horizon == !!horizon,
                                      is.finite(p_invasion))
+  if (!is.null(.cells) && length(.cells)) {
+    .have <- paste(d$fold_id, d$health_zone, sep = "\r")
+    d <- d[.have %in% .cells, , drop = FALSE]
+    # The is.finite(p_invasion) filter above runs BEFORE this restriction, so a method carrying
+    # a non-finite score on a shared cell would quietly be scored on fewer cells than it was
+    # handed -- a different n_atrisk, and so a different k / n_atrisk random reference, from
+    # every other series on the same panel. Say so rather than let the panel draw two nulls.
+    .missing <- length(.cells) - length(unique(.have[.have %in% .cells]))
+    if (.missing > 0L)
+      warning(sprintf(paste0("[detection] %s h=%s: %d of %d shared-support cells carry no ",
+                             "finite score, so this curve is computed on a smaller row set ",
+                             "than the others on the panel and its k / n_atrisk reference ",
+                             "will not match theirs."),
+                      method, horizon, .missing, length(.cells)), call. = FALSE)
+  }
+  # AT-RISK ONLY, exactly as evaluate_invasion() scores (16_invasion_eval.R: d0 drops
+  # was_active_before). Without this filter the curve was computed on a LARGER row set than
+  # the published metrics: already-affected zones sat in the ranking, taking top-K slots and
+  # inflating the at-risk denominator behind the random-targeting reference. The manuscript
+  # panels annotate a recall from this curve beside a recall_at_K from invasion_evaluation.csv,
+  # so the two must be the same estimand on the same rows.
+  if ("was_active_before" %in% names(d))
+    d <- d[!(as.logical(d$was_active_before) %in% TRUE), , drop = FALSE]
   if (!nrow(d) || !"fold_id" %in% names(d)) return(NULL)
   per_fold <- d %>% dplyr::group_by(fold_id) %>%
     dplyr::mutate(rk = rank(-p_invasion, ties.method = "max")) %>% dplyr::ungroup()
@@ -1598,10 +1692,38 @@ compute_detection_curve <- function(lfo_results, method, horizon = 1L, ks = 1:25
   # "no-skill" reference the model must beat, and the gap is the intuitive skill story.
   n_atrisk <- per_fold %>% dplyr::count(fold_id) %>% dplyr::pull(n) %>% mean()
   purrr::map_dfr(ks, function(k) {
-    tp <- sum(per_fold$is_new_invasion[per_fold$rk <= k], na.rm = TRUE)
+    inK <- per_fold$rk <= k
+    tp  <- sum(per_fold$is_new_invasion[inK], na.rm = TRUE)
+    # Denominator is the REALISED number of monitored zone-folds, not k * nfold. With
+    # ties.method = "max" (used above, deliberately, so a zone is credited only when
+    # monitoring K zones necessarily includes it) a tie group straddling the K boundary is
+    # excluded, so a fold can contribute FEWER than k zones — and a fold with fewer than k
+    # at-risk zones always does. Dividing by k * nfold therefore understated precision for
+    # a reason unrelated to the model. (Same defect as prec_at_k in 19_spacetime_eval.)
+    n_mon <- sum(inK, na.rm = TRUE)
+    # TWO recall estimators, because they are genuinely different numbers and the panels
+    # print one of them next to the published one:
+    #   recall_pooled = all hits / all invasions, over the pooled fold-zone rows. A fold with
+    #     many invasions dominates it.
+    #   recall       = the per-fold share, AVERAGED over folds — the estimator
+    #     .ranking_metrics() uses, so recall at k = 5/10/15 EQUALS the published
+    #     recall_at_5/10/15 in invasion_evaluation.csv. This is the one to plot and annotate.
+    # The curves used to carry only the pooled version while the tables published the
+    # averaged one, under the same name ("share of true invasions caught").
+    .per_fold_recall <- vapply(split(seq_len(nrow(per_fold)), per_fold$fold_id), function(ix) {
+      yv <- per_fold$is_new_invasion[ix]; np <- sum(yv, na.rm = TRUE)
+      if (np == 0) return(NA_real_)
+      sum(yv[inK[ix]], na.rm = TRUE) / np
+    }, numeric(1))
+    .ci <- .detc_boot_ci(.per_fold_recall, n_boot, seed, k)
     tibble::tibble(method = method, horizon = horizon, k = k,
-                   recall = tp / tot_pos, precision = tp / (k * nfold),
+                   recall = mean(.per_fold_recall, na.rm = TRUE),
+                   recall_lo = .ci[1], recall_hi = .ci[2],
+                   recall_pooled = tp / tot_pos,
+                   precision = if (n_mon > 0) tp / n_mon else NA_real_,
+                   n_monitored = n_mon,
                    caught = tp / nfold, n_events = tot_pos / nfold,
+                   n_folds = nfold, n_atrisk_mean = n_atrisk,
                    recall_random = pmin(k / n_atrisk, 1))
   })
 }
@@ -1618,10 +1740,61 @@ compute_detection_curve <- function(lfo_results, method, horizon = 1L, ks = 1:25
 #' @return named numeric vector over zones_all (0 for zones with no epicentre
 #'   connectivity or outside W; epicentre zones themselves set to 0 — they are the
 #'   already-affected origin, never an at-risk invasion target).
+#' Resolve the epicentre origin zones against a matrix's row names, harmonising spellings.
+#'
+#' SHARED by every epicentre-anchored structural baseline so they cannot resolve the origin
+#' set differently. A raw intersect() silently drops any origin given in a non-canonical
+#' spelling (the pre-2026-07 "Mongbalu" for "Mongbwalu" did exactly that), which would change
+#' one baseline's origins but not another's — and the three baselines are only comparable
+#' because they share an origin set.
+#'
+#' @return character vector of resolved origins present in `row_names`, or character(0).
+.resolve_epicentre_origins <- function(row_names, epicentre_zones, what = "baseline") {
+  req <- unique(trimws(as.character(epicentre_zones)))
+  can <- req
+  if (!all(req %in% row_names) && exists("harmonise_names", mode = "function")) {
+    al <- tryCatch(load_aliases(), error = function(e) NULL)
+    if (!is.null(al)) can <- suppressWarnings(harmonise_names(req, al, row_names))
+  }
+  ok <- can %in% row_names
+  if (any(!ok))
+    warning(sprintf("[%s] %d origin zone(s) absent from the matrix and excluded: %s",
+                    what, sum(!ok), paste(req[!ok], collapse = ", ")), call. = FALSE)
+  unique(can[ok])
+}
+
+#' Rank zones by ROAD TRAVEL TIME from the epicentre — a pure-geography structural baseline.
+#'
+#' score_i = 1 / (1 + min_{e in epicentre} t[e, i]), with t the OSRM travel-time matrix in
+#' minutes. Higher = quicker to reach from the epicentre = naively higher invasion risk.
+#' The minimum (not a population-weighted sum) is the right aggregation: a zone's exposure is
+#' governed by its NEAREST epicentre seed, and travel time is a cost, not a flow to be summed.
+#'
+#' Renewal-free and case-free by construction: it reads no incidence at all. Epicentre zones
+#' are set to 0 — they are the origin, never an at-risk target — exactly as
+#' naive_epicentre_inflow_scores() does, so the three baselines share a support.
+#'
+#' @return named numeric vector over zones_all.
+epicentre_travel_time_scores <- function(osrm_mat, epicentre_zones, zones_all = rownames(osrm_mat)) {
+  if (is.null(osrm_mat) || is.null(zones_all)) return(NULL)
+  ez <- .resolve_epicentre_origins(rownames(osrm_mat), epicentre_zones, "travel-time")
+  if (!length(ez)) { warning("[travel-time] no epicentre zones in the OSRM matrix."); return(NULL) }
+  sub <- osrm_mat[ez, , drop = FALSE]
+  tmin <- apply(sub, 2L, function(z) { z <- z[is.finite(z)]; if (length(z)) min(z) else NA_real_ })
+  sc <- 1 / (1 + tmin)
+  sc[!is.finite(sc)] <- 0                     # unroutable = no connectivity, not NA
+  names(sc) <- colnames(osrm_mat)
+  out <- stats::setNames(rep(0, length(zones_all)), zones_all)
+  common <- intersect(zones_all, names(sc))
+  out[common] <- sc[common]
+  out[intersect(zones_all, ez)] <- 0
+  out
+}
+
 naive_epicentre_inflow_scores <- function(W, epicentre_zones, pop_vec = NULL,
                                           zones_all = rownames(W)) {
   if (is.null(W) || is.null(zones_all)) return(NULL)
-  ez <- intersect(as.character(epicentre_zones), rownames(W))
+  ez <- .resolve_epicentre_origins(rownames(W), epicentre_zones, "naive")
   if (!length(ez)) { warning("[naive] no epicentre zones present in the mobility matrix."); return(NULL) }
   # Source weight per epicentre zone = its population (relative traveller volume), median-
   # imputed for any missing/non-positive entry; uniform when no pop_vec is provided.
@@ -1654,15 +1827,61 @@ append_naive_detection_curve_model <- function(lfo_results, scores,
                                                label = "Naive-epicentre-inflow") {
   if (is.null(lfo_results) || !nrow(lfo_results) || is.null(scores)) return(lfo_results)
   if (label %in% lfo_results$method) return(lfo_results)          # idempotent
-  ref <- lfo_results %>% dplyr::filter(method == unique(lfo_results$method)[1])
+  # The row SKELETON these baseline scores are hung on used to be `unique(method)[1]` -- i.e.
+  # whichever method happened to sort first in the table. That silently set the baseline's
+  # fold coverage from row order: pick a method short of a fold (the rolling-predictor floor
+  # costs every Bayesian model the earliest one) and the baseline inherits the gap, so the
+  # figure's structural nulls would be drawn on fewer cells than the model they are there to
+  # beat. Take the method with the widest (fold x zone) coverage instead, tie-broken by name
+  # so the choice does not move with row order. The curve is restricted to the shared support
+  # afterwards, so a wider skeleton costs nothing and a narrower one cannot be recovered.
+  .ref_method <- if (all(c("fold_id", "health_zone") %in% names(lfo_results))) {
+    .cov <- lfo_results %>%
+      dplyr::distinct(method, fold_id, health_zone) %>%
+      dplyr::count(method, name = "n_cells") %>%
+      dplyr::arrange(dplyr::desc(n_cells), method)
+    .cov$method[1]
+  } else unique(lfo_results$method)[1]
+  ref <- lfo_results %>% dplyr::filter(method == .ref_method)
   if (!nrow(ref) || !"health_zone" %in% names(ref)) return(lfo_results)
   naive <- ref
   naive$method     <- label
-  naive$p_invasion <- as.numeric(scores[match(naive$health_zone, names(scores))])
+  # ZERO-FILL UNOBSERVED DESTINATIONS. A zone the mobility source never observed has no
+  # measured inflow, and zero is what this baseline would have told a user on the day: it
+  # ranks such a zone at the bottom. Leaving NA instead DROPS those rows, putting the
+  # baseline on a narrower support than the models -- and because the shared support is
+  # anchored on every scored method, that would drag every model down to the baseline's
+  # coverage. The fill is faithful to the comparator, but it is REPORTED rather than silent:
+  # a large zero block is a property of the DATA SOURCE, not of the baseline's skill, and
+  # zeros tie at an averaged rank, which depresses mean_rank_of_truth in proportion to the
+  # censoring. Read this coverage line beside any baseline's rank metrics.
+  .sc_raw <- as.numeric(scores[match(naive$health_zone, names(scores))])
+  .n_zone <- dplyr::n_distinct(naive$health_zone)
+  .n_obs  <- dplyr::n_distinct(naive$health_zone[is.finite(.sc_raw) & .sc_raw > 0])
+  naive$p_invasion <- ifelse(is.finite(.sc_raw), .sc_raw, 0)
+  message(sprintf("[baseline] %s: %d/%d zones observed (%.1f%%), %d zero-filled.",
+                  label, .n_obs, .n_zone, 100 * .n_obs / max(.n_zone, 1L), .n_zone - .n_obs))
   if ("p_case_invasion" %in% names(naive)) naive$p_case_invasion <- naive$p_invasion
-  for (col in intersect(c("mu_forecast", "p_infection_invasion", "p_lo", "p_hi", "p_sd"),
+  for (col in intersect(c("mu_forecast", "p_lo", "p_hi", "p_sd"),
                         names(naive)))
     naive[[col]] <- NA_real_
+  # The recalibration columns must be blanked for the SAME reason: this row set is a copy of
+  # another method's rows with only the score replaced, so it would otherwise inherit that
+  # method's prequential factor and its RECALIBRATED probability. Any panel drawn on the
+  # recalibrated column would then plot the model's own corrected probabilities under the
+  # baseline's name. The naive score is a mobility inflow, not a probability, so there is
+  # nothing to recalibrate: p_recal is set to the score itself (identical on both scales,
+  # which is correct for a rank-only comparator) and the fitted-factor bookkeeping is NA.
+  if ("p_recal" %in% names(naive)) naive$p_recal <- naive$p_invasion
+  # RANK-ONLY by construction: these rows carry a mobility inflow or an inverse travel time,
+  # not a probability. Without this they inherit prob_calibrated from the method whose rows
+  # were copied (TRUE for any Bayesian model), and evaluate_invasion() would compute a log
+  # score, Brier skill and calibration-in-the-large on a connectivity score — the same defect
+  # already fixed for Distance-B1 and Adjacency-B7 in 05_baseline_models.R.
+  if ("prob_calibrated" %in% names(naive)) naive$prob_calibrated <- FALSE
+  for (col in intersect(c("delta_preq", "n_train_events", "n_train_folds"), names(naive)))
+    naive[[col]] <- NA_real_
+  if ("delta_estimable" %in% names(naive)) naive$delta_estimable <- NA
   dplyr::bind_rows(lfo_results, naive)
 }
 
@@ -1698,9 +1917,15 @@ invasion_balance_metrics <- function(lfo_results, method, horizon = 1L) {
 
 #' The detection-vs-budget curve for one or more methods — the intuitive headline
 #' figure: monitor K zones (x), catch this fraction of invasions (y).
+#' @param support_cells the shared (fold x zone) support, already resolved. PASS IT whenever
+#'   `lfo_results` is not the table evaluate_invasion() scored -- run_all.R draws this panel
+#'   from `lfo_fig3`, which carries appended rank-only baseline rows, and letting
+#'   compute_detection_curve() derive the support from that copy would put this panel's
+#'   random-targeting reference on a different denominator from the published curve.
 plot_detection_curve <- function(lfo_results, methods, horizon = 1L, save = TRUE,
-                                 annotate_k = 10L) {
-  curves <- purrr::map_dfr(methods, function(m) compute_detection_curve(lfo_results, m, horizon))
+                                 annotate_k = 10L, support_cells = NULL) {
+  curves <- purrr::map_dfr(methods, function(m)
+    compute_detection_curve(lfo_results, m, horizon, support_cells = support_cells))
   if (is.null(curves) || !nrow(curves)) return(invisible(NULL))
   mth <- unique(curves$method)
   pal <- if (length(mth) <= length(OKABE_ITO)) OKABE_ITO[seq_along(mth)]
@@ -1725,7 +1950,7 @@ plot_detection_curve <- function(lfo_results, methods, horizon = 1L, save = TRUE
     scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) +
     scale_colour_manual(values = setNames(pal, mth), name = NULL) +
     labs(title = sprintf("If we monitor the top-K highest-risk zones, how many invasions do we catch? (h=%dw)", horizon),
-         subtitle = "Share of true next-week invasions caught at a fixed weekly alert budget of K zones, pooled over LFO folds",
+         subtitle = "Share of true next-week invasions caught at a fixed weekly alert budget of K zones, averaged over LFO folds",
          x = "Zones actively monitored each week (K)", y = "Share of true invasions caught",
          caption = cap) +
     theme_inv(11) + theme(legend.position = "top",
@@ -1738,17 +1963,25 @@ plot_detection_curve <- function(lfo_results, methods, horizon = 1L, save = TRUE
 #' zones you monitor each week, what FRACTION were actually invaded? — "how many of
 #' our alerts are true". Pooled over LFO folds, with the base-rate reference (a
 #' random watch-list would hit invasions only at the ~invasion prevalence).
+#' @param support_cells as in plot_detection_curve(): supply it when `lfo_results` is not the
+#'   table evaluate_invasion() scored.
 plot_topk_precision <- function(lfo_results, methods, horizon = 1L, save = TRUE,
-                                file = "topk_precision", title_suffix = "") {
-  curves <- purrr::map_dfr(methods, function(m) compute_detection_curve(lfo_results, m, horizon))
+                                file = "topk_precision", title_suffix = "",
+                                support_cells = NULL) {
+  curves <- purrr::map_dfr(methods, function(m)
+    compute_detection_curve(lfo_results, m, horizon, support_cells = support_cells))
   if (is.null(curves) || !nrow(curves)) return(invisible(NULL))
   mth <- unique(curves$method)
   pal <- if (length(mth) <= length(OKABE_ITO)) OKABE_ITO[seq_along(mth)]
          else grDevices::hcl.colors(length(mth), "Dark 3")
-  # base rate = invasions per at-risk zone-week = a random watch-list's hit rate.
-  # recall_random = k / n_atrisk => n_atrisk = k/recall_random, so base = n_events/n_atrisk.
+  # Base rate = invasions per at-risk zone-week = a random watch-list's hit rate. Taken
+  # DIRECTLY from the curve's own n_events / n_atrisk_mean. It used to be recovered
+  # algebraically by inverting recall_random (= k / n_atrisk) and averaging over k, which
+  # is the same quantity only while recall_random is unclipped — pmin(k / n_atrisk, 1)
+  # saturates at 1 for k >= n_atrisk, so every saturated k contributed n_events/k instead
+  # and dragged the averaged "base rate" DOWNWARD, flattering precision against it.
   base_rate <- suppressWarnings(mean(
-    (curves$n_events * curves$recall_random / curves$k)[curves$k > 0 & is.finite(curves$recall_random)],
+    (curves$n_events / curves$n_atrisk_mean)[is.finite(curves$n_atrisk_mean) & curves$n_atrisk_mean > 0],
     na.rm = TRUE))
   p <- ggplot(curves, aes(k, precision, colour = method)) +
     { if (is.finite(base_rate)) geom_hline(yintercept = base_rate, linetype = "22", colour = "grey55") } +
@@ -1757,7 +1990,7 @@ plot_topk_precision <- function(lfo_results, methods, horizon = 1L, save = TRUE,
     scale_colour_manual(values = setNames(pal, mth), name = NULL) +
     labs(title = sprintf("Of the top-K highest-risk zones, what %% were actually invaded? (h=%dw)%s",
                          horizon, if (nzchar(title_suffix)) paste0(" — ", title_suffix) else ""),
-         subtitle = "Precision at a fixed weekly alert budget of K zones, pooled over LFO folds; dashed = random-watch-list base rate",
+         subtitle = "Precision at a fixed weekly alert budget of K zones, pooled over LFO fold-zone rows; dashed = random-watch-list base rate",
          x = "Zones monitored each week (K)", y = "% of top-K zones that were invaded",
          caption = "Higher = fewer false alarms. Precision declines with K as the budget reaches lower-risk zones; the gap above the base rate is the model's targeting value.") +
     theme_inv(11) + theme(legend.position = "top",
@@ -1767,107 +2000,51 @@ plot_topk_precision <- function(lfo_results, methods, horizon = 1L, save = TRUE,
 }
 
 # ---------------------------------------------------------------------------
-# Task 4 — reporting rate (across space & folds) and import coefficient over folds
+# Task 4 — import coefficient over folds (PLOTTERS ONLY)
 # ---------------------------------------------------------------------------
+# The frequentist COMPUTERS that used to live here — compute_params_over_time(),
+# compute_beta_over_folds() and plot_reporting_rate_map() — have been removed. The first two
+# refitted a Firth cloglog GLM at every fold cutoff to draw figures that FIGURE_KEEP then
+# gated out of the published tree; the third mapped a "reporting-rate proxy the model uses"
+# that no surviving model uses. The plotters below are retained because the BAYESIAN traces
+# (compute_bayes_params_over_time) feed them, and those figures ARE published — now with
+# key_outputs/bayes_{params_over_time,beta_over_folds}.csv behind them.
 
-#' Spatial map of the per-zone RELATIVE reporting-rate proxy the model uses to
-#' up-weight under-ascertained source zones (health-site density, geometric-mean
-#' normalised, bounded [0.25, 4]). r < 1 = likely under-reporting (its true import
-#' pressure exceeds observed counts); r > 1 = better-than-average ascertainment.
-plot_reporting_rate_map <- function(covariates, shapefile = NULL, zones_all = NULL,
-                                    save = TRUE) {
-  if (is.null(shapefile)) shapefile <- tryCatch(sf::st_read(SHAPEFILE_PATH, quiet = TRUE),
-                                                error = function(e) NULL)
-  if (is.null(shapefile) || is.null(covariates) || !"healthsite_density" %in% names(covariates))
-    return(invisible(NULL))
-  # Derive the reporting-rate proxy on the covariate zones directly (the shapefile
-  # join maps them by name); using match(zones_all, covariates$nom) would NA-out the
-  # whole vector if the population-spine names and covariate names differ.
-  za   <- as.character(covariates$nom)
-  dens <- suppressWarnings(as.numeric(covariates$healthsite_density))
-  if (!is.null(zones_all)) { keep <- za %in% zones_all; if (sum(keep) >= 5) { za <- za[keep]; dens <- dens[keep] } }
-  rr <- get0(".reporting_rate_vec")
-  r  <- if (is.function(rr)) rr(stats::setNames(dens, za), za) else NULL
-  if (is.null(r)) { message("[reporting_rate_map] no valid reporting-rate proxy; skipped."); return(invisible(NULL)) }
-  rd <- tibble::tibble(.key = tolower(trimws(za)), r = as.numeric(r))
-  m <- shapefile %>% dplyr::mutate(.key = tolower(trimws(Nom))) %>%
-    dplyr::left_join(rd, by = ".key")
-  mk <- function(dat, ttl) ggplot(dat) +
-    geom_sf(aes(fill = r), colour = "grey80", linewidth = 0.12) +
-    scale_fill_gradient2(midpoint = 1, low = "#b2182b", mid = "grey92", high = "#2166ac",
-                         name = "Relative\nreporting rate", trans = "log10",
-                         na.value = "grey95") +
-    labs(title = ttl) + ggplot2::theme_void(base_size = 11) +
-    theme(plot.title = element_text(face = "bold", size = 11))
-  out <- mk(dplyr::filter(m, PROVINCE == "Ituri"), "Ituri — relative reporting-rate proxy") +
-    mk(m, "National") + patchwork::plot_layout(widths = c(2, 1)) +
-    patchwork::plot_annotation(
-      caption = "Ascertainment proxy = health-site density (relative, bounded). Under-reporting source zones (red) exert MORE true import pressure than their observed counts; this is exactly the reporting-rate structure the model applies to the mobility rows.",
-      theme = ggplot2::theme(plot.caption = element_text(colour = "grey40", size = 8, hjust = 0)))
-  if (save) .fd_save(out, file.path(OUT_MAPS, "reporting_rate_map.pdf"), w = 12, h = 6.5)
-  invisible(out)
-}
-
-#' Refit the import coefficient beta0 = exp(intercept) of the cloglog renewal model
-#' at each fold cutoff (causally, training only on week <= cutoff), and the mean
-#' nowcast completeness applied that fold — so one can see whether the calibrated
-#' import->invasion conversion and the reporting correction are stable over time.
-compute_beta_over_folds <- function(zone_week_outbreak, cutoffs, mobility_matrices,
-                                    gt_pmfs, covariates, osrm_mat, zones_all,
-                                    mob = "M8", gt = "medium", nowcast_fn = NULL) {
-  if (is.null(nowcast_fn)) nowcast_fn <- get0("apply_nowcast_correction")
-  purrr::map_dfr(cutoffs, function(cut) {
-    zw  <- zone_week_outbreak %>% dplyr::filter(week_start <= cut)
-    zwn <- tryCatch(nowcast_fn(zw, analysis_date = cut + 7), error = function(e) zw)
-    des <- tryCatch(build_invasion_design(zwn, mobility_matrices, gt_pmfs, covariates,
-             osrm_mat, zones_all, mob = mob, gt = gt, candidates = character(0)),
-             error = function(e) NULL)
-    if (is.null(des) || des$n_events < 1L) return(NULL)
-    m <- tryCatch(suppressWarnings(stats::glm(invaded ~ 1, binomial("cloglog"),
-           offset = des$d$logLam, data = des$d)), error = function(e) NULL)
-    if (is.null(m)) return(NULL)
-    co <- summary(m)$coefficients
-    b0 <- co[1, 1]; se <- co[1, 2]
-    comp <- tryCatch({
-      recent <- zwn %>% dplyr::filter(week_start > cut - 21)
-      denom <- sum(recent$confirmed_nc, na.rm = TRUE)   # AGGREGATE completeness, not a
-      num   <- sum(recent$confirmed,    na.rm = TRUE)   # mean of per-zone ratios (which
-      if (denom > 0) min(num / denom, 1) else NA_real_  # ~500 zero zones drag to ~0)
-    }, error = function(e) NA_real_)
-    tibble::tibble(cutoff = as.Date(cut), n_events = des$n_events,
-      beta0 = exp(b0), beta0_lo = exp(b0 - 1.96 * se), beta0_hi = exp(b0 + 1.96 * se),
-      mean_completeness = comp)
-  })
-}
-
-#' Two-panel over-folds figure: import coefficient beta0 (with 95% CI) and mean
-#' reporting completeness, against forecast date.
 plot_beta_over_folds <- function(bof, save = TRUE, file = "beta_and_completeness_over_folds",
-                                 model_label = "", ci_label = "95% CI") {
+                                 model_label = "", ci_label = "95% CI",
+                                 show_title = TRUE, base_size = 11, png = FALSE) {
   if (is.null(bof) || !nrow(bof)) return(invisible(NULL))
   .ml <- if (nzchar(model_label)) paste0(" — ", model_label) else ""
+  .s  <- base_size / 11
+  # Plot against the FORECAST ORIGIN (cutoff + 6) -- what the axis label claims to show.
+  bof$cutoff <- lfo_origin(bof$cutoff)
   p1 <- ggplot(bof, aes(cutoff, beta0)) +
     geom_ribbon(aes(ymin = beta0_lo, ymax = beta0_hi), fill = OKABE_ITO[1], alpha = 0.18) +
-    geom_line(colour = OKABE_ITO[1], linewidth = 0.7) + geom_point(size = 1.4) +
+    geom_line(colour = OKABE_ITO[1], linewidth = 0.7 * .s) + geom_point(size = 1.4 * .s) +
     scale_y_log10() +
-    labs(title = paste0("Import coefficient beta0 over folds", .ml),
-         subtitle = sprintf("exp(intercept) of the renewal fit, refit at each cutoff (%s)", ci_label),
-         x = "Fold cutoff (forecast date)", y = "beta0 = P-scale import->invasion hazard") +
-    theme_inv(11)
+    labs(title = if (show_title) paste0("Import coefficient beta0 over folds", .ml) else NULL,
+         subtitle = if (show_title)
+           sprintf("exp(intercept) of the renewal fit, refit at each cutoff (%s)", ci_label) else NULL,
+         x = "Forecast origin (as-of date)", y = "beta0 = P-scale import->invasion hazard") +
+    theme_inv(base_size)
   # completeness panel only when it is populated (frequentist path); the Bayesian
   # beta0-over-folds has no completeness column, so show beta0 alone.
   out <- if ("mean_completeness" %in% names(bof) && any(is.finite(bof$mean_completeness))) {
     p2 <- ggplot(bof, aes(cutoff, mean_completeness)) +
-      geom_line(colour = OKABE_ITO[8], linewidth = 0.7) + geom_point(size = 1.4) +
+      geom_line(colour = OKABE_ITO[8], linewidth = 0.7 * .s) + geom_point(size = 1.4 * .s) +
       scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) +
-      labs(title = "Mean reporting completeness over folds",
-           subtitle = "Observed / nowcast-corrected counts in the recent weeks at each cutoff",
-           x = "Fold cutoff (forecast date)", y = "Reporting completeness") +
-      theme_inv(11)
+      labs(title = if (show_title) "Mean reporting completeness over folds" else NULL,
+           subtitle = if (show_title)
+             "Observed / nowcast-corrected counts in the recent weeks at each cutoff" else NULL,
+           x = "Forecast origin (as-of date)", y = "Reporting completeness") +
+      theme_inv(base_size)
     p1 / p2
   } else p1
-  if (save) .fd_save(out, file.path(OUT_DIAGNOSTICS, sprintf("%s.pdf", file)), w = 9,
-                     h = if (inherits(out, "patchwork")) 8 else 4.5)
+  if (save) {
+    .h <- if (inherits(out, "patchwork")) 8 else 4.5
+    .fd_save(out, file.path(OUT_DIAGNOSTICS, sprintf("%s.pdf", file)), w = 9, h = .h)
+    if (png) .fd_save_png(out, file.path(OUT_DIAGNOSTICS, sprintf("%s.png", file)), w = 9, h = .h)
+  }
   invisible(out)
 }
 
@@ -1912,212 +2089,18 @@ plot_invasion_uncertainty_map <- function(rs, shapefile = NULL, horizon = 1L,
   invisible(out)
 }
 
-#' Animate a plot across horizons into a GIF (#4). `render_fn(hz)` returns a
-#' ggplot/patchwork for horizon hz; frames are written with gifski (a true GIF) or,
-#' if gifski is unavailable, a multi-page "flipbook" PDF. Used for the key Bayesian
-#' outputs so the 1- vs 2-week picture can be viewed as a short loop.
-#' Render a list of ggplot/patchwork frames to a GIF (gifski) or, if gifski is
-#' unavailable, a multi-page "flipbook" PDF. Shared encoder for all animators.
-.frames_to_gif <- function(plots, out_stem, w = 11, h = 6.5, dpi = 110, delay = 1.2) {
-  plots <- Filter(Negate(is.null), plots)
-  if (length(plots) < 1) return(invisible(NULL))
-  if (requireNamespace("gifski", quietly = TRUE)) {
-    dev <- if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else "png"
-    pngs <- vapply(seq_along(plots), function(i) {
-      f <- tempfile(fileext = ".png")
-      suppressMessages(ggplot2::ggsave(f, plots[[i]], width = w, height = h, dpi = dpi, device = dev))
-      f }, character(1))
-    gif <- paste0(out_stem, ".gif")
-    ok <- tryCatch({ suppressWarnings(gifski::gifski(pngs, gif, width = round(w * dpi),
-            height = round(h * dpi), delay = delay, progress = FALSE)); TRUE }, error = function(e) FALSE)
-    unlink(pngs)
-    if (ok) { message(sprintf("[anim] wrote %s (%d frames)", basename(gif), length(plots))); return(invisible(gif)) }
-  }
-  pdf_out <- paste0(out_stem, "_flipbook.pdf")
-  grDevices::pdf(pdf_out, width = w, height = h, onefile = TRUE)
-  for (p in plots) print(p); grDevices::dev.off()
-  message(sprintf("[anim] gifski unavailable; wrote flipbook %s", basename(pdf_out)))
-  invisible(pdf_out)
-}
+# ---------------------------------------------------------------------------
+# ANIMATION VIZ — REMOVED
+# ---------------------------------------------------------------------------
+# .frames_to_gif(), make_horizon_animation(), animate_invasion_over_time(),
+# animate_invasion_rank_over_time() and plot_mobility_flows_over_time() rendered GIF /
+# flipbook animations of the invasion maps, the rank evolution and the mobility-routed import
+# force. NOTHING CALLED THEM: run_all.R's only reference is the cleanup block that DELETES
+# outputs/maps/animations/ so an earlier run's GIFs cannot look current, and the comment there
+# records why ("they duplicated the static decision products while dominating the
+# visualisation runtime"). ~200 lines of unreachable rendering, carrying a soft gifski
+# dependency, in the module that also holds the detection curve and the risk-score producers.
+# The deletion sweep in run_all.R stays: it is what keeps stale GIFs from a pre-removal run
+# out of the published tree.
 
-make_horizon_animation <- function(render_fn, horizons, out_stem, w = 11, h = 6.5,
-                                   dpi = 110, delay = 1.2) {
-  plots <- lapply(horizons, function(hz) tryCatch(render_fn(hz), error = function(e) NULL))
-  if (length(Filter(Negate(is.null), plots)) < length(horizons))
-    warning("[anim] dropped horizon frame(s) for ", basename(out_stem))
-  .frames_to_gif(plots, out_stem, w, h, dpi, delay)
-}
-
-#' TIME-EVOLUTION animation (#1/#2/#3): how the invasion-probability map evolves across the
-#' leave-future-out forecast ORIGINS (successive weeks), for ONE model and ONE horizon, with
-#' a FIXED colour scale across every frame (#2 — frames are directly comparable). Produced
-#' separately per horizon (#1) and for the Ituri zoom or the whole DRC (extent="national", #3).
-animate_invasion_over_time <- function(lfo_results, method, horizon = 1L, shapefile = NULL,
-                                       extent = c("ituri", "national"), out_stem = NULL,
-                                       palette = "plasma", model_label = NULL) {
-  extent <- match.arg(extent)
-  if (is.null(shapefile)) shapefile <- tryCatch(sf::st_read(SHAPEFILE_PATH, quiet = TRUE),
-                                                error = function(e) NULL)
-  if (is.null(shapefile) || is.null(lfo_results) || is.null(method)) return(invisible(NULL))
-  pcol <- if ("p_case_invasion" %in% names(lfo_results)) "p_case_invasion" else "p_invasion"
-  d <- lfo_results %>% dplyr::filter(method == !!method, horizon == !!horizon,
-                                     is.finite(.data[[pcol]]))
-  if (!nrow(d) || !"cutoff" %in% names(d)) return(invisible(NULL))
-  folds <- sort(unique(as.Date(d$cutoff)))
-  if (length(folds) < 2) return(invisible(NULL))
-  # FIXED legend across frames (#2): a single shared colour limit over ALL origins.
-  lim <- c(0, max(0.05, stats::quantile(d[[pcol]], 0.99, na.rm = TRUE)))
-  reg <- if (extent == "ituri") "Ituri" else "DRC (national)"
-  lab <- if (!is.null(model_label)) paste0(" — ", model_label) else ""
-  frames <- lapply(folds, function(ct) {
-    di <- d %>% dplyr::filter(as.Date(cutoff) == ct)
-    aff <- di %>% dplyr::filter(was_active_before %in% TRUE) %>%
-      dplyr::pull(health_zone) %>% trimws() %>% tolower() %>% unique()
-    .fd_map(di, shapefile,
-            sprintf("%s — P(first case) in next %dw, forecast origin %s%s",
-                    reg, horizon, format(ct, "%d %b %Y"), lab),
-            prob_col = pcol, ituri_only = (extent == "ituri"), lim = lim,
-            palette = palette, legend_name = "P(first case)", affected_keys = aff)
-  })
-  if (is.null(out_stem))
-    out_stem <- file.path(OUT_MAPS, "animations",
-                          sprintf("invasion_over_time_%s_h%d", extent, horizon))
-  dir.create(dirname(out_stem), showWarnings = FALSE, recursive = TRUE)
-  .frames_to_gif(frames, out_stem, w = if (extent == "national") 9 else 8, h = 7,
-                 dpi = 110, delay = 1.1)
-}
-
-#' TIME-EVOLUTION of the invasion-probability RANKING map across the LFO forecast origins, for
-#' ONE model and horizon, at the given extent (national by default). Each frame ranks the at-risk
-#' zones by P(first case) that week (1 = highest) and draws the rank map with a FIXED scale, so
-#' the shifting priority ordering is visible as a GIF. Reuses plot_invasion_rank_map per frame.
-animate_invasion_rank_over_time <- function(lfo_results, method, horizon = 1L, shapefile = NULL,
-                                            extent = c("national", "ituri"), out_stem = NULL,
-                                            model_label = NULL, top_k = 12L) {
-  extent <- match.arg(extent)
-  if (is.null(shapefile)) shapefile <- tryCatch(sf::st_read(SHAPEFILE_PATH, quiet = TRUE),
-                                                error = function(e) NULL)
-  if (is.null(shapefile) || is.null(lfo_results) || is.null(method)) return(invisible(NULL))
-  pcol <- if ("p_case_invasion" %in% names(lfo_results)) "p_case_invasion" else "p_invasion"
-  d <- lfo_results %>% dplyr::filter(method == !!method, horizon == !!horizon,
-                                     is.finite(.data[[pcol]]))
-  if (!nrow(d) || !"cutoff" %in% names(d)) return(invisible(NULL))
-  folds <- sort(unique(as.Date(d$cutoff)))
-  if (length(folds) < 2) return(invisible(NULL))
-  reg <- if (extent == "national") "DRC (national)" else "Ituri"
-  frames <- lapply(folds, function(ct) {
-    di <- d %>% dplyr::filter(as.Date(cutoff) == ct)
-    ml <- sprintf("%s · origin %s", model_label %||% method, format(ct, "%d %b %Y"))
-    # rank map has a fixed rank scale (limits 1..cap, cap~=60 every fold) => frames comparable
-    tryCatch(plot_invasion_rank_map(di, horizon = horizon, method_label = ml, shapefile = shapefile,
-             top_k = top_k, save = FALSE, extent = extent), error = function(e) NULL)
-  })
-  if (is.null(out_stem))
-    out_stem <- file.path(OUT_MAPS, "animations",
-                          sprintf("invasion_rank_over_time_%s_h%d", extent, horizon))
-  dir.create(dirname(out_stem), showWarnings = FALSE, recursive = TRUE)
-  .frames_to_gif(frames, out_stem, w = if (extent == "national") 9 else 8, h = 7, dpi = 110, delay = 1.1)
-}
-
-#' How the ASSUMED mobility patterns route infection OVER TIME. The mobility matrix W is
-#' time-invariant, but the force it routes — Lambda_i(t) = sum_j W[j,i] * sum_k g(k) Y_j(t-k)
-#' — evolves as the outbreak spreads. Each weekly frame maps the import-force FIELD (fill,
-#' fixed log scale across frames) plus the dominant import FLOWS (arrows: dominant source ->
-#' destination) for the top at-risk zones, so the shifting mobility pathways are visible.
-#' Rendered as a GIF (one per extent) and a static small-multiples panel of the last frames.
-plot_mobility_flows_over_time <- function(zone_week_nc, mobility_matrices, gt_pmfs, zones_all,
-                                          shapefile = NULL,
-                                          mob = get0("MOBILITY_PRIMARY", ifnotfound = "M8"),
-                                          gt = "medium", extent = c("ituri", "national"),
-                                          top_k = 12L, out_stem = NULL, save = TRUE) {
-  extent <- match.arg(extent)
-  if (is.null(shapefile)) shapefile <- tryCatch(sf::st_read(SHAPEFILE_PATH, quiet = TRUE),
-                                                error = function(e) NULL)
-  if (is.null(shapefile) || is.null(mobility_matrices[[mob]])) return(invisible(NULL))
-  W  <- mobility_matrices[[mob]]
-  G  <- daily_to_weekly_gt(gt_pmfs[[gt]])
-  Yw <- .count_wide(zone_week_nc, zones_all, "confirmed_nc")
-  weeks <- as.Date(colnames(Yw))
-  zc <- intersect(zones_all, rownames(W))
-  if (length(zc) < 2 || length(weeks) < 3) return(invisible(NULL))
-  key <- function(z) tolower(trimws(z))
-  # zone centroids in the shapefile CRS (coord_sf overlays geom_segment in the same coords)
-  shp <- shapefile %>% dplyr::mutate(.key = key(Nom))
-  if (extent == "ituri") shp <- shp %>% dplyr::filter(PROVINCE == "Ituri")
-  # Robust zone anchor points: some national polygons have invalid rings (duplicate vertices),
-  # which makes s2 st_centroid error. Disable s2 (restored on exit), make the geometry valid,
-  # and use point-on-surface (guaranteed inside the polygon, better arrow anchor than a centroid
-  # that can fall outside a concave zone).
-  .s2_old <- suppressMessages(sf::sf_use_s2()); on.exit(suppressMessages(sf::sf_use_s2(.s2_old)), add = TRUE)
-  suppressMessages(try(sf::sf_use_s2(FALSE), silent = TRUE))
-  gshp <- tryCatch(sf::st_make_valid(sf::st_geometry(shp)), error = function(e) sf::st_geometry(shp))
-  ctr <- suppressWarnings(sf::st_coordinates(sf::st_point_on_surface(gshp)))
-  cen <- tibble::tibble(.key = shp$.key, x = ctr[, 1], y = ctr[, 2])
-  # g-weighted source incidence at week index t
-  .yweight <- function(t) {
-    yw <- numeric(length(zc)); names(yw) <- zc
-    for (k in seq_along(G)) { tp <- t - k; if (tp < 1) break
-      yw <- yw + G[k] * Yw[zc, tp] }
-    yw
-  }
-  fr_idx <- which(seq_along(weeks) >= 3L)                       # need >=2 weeks of history
-  if (!length(fr_idx)) return(invisible(NULL))
-  lam_max <- max(vapply(fr_idx, function(t) {
-    yw <- .yweight(t); max(as.numeric(t(W[zc, zc]) %*% yw), 0) }, numeric(1)), 0.01)
-  Wc <- W[zc, zc]
-  frame_at <- function(t) {
-    yw   <- .yweight(t)
-    flow <- sweep(Wc, 1, yw, "*")                # flow[j,i] = W[j,i] * yweight[j]
-    Lam  <- colSums(flow)                        # dest import force = sum_j flow[j,i]
-    cum  <- rowSums(Yw[zc, seq_len(t), drop = FALSE])
-    atrisk <- names(Lam)[cum == 0 & is.finite(Lam) & Lam > 0]
-    dest <- if (length(atrisk)) atrisk[order(Lam[atrisk], decreasing = TRUE)][seq_len(min(top_k, length(atrisk)))] else character(0)
-    seg <- NULL
-    if (length(dest)) seg <- do.call(rbind, lapply(dest, function(i) {
-      col <- flow[, i]; if (all(col <= 0)) return(NULL)
-      j <- names(col)[which.max(col)]
-      a <- cen[cen$.key == key(j), ]; b <- cen[cen$.key == key(i), ]
-      if (!nrow(a) || !nrow(b)) return(NULL)
-      data.frame(x = a$x[1], y = a$y[1], xend = b$x[1], yend = b$y[1], w = col[[j]])
-    }))
-    m <- dplyr::left_join(shp, tibble::tibble(.key = key(zc), lam = Lam), by = ".key")
-    g <- ggplot(m) +
-      geom_sf(aes(fill = lam), colour = "grey85", linewidth = 0.1) +
-      scale_fill_viridis_c(option = "mako", trans = "log1p", name = "Import force Λ",
-                           limits = c(0, lam_max), na.value = "grey92") +
-      labs(title = sprintf("%s — mobility-routed import force & dominant flows (%s), week of %s",
-                           if (extent == "ituri") "Ituri" else "DRC (national)", mob,
-                           format(weeks[t], "%d %b %Y")),
-           subtitle = "Static mobility matrix; arrows = dominant source->destination import pathway for the top at-risk zones") +
-      ggplot2::theme_void(base_size = 11) +
-      theme(plot.title = element_text(face = "bold", size = 11), legend.position = "right")
-    if (!is.null(seg) && nrow(seg))
-      g <- g + geom_segment(data = seg, aes(x = x, y = y, xend = xend, yend = yend, linewidth = w),
-                            arrow = grid::arrow(length = grid::unit(5, "pt"), type = "closed"),
-                            colour = OKABE_ITO[2], alpha = 0.75, lineend = "round") +
-        ggplot2::scale_linewidth(range = c(0.2, 1.6), guide = "none")
-    g
-  }
-  frames <- lapply(fr_idx, function(t) tryCatch(frame_at(t), error = function(e) NULL))
-  if (is.null(out_stem))
-    out_stem <- file.path(OUT_MAPS, "animations", sprintf("mobility_flows_over_time_%s", extent))
-  dir.create(dirname(out_stem), showWarnings = FALSE, recursive = TRUE)
-  if (save) {
-    .frames_to_gif(frames, out_stem, w = if (extent == "national") 9 else 8, h = 7, dpi = 110, delay = 1.1)
-    # static small-multiples of the last (up to) 6 frames for the report
-    fr <- Filter(Negate(is.null), frames); fr <- tail(fr, 6)
-    if (length(fr)) {
-      panel <- patchwork::wrap_plots(lapply(fr, function(g) g + theme(legend.position = "none")),
-                                     ncol = 3) +
-        patchwork::plot_annotation(
-          title = sprintf("Mobility-routed import force over time (%s, %s)",
-                          if (extent == "ituri") "Ituri" else "national", mob),
-          theme = ggplot2::theme(plot.title = element_text(face = "bold", size = 13)))
-      .fd_save(panel, file.path(OUT_MAPS, sprintf("mobility_flows_over_time_%s.pdf", extent)),
-               w = if (extent == "national") 15 else 13, h = 8.5)
-    }
-  }
-  invisible(frames)
-}
-
-message("[forecast_detail] 20_forecast_detail.R loaded (spec/selection + ensemble/uncertainty + params/priority + bayes/over-time + freq-vs-bayes + province/bivariate + detection + topk + reporting/beta + uncertainty-map + horizon & over-time animation viz).")
+message("[forecast_detail] 20_forecast_detail.R loaded (spec/selection + ensemble/uncertainty + params/priority + bayes/over-time + province/bivariate + detection + topk + reporting/beta + uncertainty-map).")

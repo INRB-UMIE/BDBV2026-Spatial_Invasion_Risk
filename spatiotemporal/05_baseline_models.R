@@ -1,10 +1,9 @@
 # =============================================================================
-# 05_baseline_models.R — Baseline Predictive Models (B1–B6)
+# 05_baseline_models.R - Structural Baselines (B1, B4, B7)
 # BDBV 2026 DRC · Spatiotemporal Invasion Forecast Suite
 #
-# Models: B1 distance-weighted average, B2 K-NN average, B3 spatial diffusion,
-#         B4 gravity-decay invasion, B5 population null, B6 persistent-zero
-#
+#   Models: B1 inverse-distance weighted average, B4 gravity-decay invasion hazard,
+#           B7 nearest-affected / adjacency spatial-spread null.
 # All return a tibble: health_zone, horizon, mu_forecast, p_invasion, method
 # =============================================================================
 
@@ -63,43 +62,65 @@ forecast_B1 <- function(Y_wide, osrm_mat, t_idx, horizons, zones_all,
   D    <- osrm_mat[ord, ord]
   Y_t  <- Y_wide[ord, min(t_idx, ncol(Y_wide))]
 
-  results <- vector("list", length(horizons))
+  # WEEK BY WEEK, accumulating the hazard. The outcome this is scored against is cumulative
+  # ("first case in weeks (cut, cut + h*7]"), so the reported intensity must be
+  # mu_cum(h) = sum_{k=1..h} mu_k.
+  #
+  # It used to be `mu * h` — h copies of the h-th STEP. That is only the cumulative sum when
+  # mu is constant across the window, which is true of B4 (whose source incidence is held
+  # fixed) but NOT of B1: B1 deliberately feeds the previous step's intensity forward
+  # (Y_curr <- mu_prev) to model growth, so every step differs. At h = 2 the baseline
+  # reported 2*mu_2 instead of mu_1 + mu_2. Reconstructed from the saved LFO, that
+  # UNDERSTATED the baseline's own ranking (AUC-PR 0.080 -> 0.124, skill 6.51 -> 10.13,
+  # AUC-ROC 0.902 -> 0.931) while OVERSTATING its hazard (median ratio 1.19) — so the
+  # featured model's published h=2 margin over Distance-B1 was inflated by ~55% in AUC-PR
+  # skill, in the direction that flatters the model this paper is about.
+  #
+  # Looping over WEEKS (not over the horizon index) also makes a non-consecutive horizon set
+  # correct: with horizons c(1, 2, 4), week 4's entry accumulates four steps, not three.
+  h_max   <- max(horizons)
   Y_curr  <- Y_t
+  mu_cum  <- numeric(length(ord))
+  by_week <- vector("list", h_max)
 
-  for (h_idx in seq_along(horizons)) {
-    h <- horizons[h_idx]
-    # Carry forward the previous mu after the first horizon (index-based guard)
-    if (h_idx > 1) {
-      Y_curr <- mu_prev
-    }
+  # Distance matrix: NA diagonal treated as Inf -> zero weight (no self-loop). The decay
+  # weights do not depend on the week, so they are built once outside the loop.
+  D_h <- D
+  diag(D_h) <- NA  # exclude self
+  # Weight w_ji = d(j->i)^(-alpha); treat 0 or NA distances as near-zero weight
+  W_decay <- (D_h + 1)^(-alpha)   # +1 avoids infinite weights at d=0 for non-diagonal
+  W_decay[is.na(W_decay)] <- 0
+  # Row-normalise: mu_i = sum_j w_ji * Y_j / sum_j w_ji
+  row_norm <- rowSums(W_decay)
+  row_norm[row_norm == 0] <- 1  # avoid /0 for isolated zones
+  W_norm <- W_decay / row_norm
 
-    # Distance matrix: NA diagonal treated as Inf → zero weight (no self-loop)
-    D_h <- D
-    diag(D_h) <- NA  # exclude self
-
-    # Weight w_ji = d(j→i)^(-alpha); treat 0 or NA distances as near-zero weight
-    W_decay <- (D_h + 1)^(-alpha)   # +1 avoids infinite weights at d=0 for non-diagonal
-    W_decay[is.na(W_decay)] <- 0
-
-    # Row-normalise: mu_i = sum_j w_ji * Y_j / sum_j w_ji
-    row_norm <- rowSums(W_decay)
-    row_norm[row_norm == 0] <- 1  # avoid /0 for isolated zones
-    W_norm <- W_decay / row_norm
-
+  for (wk in seq_len(h_max)) {
     mu <- as.numeric(W_norm %*% Y_curr)
     mu[mu < 0] <- 0
-    mu_prev <- mu   # marginal week-h intensity seeds the next week's projection
-    # The LFO outcome is cumulative ("first case in weeks (cut, cut+h*7]"), so report the
-    # CUMULATIVE hazard 1-exp(-sum_k mu_k) (as the workhorse/hhh4/SEIR do); the marginal
-    # week-h probability understates invasion at h>=2. Count quantiles then match too.
-    mu_cum <- if (h_idx == 1) mu else mu_cum + mu
+    mu_cum <- mu_cum + mu
+    Y_curr <- mu            # marginal week intensity seeds the next week's projection
+    by_week[[wk]] <- mu_cum
+  }
 
+  results <- vector("list", length(horizons))
+  for (h_idx in seq_along(horizons)) {
+    h  <- horizons[h_idx]
+    mc <- by_week[[h]]
     results[[h_idx]] <- tibble(
       health_zone  = ord,
       horizon      = h,
-      mu_forecast  = mu_cum,
-      p_invasion   = 1 - exp(-mu_cum),
-      method       = paste0("B1_alpha", alpha)
+      mu_forecast  = mc,
+      p_invasion   = pmin(1 - exp(-mc), 1),
+      method       = paste0("B1_alpha", alpha),
+      # DECLARED RANK-ONLY. mu is a row-normalised weighted MEAN OF NEIGHBOUR CASE COUNTS
+      # fed through 1 - exp(-mu) as though a case count were a weekly invasion rate. Unlike
+      # B4, nothing here is fitted — there is no scale constant at all — so the probability
+      # level is arbitrary and drifts upward simply as the epidemic grows (mean p rose
+      # 0.22 -> 0.43 across folds). The published calibration_in_large of ~45 and
+      # brier_skill of -17 measure that missing constant, not the baseline's information.
+      # The ORDERING is meaningful and is what this comparator exists to provide.
+      prob_calibrated = FALSE
     )
   }
 
@@ -107,117 +128,30 @@ forecast_B1 <- function(Y_wide, osrm_mat, t_idx, horizons, zones_all,
 }
 
 # ---------------------------------------------------------------------------
-# B2: K-nearest neighbour average
+# B4: source-mass x distance-decay import pressure
 # ---------------------------------------------------------------------------
 
-#' B2: Forecast via K-nearest-neighbour (by OSRM travel time) average
+#' B4: SOURCE-MASS-WEIGHTED DISTANCE-DECAY import pressure — NOT a gravity model.
 #'
-#' @param K number of nearest neighbours (excluding self)
-forecast_B2 <- function(Y_wide, osrm_mat, t_idx, horizons, zones_all, K = 3) {
-  stopifnot(K >= 1)
-
-  ord  <- zones_all[zones_all %in% rownames(osrm_mat) & zones_all %in% rownames(Y_wide)]
-  D    <- osrm_mat[ord, ord]
-  diag(D) <- NA  # exclude self
-
-  results <- vector("list", length(horizons))
-  Y_curr  <- Y_wide[ord, min(t_idx, ncol(Y_wide))]
-
-  for (h_idx in seq_along(horizons)) {
-    h <- horizons[h_idx]
-    if (h_idx > 1) Y_curr <- mu_prev
-
-    mu <- numeric(length(ord))
-    for (i in seq_along(ord)) {
-      dists     <- D[i, ]
-      dists[is.na(dists)] <- Inf
-      nn_idx    <- order(dists)[seq_len(min(K, sum(is.finite(dists))))]
-      mu[i]     <- if (length(nn_idx) > 0) mean(Y_curr[nn_idx], na.rm = TRUE) else 0
-    }
-    mu[mu < 0] <- 0
-    mu_prev    <- mu
-    mu_cum     <- if (h_idx == 1) mu else mu_cum + mu   # cumulative hazard (matches LFO outcome)
-
-    results[[h_idx]] <- tibble(
-      health_zone = ord, horizon = h,
-      mu_forecast = mu_cum, p_invasion = 1 - exp(-mu_cum),
-      method = paste0("B2_K", K)
-    )
-  }
-  bind_rows(results)
-}
-
-# ---------------------------------------------------------------------------
-# B3: Spatial diffusion (discrete graph Laplacian)
-# ---------------------------------------------------------------------------
-
-#' B3: Spatial diffusion based on discrete graph Laplacian
+#' lambda_i = sum_j  N_j^beta * (d_ij + 1)^(-gamma_d) * Y_j,  then mu = lambda * scaling_const.
 #'
-#' @param D_coef  diffusion coefficient in [0, 0.5]; if NULL, estimated from training data
-#' @param threshold_min OSRM threshold (minutes) to define adjacency
-forecast_B3 <- function(Y_wide, osrm_mat, t_idx, horizons, zones_all,
-                        D_coef = NULL, threshold_min = 120) {
-  ord  <- zones_all[zones_all %in% rownames(osrm_mat) & zones_all %in% rownames(Y_wide)]
-  D    <- osrm_mat[ord, ord]
-  n    <- length(ord)
-
-  # Adjacency by travel-time threshold (binary)
-  A <- (D < threshold_min & !is.na(D))
-  diag(A) <- FALSE
-  deg  <- rowSums(A)
-  # Degree matrix (avoid div/0 for isolated zones)
-  deg_safe <- pmax(deg, 1)
-  # Row-normalised adjacency (each row sums to 1 for connected zones, 0 for isolates)
-  W_adj <- sweep(A * 1.0, 1, deg_safe, "/")
-  # Graph Laplacian: L = I - W_adj
-  L <- diag(n) - W_adj
-
-  # Estimate D_coef from last 2 training weeks via LOO RMSE minimisation
-  if (is.null(D_coef) && t_idx >= 3) {
-    obj <- function(d) {
-      err_sq <- 0
-      for (tau in (t_idx - 2):(t_idx - 1)) {
-        Y_tau <- Y_wide[ord, tau]
-        Y_next <- Y_wide[ord, tau + 1]
-        mu_hat <- Y_tau - d * (L %*% Y_tau)
-        mu_hat <- pmax(mu_hat, 0)
-        err_sq <- err_sq + sum((Y_next - mu_hat)^2, na.rm = TRUE)
-      }
-      err_sq
-    }
-    opt    <- optimise(obj, interval = c(0, 0.45))
-    D_coef <- opt$minimum
-    message(sprintf("[B3] Estimated diffusion coefficient: %.4f", D_coef))
-  } else if (is.null(D_coef)) {
-    D_coef <- 0.05  # conservative default if insufficient history
-  }
-
-  results <- vector("list", length(horizons))
-  Y_curr  <- Y_wide[ord, min(t_idx, ncol(Y_wide))]
-
-  for (h_idx in seq_along(horizons)) {
-    h <- horizons[h_idx]
-    if (h_idx > 1) Y_curr <- mu_prev
-
-    mu <- as.numeric(Y_curr - D_coef * (L %*% Y_curr))
-    mu[mu < 0] <- 0
-    mu_prev <- mu
-    mu_cum  <- if (h_idx == 1) mu else mu_cum + mu   # cumulative hazard (matches LFO outcome)
-
-    results[[h_idx]] <- tibble(
-      health_zone = ord, horizon = h,
-      mu_forecast = mu_cum, p_invasion = 1 - exp(-mu_cum),
-      method = "B3"
-    )
-  }
-  bind_rows(results)
-}
-
-# ---------------------------------------------------------------------------
-# B4: Gravity-decay invasion probability
-# ---------------------------------------------------------------------------
-
-#' B4: Gravity-weighted invasion hazard (exponential arrival model)
+#' WHAT IT IS NOT. A gravity kernel is N_i^alpha N_j^beta / d_ij^gamma: it carries a
+#' DESTINATION mass. This has none — `N` is indexed by j, the source, only. A city of a
+#' million and a zone of twenty thousand at equal travel time from the same source therefore
+#' receive IDENTICAL hazard, which is the one prediction a gravity model exists to make. The
+#' exponents (beta = 0.5, gamma_d = 1.0) are hard-coded defaults and are never estimated —
+#' only the scalar `scaling_const` is fitted (by MLE, below), and a scalar cannot change the
+#' RANKING. So the ordering this comparator supplies is entirely unparameterised.
+#'
+#' Retaining it is deliberate: an unparameterised structural yardstick is exactly what a
+#' baseline should be. What it must not do is borrow the name of a model it is not. This
+#' pipeline HAS a fitted gravity kernel — M4, a censored gravity GLM with estimated exponents
+#' (03_mobility_matrices.R) — and publishing this alongside it as "Gravity-B4" invited the
+#' reader to believe the comparator was that model, or at least its species.
+#'
+#' NOTE ON THE NAME. The method STRING stays "Gravity-B4": it is a key in the cached LFO
+#' results, the evaluation CSVs and the model-selection artifacts, and changing it would
+#' silently orphan them. What changed is every label a reader sees, and this docstring.
 #'
 #' @param scaling_const multiplicative scaling; if NULL, estimated from training
 forecast_B4 <- function(Y_wide, pop_vec, osrm_mat, t_idx, horizons, zones_all,
@@ -258,7 +192,17 @@ forecast_B4 <- function(Y_wide, pop_vec, osrm_mat, t_idx, horizons, zones_all,
       p <- pmax(p, 1e-9)
       sum(invasions * log(p) + (1 - invasions) * log(1 - p), na.rm = TRUE)
     }, numeric(1))
-    scaling_const <- k_grid[which.max(ll_grid)]
+    .best <- which.max(ll_grid)
+    scaling_const <- k_grid[.best]
+    # BOUNDARY CHECK: the grid spans 1e-6..1, so an optimum sitting ON either end is not
+    # an interior maximum — the likelihood is still climbing and the "MLE" is really the
+    # grid edge, silently clipped. Say so rather than reporting a clipped value as a fit.
+    if (.best == 1L || .best == length(k_grid))
+      warning(sprintf(paste0("[B4] The gravity scaling constant hit the %s edge of the search ",
+                             "grid (k = %.2e, grid 1e-6..1): this is NOT an interior maximum, ",
+                             "so the likelihood is still improving outside the grid and the ",
+                             "value is a clipped bound, not an MLE. Widen k_grid."),
+                     if (.best == 1L) "LOWER" else "UPPER", scaling_const), call. = FALSE)
     message(sprintf("[B4] Estimated gravity scaling constant: %.2e", scaling_const))
   } else if (is.null(scaling_const)) {
     scaling_const <- 1e-5  # conservative default
@@ -286,72 +230,15 @@ forecast_B4 <- function(Y_wide, pop_vec, osrm_mat, t_idx, horizons, zones_all,
     results[[h_idx]] <- tibble(
       health_zone = ord, horizon = h,
       mu_forecast = mu_cum, p_invasion = pmin(1 - exp(-mu_cum), 1),
-      method = "B4"
+      method = "B4",
+      # B4 DOES carry a fitted scale (scaling_const, MLE'd above), so its p_invasion is on a
+      # probability scale and the proper scores are meaningful for it.
+      prob_calibrated = TRUE
     )
   }
   bind_rows(results)
 }
 
-# ---------------------------------------------------------------------------
-# B5: Population-proportional null
-# ---------------------------------------------------------------------------
-
-#' B5: Distribute total national case count proportionally to population
-forecast_B5 <- function(Y_wide, pop_vec, t_idx, horizons, zones_all) {
-  ord <- zones_all[zones_all %in% rownames(Y_wide) & zones_all %in% names(pop_vec)]
-  N   <- pop_vec[ord]; N_total <- sum(N)
-
-  results <- vector("list", length(horizons))
-  Y_curr  <- Y_wide[ord, min(t_idx, ncol(Y_wide))]
-
-  for (h_idx in seq_along(horizons)) {
-    h <- horizons[h_idx]
-    if (h_idx > 1) Y_curr <- mu_prev
-
-    Y_total <- sum(Y_curr, na.rm = TRUE)
-    mu <- (N / N_total) * Y_total
-    mu_prev <- mu
-    mu_cum  <- if (h_idx == 1) mu else mu_cum + mu   # cumulative hazard (matches LFO outcome)
-
-    results[[h_idx]] <- tibble(
-      health_zone = ord, horizon = h,
-      mu_forecast = mu_cum, p_invasion = 1 - exp(-mu_cum),
-      method = "B5"
-    )
-  }
-  bind_rows(results)
-}
-
-# ---------------------------------------------------------------------------
-# B6: Persistent-zero for uninvaded zones
-# ---------------------------------------------------------------------------
-
-#' B6: Zero forecast for zones never yet invaded; persist last count for active zones
-#'
-#' @param currently_active character vector of zones with >= 1 confirmed case to date
-forecast_B6 <- function(Y_wide, t_idx, horizons, zones_all, currently_active) {
-  ord <- zones_all[zones_all %in% rownames(Y_wide)]
-
-  results <- vector("list", length(horizons))
-  Y_curr  <- Y_wide[ord, min(t_idx, ncol(Y_wide))]
-
-  for (h_idx in seq_along(horizons)) {
-    h <- horizons[h_idx]
-    mu <- ifelse(ord %in% currently_active, Y_curr, 0)
-    mu[mu < 0] <- 0
-
-    results[[h_idx]] <- tibble(
-      health_zone = ord, horizon = h,
-      mu_forecast = mu,
-      p_invasion  = ifelse(ord %in% currently_active, 1 - exp(-mu), 0),
-      method      = "B6"
-    )
-  }
-  bind_rows(results)
-}
-
-# ---------------------------------------------------------------------------
-# Master baseline runner
 # ---------------------------------------------------------------------------
 # B7: Nearest-affected / adjacency spatial-spread baseline  (review §3.1)
 # ---------------------------------------------------------------------------
@@ -411,7 +298,6 @@ forecast_B7_adjacency <- function(Y_wide, dist_mat, t_idx, horizons, zones_all,
     # Distance to the nearest already-affected zone (exclude self by construction:
     # affected zones get score 0 below regardless).
     Dsub   <- D[, aff_here, drop = FALSE]
-    diag_i <- match(aff_here, ord)                    # affected columns that are also rows
     for (cc in seq_along(aff_here)) {                 # blank self-distance so it is never the min
       ri <- match(aff_here[cc], ord); if (!is.na(ri)) Dsub[ri, cc] <- NA_real_
     }
@@ -438,61 +324,18 @@ forecast_B7_adjacency <- function(Y_wide, dist_mat, t_idx, horizons, zones_all,
     horizon     = h,
     mu_forecast = as.numeric(score),   # monotone ranking key (NOT a calibrated intensity)
     p_invasion  = as.numeric(score),   # rank-based metrics use the order only
-    method      = meth_lab
+    method      = meth_lab,
+    # DECLARED RANK-ONLY. score = 1/(1 + travel-time MINUTES) is an arbitrary monotone
+    # transform of distance, not a probability: 1/(1 + d^2) would order the zones
+    # identically and change every calibration-dependent number at will. The docstring
+    # said so, but evaluate_invasion() still ran .log_score/.brier_skill/.ece/
+    # calibration_in_large on whatever sat in p_invasion, and 16b fitted a recalibration
+    # delta to it. This flag makes the declaration machine-readable so those metrics are
+    # reported NA instead of as if they measured information. The score is also identical
+    # at h=1 and h=2 while the base rate doubles, which alone guarantees miscalibration.
+    prob_calibrated = FALSE
   ))
 }
 
-# ---------------------------------------------------------------------------
 
-#' Run all baseline models B1–B6 for a given training cutoff
-#'
-#' @param zone_week_nc tibble (health_zone, week_start, confirmed_nc, confirmed)
-#' @param osrm_mat     travel-time matrix
-#' @param pop_vec      named population vector
-#' @param zones_all    canonical zone name vector
-#' @param t_idx        week index of latest training observation
-#' @param horizons     integer vector of horizons (typically c(1L, 2L))
-#' @param training_cutoff Date of the final training week (WEEK_ANCHOR-anchored start)
-#' @return combined tibble of all baseline forecasts
-run_baselines <- function(zone_week_nc, osrm_mat, pop_vec, zones_all,
-                          t_idx, horizons = LFO_HORIZONS,
-                          training_cutoff = NULL) {
-  Y_wide <- zone_week_to_wide(zone_week_nc, zones_all)
 
-  # Zones with any confirmed case up to and including t_idx
-  currently_active <- zone_week_nc |>
-    filter(week_start <= sort(unique(zone_week_nc$week_start))[t_idx],
-           !is.na(confirmed) & confirmed > 0) |>
-    pull(health_zone) |> unique()
-
-  message("[baselines] Running B1–B6 for ", length(currently_active),
-          " active zones, t_idx=", t_idx)
-
-  purrr::map_dfr(
-    list(
-      forecast_B1(Y_wide, osrm_mat, t_idx, horizons, zones_all, alpha = 1.0),
-      forecast_B1(Y_wide, osrm_mat, t_idx, horizons, zones_all, alpha = 0.5),
-      forecast_B2(Y_wide, osrm_mat, t_idx, horizons, zones_all, K = 3),
-      forecast_B2(Y_wide, osrm_mat, t_idx, horizons, zones_all, K = 5),
-      forecast_B3(Y_wide, osrm_mat, t_idx, horizons, zones_all),
-      forecast_B4(Y_wide, pop_vec, osrm_mat, t_idx, horizons, zones_all),
-      forecast_B5(Y_wide, pop_vec, t_idx, horizons, zones_all),
-      forecast_B6(Y_wide, t_idx, horizons, zones_all, currently_active)
-    ),
-    ~ .x
-  ) |>
-    # Baselines are point forecasts; attach a Poisson predictive distribution
-    # (the natural count-observation model) so they are WIS-scorable alongside
-    # the stochastic models. Without these the baselines return NA WIS.
-    mutate(
-      q05 = qpois(0.05, pmax(mu_forecast, 1e-6)),
-      q20 = qpois(0.20, pmax(mu_forecast, 1e-6)),
-      q25 = qpois(0.25, pmax(mu_forecast, 1e-6)),
-      q75 = qpois(0.75, pmax(mu_forecast, 1e-6)),
-      q80 = qpois(0.80, pmax(mu_forecast, 1e-6)),
-      q95 = qpois(0.95, pmax(mu_forecast, 1e-6)),
-      training_cutoff = if (!is.null(training_cutoff)) training_cutoff else as.Date(NA),
-      mobility_id     = "none",
-      gt_profile      = "none"
-    )
-}

@@ -81,7 +81,8 @@ OUT_COL <- c("Invaded (first case)" = "#D55E00", "Not invaded" = "grey75")
 .casc_fold_labels <- function(cutoffs) {
   d <- as.Date(cutoffs)
   ord <- order(d)
-  lab <- sprintf("Round %d — %s", seq_along(d[ord]), format(d[ord], "%d %b"))
+  # Label by the FORECAST ORIGIN (cutoff + 6) -- 33b issues each origin at cutoff_date + 6.
+  lab <- sprintf("Round %d — %s", seq_along(d[ord]), format(lfo_origin(d[ord]), "%d %b"))
   setNames(lab, as.character(cutoffs[ord]))
 }
 
@@ -160,6 +161,10 @@ OUT_COL <- c("Invaded (first case)" = "#D55E00", "Not invaded" = "grey75")
 # ---- Panel D: per-round top-K forecasts vs realised outcome -----------------
 .casc_panel_topk <- function(detail, fold_lab, top_k = 12L) {
   if (is.null(detail) || !nrow(detail)) return(.casc_blank("Per-round forecasts\nunavailable"))
+  # Read the window length from the data. It was hard-coded as "+6 weeks" in the panel
+  # title while the backtest horizon is configurable (CASCADE_CALIB_K), so a different K
+  # would have published a figure whose caption named the wrong window.
+  .K <- if ("K" %in% names(detail)) as.integer(stats::median(detail$K, na.rm = TRUE)) else NA_integer_
   d <- detail %>%
     dplyr::mutate(round_lab = factor(fold_lab[as.character(cutoff)], levels = unname(fold_lab))) %>%
     dplyr::group_by(cutoff) %>%
@@ -174,7 +179,8 @@ OUT_COL <- c("Invaded (first case)" = "#D55E00", "Not invaded" = "grey75")
     scale_fill_manual(values = OUT_COL, name = NULL, drop = FALSE) +
     scale_x_continuous(labels = percent_format(1), limits = c(0, NA),
                        expand = expansion(mult = c(0, 0.08)), breaks = pretty_breaks(3)) +
-    labs(title = sprintf("D · Per-round forecasts vs realised outcome (top %d, +6 weeks)", top_k),
+    labs(title = sprintf("D · Per-round forecasts vs realised outcome (top %d%s)", top_k,
+                         if (is.na(.K)) "" else sprintf(", +%d weeks", .K)),
          subtitle = "Bar = predicted P(first case) at each backtest origin; highlighted where the zone was actually invaded",
          x = "Predicted invasion probability, P(first case)", y = NULL) +
     .theme_casc() +
@@ -201,13 +207,18 @@ cascade_fig_evaluation <- function(ctx, file = "Figure2_cascade") {
   pC <- .casc_panel_meanrank(bt, fold_lab)
   pD <- .casc_panel_topk(detail, fold_lab)
 
+  # The window length and the number of origins come from the data, not from prose: the
+  # backtest horizon is configurable (CASCADE_CALIB_K) and the number of usable origins
+  # grows with the record, so both were wrong as soon as either changed.
+  .Kcap <- if ("K" %in% names(bt)) as.integer(stats::median(bt$K, na.rm = TRUE)) else 6L
   cap <- paste0(
-    "Leave-future-out evaluation of the 3-month invasion cascade at its deepest supported horizon (+6 weeks; a ~15-week ",
-    "record affords ~3 backtest origins). A: out-of-sample discrimination, AUC-PR relative to the base rate (1× = random). ",
+    sprintf("Leave-future-out evaluation of the 3-month invasion cascade at its deepest supported horizon (+%d weeks; %d backtest origin(s) on this record). ",
+            .Kcap, nrow(bt)),
+    "A: out-of-sample discrimination, AUC-PR relative to the base rate (1× = random). ",
     "B: share of true invasions caught when the top-K highest-risk zones are watched each week, vs a same-size random list. ",
     "C: mean rank of the truly-invaded zones among all at-risk zones. D: the top predicted zones at each origin, coloured by ",
-    "whether they were actually invaded within the next 6 weeks. Discrimination & ranking are the trustworthy products; ",
-    "absolute probabilities are upper bounds.")
+    sprintf("whether they were actually invaded within the next %d weeks. ", .Kcap),
+    "Discrimination & ranking are the trustworthy products; absolute probabilities are upper bounds.")
 
   fig <- (pA | pB | pC) / pD +
     plot_layout(heights = c(1, 1.15)) +
@@ -233,9 +244,12 @@ cascade_fig_evaluation <- function(ctx, file = "Figure2_cascade") {
   }
 
   W <- 13.2; H <- 9.6
-  fig_dir <- file.path(OUT_DIR, "key_outputs", "figures")
+  # 2026-09-17 streamlining: the PUBLISHED Figure2_cascade is the manuscript-styled
+  # one from make_manuscript_figure2_cascade.R (key_outputs/manuscript_figures/).
+  # This module keeps only its internal cascade/figures/ copy — the key_outputs/figures/
+  # twin was a second, differently-styled figure under the same name.
   casc_dir <- file.path(OUT_CASCADE, "figures")
-  for (dir in c(fig_dir, casc_dir)) {
+  for (dir in c(casc_dir)) {
     if (!dir.exists(dir)) dir.create(dir, recursive = TRUE, showWarnings = FALSE)
     save_pdf(file.path(dir, paste0(file, ".pdf")), W, H)
     ggsave(file.path(dir, paste0(file, ".png")), fig, width = W, height = H, dpi = 400, bg = "white")
@@ -244,7 +258,14 @@ cascade_fig_evaluation <- function(ctx, file = "Figure2_cascade") {
   # figure data (per-origin backtest summary) + inputs RDS for fast standalone regen
   key_dir <- file.path(OUT_DIR, "key_outputs")
   if (!dir.exists(key_dir)) dir.create(key_dir, recursive = TRUE, showWarnings = FALSE)
-  readr::write_csv(bt, file.path(key_dir, "Figure2_cascade_data.csv"))
+  # RENAMED. This frame is the PER-ORIGIN BACKTEST SUMMARY (cutoff, K, n_atrisk, n_events,
+  # base_rate, auc_pr, auc_pr_skill, mean_rank_of_truth, prec_at5/10, pred_new, obs_new,
+  # count_ratio). None of those columns appears in the published Figure 2 cascade panel, whose
+  # data are the pooled prioritisation curve and the per-origin top-12 outcomes — so a reader
+  # matching "Figure2_cascade_data.csv" to the figure found neither panel. The published figure
+  # is the manuscript-styled one, and make_manuscript_figure2_cascade.R now writes its own data
+  # under that name.
+  readr::write_csv(bt, file.path(key_dir, "cascade_backtest_per_origin.csv"))
   saveRDS(list(backtest = bt), file.path(OUT_CASCADE, "diagnostics", "cascade_eval_figure_inputs.rds"))
   message(sprintf("[cascade] wrote %s.{pdf,png} + per-origin data CSV + inputs RDS", file))
   invisible(fig)

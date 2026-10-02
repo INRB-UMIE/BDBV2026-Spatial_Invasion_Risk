@@ -1,7 +1,7 @@
 # ============================================================================
 # 04c_dhis2_delay_windows.R — DHIS2 line-list delay analysis (spatiotemporal)
 #
-# DHIS2 analog of 04c_delay_four_windows.R (the Ituri LAB-linelist delay
+# DHIS2 analog of the retired Ituri LAB-linelist delay analysis (the
 # analysis). It estimates the DHIS2 reporting delays — primarily the
 # onset->sample delay that drives the missing-onset imputation in 01_data_prep.R
 # — with the SAME rigorous machinery, adapted to the DHIS2 line list and wired to
@@ -68,7 +68,15 @@ if (RUN_EPIDIST) suppressPackageStartupMessages({
   library(epidist); library(epiparameter); library(brms)
 })
 
-`%||%` <- function(a, b) if (!is.null(a)) a else b
+# ONE canonical definition, identical in every module that declares it, so that source()
+# ORDER CANNOT CHANGE SEMANTICS. This file's version used to be
+#   function(a, b) if (!is.null(a) && !is.na(a)[1]) a else b
+# and was declared UNCONDITIONALLY, so sourcing 06 installed it over every other module's and
+# it governed the whole cascade run. It differs in two ways that silently corrupt results:
+# it falls back whenever the FIRST ELEMENT of a vector is NA (blanking an entire otherwise-good
+# vector, e.g. run_cascade.R's R_zone_conjugate column or 33b's pop_vec), and it ERRORS on a
+# zero-length left-hand side ("missing value where TRUE/FALSE needed") instead of falling back.
+`%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 
 MAX_DELAY   <- get0("DELAY_MAX_PLAUSIBLE_DAYS", ifnotfound = 60L)  # shared plausibility ceiling (00_config.R): drop longer delays as typos/outliers before fitting
 TEST_DAYS   <- 5L     # right-truncation buffer: stop fitting 5 d before the extract
@@ -79,13 +87,20 @@ STAN_CORES  <- min(STAN_CHAINS, 4L)
 # ============================================================================
 # HELPER FUNCTIONS
 # The interval-censored MLE core is REPLICATED VERBATIM from the validated
-# 04c_delay_four_windows.R (lab template) so the DHIS2 fits use the identical,
+# the retired lab template, so the DHIS2 fits use the identical,
 # audited machinery — same censoring convention, multi-start, and AIC selection.
 # ============================================================================
 
 # Robust per-element date parser (mixed ISO / d-m-y / m-d-y), mirroring
 # 01_data_prep.R::.parse_date — base as.Date(tryFormats=) picks ONE format from
 # the first non-NA element and NA-s every value in a different format.
+# DUPLICATE OF 01_data_prep.R's .parse_date — keep the two bodies IN STEP. run_all.R sources
+# 04c first and calls estimate_dhis2_onset_sample_delay() BEFORE sourcing 01, so the delay is
+# fitted with THIS parser while the line list is later loaded with 01's; 01 is sourced last, so
+# its definition then wins for the rest of the session. If the two ever diverge, the delay would
+# be estimated on differently-parsed dates from the ones the imputation applies it to, and the
+# discrepancy would be invisible. Verified identical in behaviour on mixed ISO / d-m-y /
+# datetime / blank / unparseable input.
 .parse_date <- function(x) {
   if (inherits(x, "Date"))   return(x)
   if (inherits(x, "POSIXt")) return(as.Date(x))
@@ -121,14 +136,10 @@ fit_mle_naive <- function(x, delay_name) {
   out
 }
 
-naive_implied_mean <- function(fam, params) {
-  tryCatch(switch(fam,
-    gamma   = unname(params["shape"] / params["rate"]),
-    lnorm   = unname(exp(params["meanlog"] + 0.5 * params["sdlog"]^2) - 0.5),
-    weibull = unname(params["scale"] * gamma(1 + 1 / params["shape"])),
-    exp     = unname(1 / params["rate"]),
-    NA_real_), error = function(e) NA_real_)
-}
+# naive_implied_mean() REMOVED: nothing called it. The censored-MLE path reports
+# `implied_mean_d` from the fit object directly (.fit_all_censored), and the EpiDist path
+# reports the posterior mean, so a second family->mean converter was one more place for the
+# two to disagree.
 
 # ── B. Interval-censored MLE ──────────────────────────────────────────────────
 .make_cens_df <- function(x) {
@@ -250,6 +261,80 @@ naive_implied_mean <- function(fam, params) {
 .cens_best_fam <- function(f)
   if (!is.null(f) && length(f) > 0) names(sort(sapply(f, `[[`, "aic")))[1] else NA_character_
 
+# ── Windowed delay populations — SINGLE definition ────────────────────────────
+# The MAIN block below and 04d_delay_fit_figures.R both need the same four windowed
+# delay populations. They used to be built by an inline `mk_delay()`/`delay_specs`
+# pair inside the MAIN block, which meant the figure module could only get them by
+# duplicating that logic — exactly the drift hazard this file already warns about
+# for .parse_date(). Factored out here so the fits and the figures are guaranteed to
+# describe the SAME records.
+# `lbl` IS ASCII ON PURPOSE: it is written to the `label` column of
+# dhis2_delay_selected.csv, so it must stay byte-identical to the previous inline
+# definition. 04d_delay_fit_figures.R prettifies the arrow for display only.
+dhis2_delay_specs <- function() list(
+  onset_sample        = list(from = "date_of_symptom_onset",     to = "date_of_sample_collection", lbl = "Onset -> sample"),
+  onset_notification  = list(from = "date_of_symptom_onset",     to = "date_of_notification",      lbl = "Onset -> notification"),
+  onset_lab_analysis  = list(from = "date_of_symptom_onset",     to = "lab_analysis_date",         lbl = "Onset -> lab analysis"),
+  sample_lab_analysis = list(from = "date_of_sample_collection", to = "lab_analysis_date",         lbl = "Sample -> lab analysis"))
+
+#' Build the windowed, plausibility-filtered delay populations for every DHIS2 delay.
+#'
+#' @param ll raw DHIS2 line list (character or already-parsed date columns).
+#' @param analysis_date as-of date, or NULL. NULL reproduces the standalone MAIN-block
+#'   window exactly (no as-of bound; truncation reference = max observed date). When a
+#'   date is supplied the same as-of rule as estimate_dhis2_onset_sample_delay() applies
+#'   — secondary dates after the as-of date are dropped before the window is derived, so
+#'   a back-dated re-run cannot leak future data into the figures.
+#' @return list(specs, delays = named list(onset, sample, delay), analysis_start,
+#'   trunc_date, obs_date, window_name, max_sample, n_records).
+#'   `delays[[nm]]$delay` for "onset_sample" is IDENTICAL to
+#'   estimate_dhis2_onset_sample_delay()$delays_windowed for the same arguments.
+build_dhis2_delay_populations <- function(ll, analysis_date = NULL,
+                                          outbreak_start = OUTBREAK_START,
+                                          test_days = TEST_DAYS,
+                                          max_delay = MAX_DELAY) {
+  df <- as.data.frame(ll, stringsAsFactors = FALSE)
+  date_cols <- c("date_of_symptom_onset", "date_of_sample_collection",
+                 "date_of_notification", "reporting_date", "lab_analysis_date")
+  for (dc in intersect(date_cols, names(df))) df[[dc]] <- .parse_date(df[[dc]])
+  if (!"date_of_sample_collection" %in% names(df)) return(NULL)
+
+  .asof    <- if (is.null(analysis_date)) NULL else .parse_date(analysis_date)
+  has_asof <- !is.null(.asof) && length(.asof) == 1L && !is.na(.asof)
+  # As-of bound on the SAMPLE date first: it defines the truncation window shared by all
+  # four delays, so it must be applied before max(sample) is taken (otherwise a future-dated
+  # sample typo would push the window past the as-of date).
+  samp <- df$date_of_sample_collection
+  if (has_asof) samp[!is.na(samp) & samp > .asof] <- NA
+  max_sample <- suppressWarnings(max(samp, na.rm = TRUE))
+  if (!is.finite(as.numeric(max_sample))) return(NULL)
+  trunc_date     <- max_sample - test_days
+  analysis_start <- lubridate::floor_date(outbreak_start, unit = "week", week_start = 1L)
+  # OBS_DATE (right-truncation reference for EpiDist) deliberately excludes
+  # date_of_notification / reporting_date, which carry far-future data-entry typos.
+  obs_date <- if (has_asof) .asof else
+    suppressWarnings(max(c(df$date_of_sample_collection, df$date_of_symptom_onset), na.rm = TRUE))
+
+  specs <- dhis2_delay_specs()
+  delays <- list()
+  for (nm in names(specs)) {
+    sp <- specs[[nm]]
+    if (!all(c(sp$from, sp$to) %in% names(df))) next
+    a <- df[[sp$from]]; b <- df[[sp$to]]
+    if (has_asof) b[!is.na(b) & b > .asof] <- NA   # as-of: secondary event not yet observable
+    d <- as.integer(b - a)
+    keep <- !is.na(a) & !is.na(b) & a >= analysis_start & a <= trunc_date &
+            is.finite(d) & d >= 0L & d <= max_delay
+    keep[is.na(keep)] <- FALSE
+    if (!any(keep)) next
+    delays[[nm]] <- list(onset = a[keep], sample = b[keep], delay = d[keep])
+  }
+  list(specs = specs, delays = delays, analysis_start = analysis_start,
+       trunc_date = trunc_date, obs_date = obs_date, max_sample = max_sample,
+       window_name = sprintf("analytical_%s", format(trunc_date, "%Y-%m-%d")),
+       n_records = nrow(df), as_of = if (has_asof) .asof else NA)
+}
+
 .plot_censored_fits <- function(x, fits, panel_title, xlim_max = NULL) {
   x_c <- x[!is.na(x) & x >= 0L]
   if (length(x_c) == 0) return(ggplot() + labs(title = panel_title) + theme_void())
@@ -258,7 +343,11 @@ naive_implied_mean <- function(fam, params) {
   p   <- ggplot(data.frame(delay = x_c), aes(x = delay)) +
     geom_histogram(aes(y = after_stat(density)), binwidth = 1,
                    fill = "grey85", colour = "grey60", alpha = 0.75, linewidth = 0.3) +
-    xlim(0, xlim_max) +
+    # coord_cartesian, NOT xlim(): xlim() is a SCALE limit, which censors the [-0.5, 0.5) zero
+    # bin to NA and DROPS the same-day bar entirely (12.3% of onset->sample records on the
+    # current snapshot), with only a "Removed rows containing missing values" warning. 04d uses
+    # coord_cartesian for exactly this reason.
+    coord_cartesian(xlim = c(-0.5, xlim_max)) +
     labs(title = panel_title,
          subtitle = sprintf("n=%d  (zeros=%d, %.1f%%)", length(x_c), sum(x_c == 0L),
                             sum(x_c == 0L) / length(x_c) * 100),
@@ -283,6 +372,51 @@ naive_implied_mean <- function(fam, params) {
 }
 
 # ── C. Bayesian EpiDist (optional; corrects censoring AND right-truncation) ────
+#
+# POSTERIOR-DRAW REGISTRY. fit_epidist_model() summarises each fit to a one-row tibble
+# (posterior median + 95% CrI of the mean) and then discards the draws, which is all the
+# pipeline needs but leaves nothing to DRAW a fitted density — let alone a credible band —
+# with. Refitting for the figure would double the Stan cost and, worse, could land on a
+# different posterior from the one the pipeline actually used. So every fit deposits its
+# thinned (mean, sd) draws here as a side effect, and 04d_delay_fit_figures.R renders the
+# EXACT fits run_all.R already performed in step 1a. Storing draws (not the brms object)
+# keeps the memory cost at a few hundred KB.
+.EPIDIST_DRAWS <- new.env(parent = emptyenv())
+.epidist_draws_key <- function(delay, model_type, family)
+  paste(delay, model_type, family, sep = "|")
+
+# Deterministic thinning — seq(), never sample(): 01_data_prep.R's onset imputation draws
+# from the global RNG stream, so consuming random numbers here would silently shift every
+# imputed onset downstream (see the load_linelist() reseeding contract).
+.epidist_draws_put <- function(delay, model_type, family, mean_v, sd_v, n,
+                               frac_complete, max_keep = 2000L) {
+  ok <- is.finite(mean_v) & is.finite(sd_v) & mean_v > 0 & sd_v > 0
+  mean_v <- mean_v[ok]; sd_v <- sd_v[ok]
+  if (!length(mean_v)) return(invisible(NULL))
+  if (length(mean_v) > max_keep) {
+    idx    <- unique(round(seq(1, length(mean_v), length.out = max_keep)))
+    mean_v <- mean_v[idx]; sd_v <- sd_v[idx]
+  }
+  assign(.epidist_draws_key(delay, model_type, family),
+         list(delay = delay, model_type = model_type, family = family,
+              mean = as.numeric(mean_v), sd = as.numeric(sd_v),
+              n = n, frac_complete = frac_complete),
+         envir = .EPIDIST_DRAWS)
+  invisible(NULL)
+}
+
+#' Retrieve captured EpiDist posterior draws.
+#' @param delay optional delay name to filter on (e.g. "onset_sample").
+#' @return unnamed list of list(delay, model_type, family, mean, sd, n, frac_complete).
+epidist_draws_get <- function(delay = NULL) {
+  out <- mget(ls(.EPIDIST_DRAWS), envir = .EPIDIST_DRAWS)
+  if (!is.null(delay)) out <- out[vapply(out, function(x) identical(x$delay, delay), logical(1))]
+  unname(out)
+}
+# epidist_draws_clear() REMOVED: nothing called it. The draw registry is a per-session
+# side-channel from the fits to 04d's density/CDF bands; it is rebuilt every run and there is
+# no point in a session where clearing it is correct.
+
 # Mirrors the lab template's epidist path. The MARGINAL model right-truncates at
 # obs_date; the NAIVE model does not. Returns posterior mean/sd (median + 95% CrI).
 fit_epidist_model <- function(df_pairs, obs_date_val, model_type, family_fn,
@@ -298,14 +432,30 @@ fit_epidist_model <- function(df_pairs, obs_date_val, model_type, family_fn,
     if (model_type == "naive" && family_name %in% c("lognormal", "gamma"))
       df_input <- df_input %>% dplyr::filter(as.numeric(sdate_lwr - pdate_lwr) > 0)
     if (nrow(df_input) < 5) return(NULL)
-    frac_c <- sum(df_input$sdate_lwr <= obs_date_val, na.rm = TRUE) / nrow(df_input)
-    if (frac_c < 0.30) {
-      cat(sprintf("  [%s %s %s] skipped — %.0f%% right-truncated\n",
-                  delay_name, model_type, family_name, (1 - frac_c) * 100))
+    # RIGHT-TRUNCATION EXPOSURE. The old metric was
+    #   frac_c <- sum(sdate_lwr <= obs_date_val) / nrow(df_input)
+    # which is 1.0 BY CONSTRUCTION: df_pairs is already filtered to samples on or before the
+    # as-of date and obs_date_val IS that date. So the `< 0.30` guard could never fire and the
+    # log always announced "100% complete" for a model whose entire purpose is correcting
+    # right-truncation — the single most misleading line this file could print.
+    #
+    # Measure the real thing instead: the share of pairs whose PRIMARY event is far enough
+    # behind the observation date that the full delay support (MAX_DELAY) could have been
+    # observed. Everything else is subject to truncation. Measured 2026-09-19 this is
+    # 0.41 / 0.41 / 0.41 / 0.34 for the four DHIS2 delays.
+    frac_obs <- mean(as.numeric(obs_date_val - df_input$pdate_lwr) >= MAX_DELAY, na.rm = TRUE)
+    if (!is.finite(frac_obs)) frac_obs <- 0
+    # Threshold DELIBERATELY set far below the observed range (0.34-0.41) so no fit that runs
+    # today starts being skipped: this is a floor against pathological input (a window with
+    # essentially no fully-observable pair), not a quality bar. The MARGINAL model is designed
+    # to correct truncation, so a high truncated share is a reason to prefer it, not to skip it.
+    if (frac_obs < 0.05) {
+      cat(sprintf("  [%s %s %s] skipped — only %.1f%% of pairs are fully observable (>= %d d before obs_date)\n",
+                  delay_name, model_type, family_name, frac_obs * 100, MAX_DELAY))
       return(NULL)
     }
-    cat(sprintf("  Fitting EpiDist %s %s %s (n=%d, %.0f%% complete)...\n",
-                delay_name, model_type, family_name, nrow(df_input), frac_c * 100))
+    cat(sprintf("  Fitting EpiDist %s %s %s (n=%d, %.0f%% of pairs fully observable; the rest are right-truncated and corrected by the marginal model)...\n",
+                delay_name, model_type, family_name, nrow(df_input), frac_obs * 100))
     ll_obj <- df_input %>%
       epidist::as_epidist_linelist_data(
         pdate_lwr = "pdate_lwr", pdate_upr = "pdate_upr",
@@ -314,19 +464,37 @@ fit_epidist_model <- function(df_pairs, obs_date_val, model_type, family_fn,
       naive    = epidist::as_epidist_naive_model(ll_obj),
       marginal = ll_obj %>% epidist::as_epidist_aggregate_data() %>%
                    epidist::as_epidist_marginal_model())
+    # SEEDED: without a fixed seed the posterior mean/sd wander between runs (observed:
+    # onset->sample marginal mean 7.85 d vs 8.00 d on two identical runs), and because
+    # .load_dhis2_delay_params() routes this fit into the onset imputation, the nowcast and
+    # the R(t) truncation, that MCMC noise propagates into every downstream number and makes
+    # a run non-reproducible. 04b_epinowcast.R already seeds its fit the same way.
     fit <- epidist::epidist(model_obj, family = family_fn, chains = STAN_CHAINS,
                             iter = STAN_ITER, warmup = STAN_WARMUP, cores = STAN_CORES,
+                            seed = get0("RANDOM_SEED", ifnotfound = 20260704L),
                             refresh = 0, silent = 2,
                             control = list(adapt_delta = 0.95, max_treedepth = 12))
     samps <- epidist::predict_delay_parameters(fit) %>% epidist::add_mean_sd()
+    # Side effect only — deposit the draws for 04d's density/CDF bands. Never alters the
+    # returned tibble, so every existing consumer of this function is untouched.
+    .epidist_draws_put(delay_name, model_type, family_name,
+                       samps$mean, samps$sd, n = nrow(df_input), frac_complete = frac_obs)
     tibble(delay = delay_name, model_type = model_type, family = family_name,
-           n = nrow(df_input), frac_complete = round(frac_c, 3),
+           n = nrow(df_input), frac_complete = round(frac_obs, 3),
            mean_post_med = round(stats::median(samps$mean, na.rm = TRUE), 3),
            mean_post_lo  = round(stats::quantile(samps$mean, 0.025, na.rm = TRUE), 3),
            mean_post_hi  = round(stats::quantile(samps$mean, 0.975, na.rm = TRUE), 3),
            sd_post_med   = round(stats::median(samps$sd, na.rm = TRUE), 3))
   }, error = function(e) {
+    # A warning(), not only a cat(). This handler swallowed an "object 'frac_c' not found"
+    # for every single EpiDist fit — raised AFTER Stan had finished, so four fits were burned
+    # per run and the caller quietly fell back to whatever epidist_* rows were already on
+    # disk. Nothing in the run summary said so. A cat() into a long log is not a failure
+    # signal for the estimator that sets the delay behind the onset imputation, the nowcast
+    # weight, EpiNow2's truncation and epinowcast's max_delay.
     cat(sprintf("  [%s %s %s] FAILED: %s\n", delay_name, model_type, family_name, e$message))
+    warning(sprintf("[epidist] %s %s %s FAILED: %s", delay_name, model_type, family_name,
+                    conditionMessage(e)), call. = FALSE)
     NULL
   })
 }
@@ -338,6 +506,62 @@ fit_epidist_both <- function(df_pairs, delay_name, obs_date_val) {
     purrr::map_dfr(c("naive", "marginal"), function(mt)
       fit_epidist_model(df_pairs, obs_date_val, mt, fam_fn, fam, delay_name))
   })
+}
+
+#' Fit the onset->sample delay SEPARATELY by case classification.
+#'
+#' WHY. The onset imputation (01_data_prep.R) imputes onsets for CONFIRMED records, so the
+#' delay it draws from should be the confirmed-case delay. Until 2026-09-22 it drew from a fit
+#' pooled over every classification, and on this line list that pool is majority
+#' TEST-NEGATIVE and partly UNADJUDICATED: of the 13,987 windowed onset->sample pairs, 6,823
+#' are finally classified `not_a_case` and 2,038 carry no final classification at all, against
+#' 4,981 confirmed and 145 suspected/probable. Both groups are swabbed faster than confirmed
+#' cases (raw means 6.40 d and 3.56 d against 8.80 d), so the pooled EpiDist marginal
+#' returns 7.67 d where the CONFIRMED stratum gives 10.14 d -- a 2.47 d (32%) gap, and imputed
+#' onsets landed that much late for the ~23% of confirmed records that carry one. Name the
+#' estimator with the number: the interval-censored MLE puts the same contrast at 7.67 vs
+#' 9.11 d, and the two pairs have been confused before.
+#'
+#' Each stratum is fitted INDEPENDENTLY, with its own double-interval censoring and its own
+#' right-truncation correction. That is not a nicety: confirmed cases are sampled more slowly,
+#' so at any as-of date they are also more right-truncated, and a pooled correction would
+#' distort the very contrast this function exists to measure.
+#'
+#' `suspected` pools `suspected_case` with `probable_case` (n = 4 on this snapshot): fitting
+#' four records alone would return an unusable interval.
+#'
+#' @return named list of epidist results (the shape estimate_dhis2_onset_sample_epidist()
+#'   returns), one per stratum, with failures dropped. Empty list if epidist is unavailable.
+estimate_onset_sample_strata <- function(ll, analysis_date = ANALYSIS_DATE,
+                                         outbreak_start = OUTBREAK_START,
+                                         test_days = TEST_DAYS,
+                                         max_delay = MAX_DELAY) {
+  if (!isTRUE(get0("RUN_EPIDIST", ifnotfound = FALSE))) return(list())
+  if (!"final_mve_case_classification" %in% names(ll)) {
+    warning("[04c_dhis2] no final_mve_case_classification column; delay strata not fitted.",
+            call. = FALSE)
+    return(list())
+  }
+  conf <- get0("CONFIRMED_STATUS", ifnotfound = "confirmed_case")
+  spec <- list(confirmed = conf,
+               not_a_case = "not_a_case",
+               suspected  = c("suspected_case", "probable_case"))
+  out <- list()
+  for (nm in names(spec)) {
+    r <- tryCatch(estimate_dhis2_onset_sample_epidist(
+           ll, analysis_date = analysis_date, outbreak_start = outbreak_start,
+           test_days = test_days, max_delay = max_delay, classes = spec[[nm]]),
+         error = function(e) { message("[04c_dhis2] stratum '", nm, "' failed: ",
+                                       conditionMessage(e)); NULL })
+    if (!is.null(r) && is.finite(r$mean) && r$mean > 0) {
+      out[[nm]] <- r
+      message(sprintf("[04c_dhis2] delay stratum %-11s %s mean %.2f d (sd %.2f, n=%s)",
+                      nm, r$family, r$mean, r$sd, format(r$n)))
+    } else {
+      message(sprintf("[04c_dhis2] delay stratum %-11s NOT fitted", nm))
+    }
+  }
+  out
 }
 
 # ============================================================================
@@ -418,15 +642,32 @@ estimate_dhis2_onset_sample_delay <- function(ll, analysis_date = ANALYSIS_DATE,
 #' Returns NULL when RUN_EPIDIST is off, the `epidist` package is unavailable (RUN_EPIDIST
 #' already folds in .HAVE_EPIDIST), there are too few pairs, or the fit fails — so the caller
 #' falls back to the censored-MLE cleanly and the default remains non-fatal.
+#' @param classes optional character vector of `final_mve_case_classification` values to
+#'   restrict the fit to. NULL (the default) pools every classification, which is what the
+#'   pipeline did until 2026-09-22. Pass CONFIRMED_STATUS to fit the delay of the population
+#'   the onset imputation actually imputes for -- see estimate_onset_sample_strata() for why
+#'   that matters.
 estimate_dhis2_onset_sample_epidist <- function(ll, analysis_date = ANALYSIS_DATE,
                                                 outbreak_start = OUTBREAK_START,
                                                 test_days = TEST_DAYS,
-                                                max_delay = MAX_DELAY) {
+                                                max_delay = MAX_DELAY,
+                                                classes = NULL) {
   if (!isTRUE(get0("RUN_EPIDIST", ifnotfound = FALSE)) ||
       !exists("fit_epidist_both", mode = "function")) return(NULL)
   on <- .parse_date(ll[["date_of_symptom_onset"]])
   sa <- .parse_date(ll[["date_of_sample_collection"]])
   keep <- !is.na(on) & !is.na(sa)
+  # CLASS FILTER FIRST, before the window and truncation logic, so a stratum's window is
+  # derived from its OWN sample dates. Deriving it from the pooled maximum would hand a small
+  # stratum a truncation reference it never reaches.
+  if (!is.null(classes)) {
+    if (!"final_mve_case_classification" %in% names(ll)) {
+      warning("[04c_dhis2] classes= requested but final_mve_case_classification is absent; ",
+              "the fit would silently pool every classification. Returning NULL.", call. = FALSE)
+      return(NULL)
+    }
+    keep <- keep & (ll[["final_mve_case_classification"]] %in% classes)
+  }
   # Right-truncation reference = the as-of / observation date (bounds what is observable);
   # also drop any sample dated after it, exactly like estimate_dhis2_onset_sample_delay().
   .asof    <- .parse_date(analysis_date)
@@ -451,7 +692,20 @@ estimate_dhis2_onset_sample_epidist <- function(ll, analysis_date = ANALYSIS_DAT
     pick <- if (!is.na(gi)) mm[gi, , drop = FALSE] else mm[1, , drop = FALSE]
     efam <- if (identical(as.character(pick$family[1]), "lognormal")) "lnorm"
             else as.character(pick$family[1])
-    list(family = efam, mean = pick$mean_post_med[1], sd = pick$sd_post_med[1], n = pick$n[1])
+    # mean_lo/mean_hi are the 95% posterior interval of the MEAN. They are carried so the
+    # R(t) right-truncation model can be given an UNCERTAIN delay instead of treating a fitted
+    # nuisance parameter as known exactly (EpiNow2's own guidance, and the deployed R window
+    # lies entirely inside the truncation-corrected region).
+    out <- list(family = efam, mean = pick$mean_post_med[1], sd = pick$sd_post_med[1],
+                mean_lo = pick$mean_post_lo[1], mean_hi = pick$mean_post_hi[1],
+                n = pick$n[1])
+    # Full naive+marginal x lognormal+gamma table carried along as an attribute: run_all.R
+    # hands it to 04d so the figure can show ALL four sub-fits (and the naive-vs-marginal
+    # truncation correction) rather than only the single row routed into the imputation.
+    # An attribute keeps write_onset_sample_long(epidist=)'s expected shape ($family/$mean/
+    # $sd/$n) exactly as it was.
+    attr(out, "epidist_table") <- tbl
+    out
   }, error = function(e) {
     message("[04c_dhis2] EpiDist marginal fit failed (non-fatal): ", conditionMessage(e)); NULL
   })
@@ -459,7 +713,13 @@ estimate_dhis2_onset_sample_epidist <- function(ll, analysis_date = ANALYSIS_DAT
 
 # Write the SELECTED onset->sample family to the long (delay,quantity,value) CSV
 # the pipeline consumes (mirrors data/cfr_reference/onset_to_sample_delay_params.csv).
-write_onset_sample_long <- function(fit, path, source_label, epidist = NULL) {
+#' @param strata optional named list of per-classification epidist fits, as returned by
+#'   estimate_onset_sample_strata(). Written as `<quantity>__<stratum>` rows, e.g.
+#'   `epidist_mean__confirmed`. The separator is a DOUBLE underscore so a stratum name can
+#'   never be confused with an existing suffix (`epidist_mean_lo` is a pooled quantity, not
+#'   the "lo" stratum). The pooled rows are untouched, so every existing reader keeps working;
+#'   .load_dhis2_delay_params(stratum=) is what reads these.
+write_onset_sample_long <- function(fit, path, source_label, epidist = NULL, strata = NULL) {
   p <- fit$params; fam <- fit$best_family
   rows <- tibble::tribble(
     ~delay,            ~quantity,          ~value,
@@ -482,6 +742,8 @@ write_onset_sample_long <- function(fit, path, source_label, epidist = NULL) {
       "onset_to_sample", "epidist_family",  as.character(epidist$family),
       "onset_to_sample", "epidist_mean",    as.character(round(epidist$mean, 3)),
       "onset_to_sample", "epidist_sd",      as.character(round(epidist$sd, 3)),
+      "onset_to_sample", "epidist_mean_lo", as.character(if (is.null(epidist$mean_lo)) NA else round(epidist$mean_lo, 3)),
+      "onset_to_sample", "epidist_mean_hi", as.character(if (is.null(epidist$mean_hi)) NA else round(epidist$mean_hi, 3)),
       "onset_to_sample", "epidist_n",       as.character(if (is.null(epidist$n)) NA else epidist$n),
       "onset_to_sample", "epidist_estimator", "epidist_marginal_truncation_corrected")
   }
@@ -493,7 +755,88 @@ write_onset_sample_long <- function(fit, path, source_label, epidist = NULL) {
   par_rows <- purrr::imap_dfr(as.list(round(p, 5)), function(v, nm)
     tibble(delay = "onset_to_sample", quantity = paste0("param_", nm),
            value = as.character(unname(v))))
-  out <- dplyr::bind_rows(rows, par_rows, epi_rows)
+  # SELECTED-* rows: state unambiguously which numbers the pipeline actually uses.
+  # Without them this file is internally contradictory. The `family`/`estimator`/`rate`/
+  # `param_*`/`implied_mean_fit` rows above describe the interval-censored MLE, but
+  # .load_dhis2_delay_params() (00_config.R) PREFERS the epidist_* rows and re-derives the
+  # gamma parameters by method of moments — so the file simultaneously asserted two different
+  # gamma parameterisations (6.832 d, rate 0.1464, shape 0.833 vs 7.667 d, rate 0.1059,
+  # shape 0.812) and an `estimator` that is false whenever EpiDist ran. A human, a methods
+  # document or a future script reading the obvious keys got the numbers the model does NOT use.
+  # These rows mirror the loader's own preference order, so `selected_*` is always the truth.
+  .use_epi <- !is.null(epi_rows) && nrow(epi_rows) > 0
+  sel_mean <- if (.use_epi) epidist$mean else fit$implied_mean
+  sel_sd   <- if (.use_epi) epidist$sd   else NA_real_
+  sel_fam  <- if (.use_epi) as.character(epidist$family) else fam
+  sel_par  <- if (.use_epi && identical(sel_fam, "gamma") &&
+                  is.finite(sel_sd) && sel_sd > 0)
+                c(shape = (sel_mean / sel_sd)^2, rate = sel_mean / sel_sd^2)
+              else p
+  sel_rows <- tibble::tibble(
+    delay = "onset_to_sample",
+    quantity = c("selected_estimator", "selected_family", "selected_mean", "selected_sd",
+                 "selected_rate",
+                 paste0("selected_param_", names(sel_par))),
+    value = c(if (.use_epi) "epidist_marginal_truncation_corrected" else "interval_censored_mle",
+              sel_fam,
+              as.character(round(sel_mean, 3)),
+              as.character(if (is.finite(sel_sd)) round(sel_sd, 3) else NA),
+              as.character(round(1 / sel_mean, 5)),
+              as.character(round(unname(sel_par), 5))))
+  # NON-DESTRUCTIVE when EpiDist did not run. Writing this file with `epidist = NULL` used to
+  # DROP any epidist_* rows already on disk, silently downgrading the pipeline's delay from the
+  # truncation-corrected marginal fit to the interval-censored MLE (7.67 d -> 6.83 d, a 12%
+  # shift that propagates into the onset imputation, the nowcast completeness and the R(t)
+  # truncation model). That is a destructive side effect of merely re-running this script
+  # without RUN_EPIDIST, and it happened. If the caller supplies no EpiDist fit but the target
+  # already carries one, KEEP the existing rows and say so, rather than quietly regressing.
+  if (is.null(epi_rows) && file.exists(path)) {
+    .prev <- tryCatch(readr::read_csv(path, show_col_types = FALSE), error = function(e) NULL)
+    if (!is.null(.prev) && all(c("delay", "quantity", "value") %in% names(.prev))) {
+      .keep <- .prev[grepl("^epidist_", .prev$quantity), , drop = FALSE]
+      if (nrow(.keep)) {
+        warning(sprintf(paste0("[04c_dhis2] no EpiDist fit was supplied, but %s already carries ",
+                               "one. PRESERVING the existing epidist_* rows rather than ",
+                               "downgrading the pipeline to the interval-censored MLE. Re-run ",
+                               "with RUN_EPIDIST=TRUE to refresh them."), basename(path)),
+                call. = FALSE, immediate. = TRUE)
+        epi_rows <- .keep
+        .use_epi <- TRUE
+        sel_mean <- suppressWarnings(as.numeric(.keep$value[.keep$quantity == "epidist_mean"]))[1]
+        sel_sd   <- suppressWarnings(as.numeric(.keep$value[.keep$quantity == "epidist_sd"]))[1]
+        sel_fam  <- as.character(.keep$value[.keep$quantity == "epidist_family"])[1]
+        if (identical(sel_fam, "gamma") && is.finite(sel_mean) && is.finite(sel_sd) && sel_sd > 0)
+          sel_par <- c(shape = (sel_mean / sel_sd)^2, rate = sel_mean / sel_sd^2)
+        sel_rows <- tibble::tibble(
+          delay = "onset_to_sample",
+          quantity = c("selected_estimator", "selected_family", "selected_mean", "selected_sd",
+                       "selected_rate", paste0("selected_param_", names(sel_par))),
+          value = c("epidist_marginal_truncation_corrected", sel_fam,
+                    as.character(round(sel_mean, 3)), as.character(round(sel_sd, 3)),
+                    as.character(round(1 / sel_mean, 5)),
+                    as.character(round(unname(sel_par), 5))))
+      }
+    }
+  }
+  # PER-CLASSIFICATION rows. Additive only: nothing above is altered, so a reader that does
+  # not know about strata resolves exactly what it resolved before. Note these names match
+  # the `^epidist_` pattern used by the preserve-on-rerun branch above, which is deliberate --
+  # re-running without RUN_EPIDIST keeps the strata too rather than dropping them.
+  strata_rows <- NULL
+  if (!is.null(strata) && length(strata)) {
+    strata_rows <- dplyr::bind_rows(lapply(names(strata), function(nm) {
+      e <- strata[[nm]]
+      if (is.null(e) || !is.finite(e$mean) || e$mean <= 0) return(NULL)
+      .n <- function(x) as.character(if (is.null(x) || !is.finite(x)) NA else round(x, 3))
+      tibble::tibble(
+        delay = "onset_to_sample",
+        quantity = paste0(c("epidist_family", "epidist_mean", "epidist_sd",
+                            "epidist_mean_lo", "epidist_mean_hi", "epidist_n"), "__", nm),
+        value = c(as.character(e$family), .n(e$mean), .n(e$sd), .n(e$mean_lo), .n(e$mean_hi),
+                  as.character(if (is.null(e$n)) NA else e$n)))
+    }))
+  }
+  out <- dplyr::bind_rows(rows, par_rows, epi_rows, sel_rows, strata_rows)
   dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
   readr::write_csv(out, path)
   out
@@ -526,41 +869,51 @@ if (sys.nframe() == 0L || isTRUE(getOption("dhis2_delay_run_main"))) {
                  "date_of_notification", "reporting_date", "lab_analysis_date")
   for (dc in intersect(date_cols, names(df_all))) df_all[[dc]] <- .parse_date(df_all[[dc]])
 
-  OBS_DATE   <- suppressWarnings(max(c(df_all$date_of_sample_collection,
-                                       df_all$date_of_symptom_onset), na.rm = TRUE))
-  max_sample <- suppressWarnings(max(df_all$date_of_sample_collection, na.rm = TRUE))
-  TRUNC_DATE <- max_sample - TEST_DAYS
-  ANALYSIS_START <- lubridate::floor_date(OUTBREAK_START, unit = "week", week_start = 1L)
-  WINDOW_NAME <- sprintf("analytical_%s", format(TRUNC_DATE, "%Y-%m-%d"))
+  # AS-OF BOUND, by default, even standalone. This used to pass analysis_date = NULL, which
+  # deliberately disables the bound: max_sample, TRUNC_DATE and OBS_DATE were then taken over
+  # ALL rows, including any future-dated onset or sample typo (this file's own comment at the
+  # builder concedes such typos exist). Line 784 below then passes OBS_DATE straight back into
+  # estimate_dhis2_onset_sample_delay(), which NEUTRALISES that function's own as-of guard
+  # (`keep <- keep & (sa <= .asof)` becomes a no-op), and the resulting parameters are written
+  # to data/cfr_reference/dhis2_onset_sample_delay_params.csv — the exact file
+  # effective_onset_sample_delay() reads for the onset imputation, the nowcast and the R(t)
+  # truncation model. So one bad date in a future snapshot could silently widen the fitting
+  # window, weaken the truncation correction, and become the pipeline's delay.
+  # DHIS2_DELAY_NO_ASOF=1 restores the old unbounded behaviour for a deliberate
+  # whole-history characterisation; it is never the path that feeds the pipeline.
+  .asof_main <- if (identical(tolower(trimws(Sys.getenv("DHIS2_DELAY_NO_ASOF", ""))), "1")) NULL
+                else get0("ANALYSIS_DATE", ifnotfound = NULL)
+  if (is.null(.asof_main))
+    cat("  [as-of] DISABLED (DHIS2_DELAY_NO_ASOF=1 or no ANALYSIS_DATE): window uses ALL dates.\n")
+  else
+    cat(sprintf("  [as-of] bound = %s (matches the pipeline's window)\n", format(.asof_main)))
+  .pops <- build_dhis2_delay_populations(df_all, analysis_date = .asof_main)
+  if (is.null(.pops)) stop("[04c_dhis2] no usable sample dates — cannot derive the delay window.")
+  OBS_DATE       <- .pops$obs_date
+  max_sample     <- .pops$max_sample
+  TRUNC_DATE     <- .pops$trunc_date
+  ANALYSIS_START <- .pops$analysis_start
+  WINDOW_NAME    <- .pops$window_name
+  delay_specs    <- .pops$specs
 
   cat(sprintf("  ANALYSIS_START (outbreak floor) : %s\n", ANALYSIS_START))
   cat(sprintf("  max(sample_date)                : %s\n", max_sample))
   cat(sprintf("  TRUNC_DATE     (max - %dd)        : %s\n", TEST_DAYS, TRUNC_DATE))
   cat(sprintf("  OBS_DATE       (max all dates)   : %s\n\n", OBS_DATE))
 
-  # ── Build windowed delay populations (onset in [start, TRUNC]) ───────────────
-  in_win <- function(onset) !is.na(onset) & onset >= ANALYSIS_START & onset <= TRUNC_DATE
-  mk_delay <- function(from, to) {
-    if (!all(c(from, to) %in% names(df_all))) return(NULL)
-    d <- as.integer(df_all[[to]] - df_all[[from]])
-    keep <- in_win(df_all[[from]]) & !is.na(df_all[[from]]) & !is.na(df_all[[to]]) &
-            is.finite(d) & d >= 0L & d <= MAX_DELAY
-    list(onset = df_all[[from]][keep], sample = df_all[[to]][keep], delay = d[keep])
-  }
-  delay_specs <- list(
-    onset_sample          = list(from = "date_of_symptom_onset",   to = "date_of_sample_collection", lbl = "Onset -> sample"),
-    onset_notification    = list(from = "date_of_symptom_onset",   to = "date_of_notification",       lbl = "Onset -> notification"),
-    onset_lab_analysis    = list(from = "date_of_symptom_onset",   to = "lab_analysis_date",          lbl = "Onset -> lab analysis"),
-    sample_lab_analysis   = list(from = "date_of_sample_collection", to = "lab_analysis_date",        lbl = "Sample -> lab analysis"))
-
   cat("-- INTERVAL-CENSORED MLE (d=0->[0,0.5]; d>0->[d-0.5,d+0.5]) --\n")
   cens_tables <- list(); cens_fits_all <- list(); panels <- list()
+  # Retain each delay's windowed date PAIRS (not just the integer delays): the EpiDist
+  # block below refits every one of them, and it needs the primary/secondary dates to
+  # build the censoring intervals and the right-truncation observation date.
+  delay_dat <- list()
   for (nm in names(delay_specs)) {
     sp <- delay_specs[[nm]]
-    dat <- mk_delay(sp$from, sp$to)
+    dat <- .pops$delays[[nm]]
     if (is.null(dat) || length(dat$delay) < 5L) {
       cat(sprintf("  %-24s unavailable / n<5 — skipped\n", sp$lbl)); next
     }
+    delay_dat[[nm]]     <- dat
     fits <- .fit_all_censored(dat$delay, sp$lbl)
     cens_tables[[nm]]   <- .build_cens_tbl(fits, nm, WINDOW_NAME, length(dat$delay))
     cens_fits_all[[nm]] <- fits
@@ -577,21 +930,38 @@ if (sys.nframe() == 0L || isTRUE(getOption("dhis2_delay_run_main"))) {
   }
 
   # ── Naive MLE (for the naive-vs-censored comparison) ─────────────────────────
-  os_dat <- mk_delay("date_of_symptom_onset", "date_of_sample_collection")
-  naive_os <- fit_mle_naive(os_dat$delay, "onset->sample")
+  os_dat   <- .pops$delays[["onset_sample"]]
+  naive_os <- if (!is.null(os_dat)) fit_mle_naive(os_dat$delay, "onset->sample") else NULL
 
-  # ── EpiDist (optional; truncation-corrected onset->sample) ───────────────────
+  # ── EpiDist for EVERY delay (Bayesian; censoring + right-truncation corrected) ─
+  # EpiDist is the project's designated estimator for delay parameters, so it is applied
+  # to ALL the delays this script characterises — not just onset->sample. It used to be
+  # fit for onset->sample alone, leaving onset->notification, onset->lab and sample->lab
+  # reported from the interval-censored MLE only, i.e. corrected for daily rounding but
+  # NOT for right-truncation. Only onset->sample feeds the models (imputation / nowcast /
+  # R(t) truncation); the other three are descriptive, but they are quoted in methods text
+  # and QA, so they get the same estimator and the same corrections.
   epidist_tbl <- NULL
-  if (RUN_EPIDIST && !is.null(os_dat)) {
-    cat("\n-- EpiDist (Bayesian: naive + marginal x lognormal + gamma) --\n")
-    epidist_tbl <- fit_epidist_both(
-      tibble::tibble(onset = os_dat$onset, sample = os_dat$sample),
-      "onset_sample", OBS_DATE)
+  if (RUN_EPIDIST && length(delay_dat)) {
+    cat("\n-- EpiDist (Bayesian: naive + marginal x lognormal + gamma), all delays --\n")
+    epidist_tbl <- purrr::map_dfr(names(delay_dat), function(nm) {
+      d <- delay_dat[[nm]]
+      cat(sprintf("\n  [%s] n=%d windowed pairs\n", delay_specs[[nm]]$lbl, length(d$delay)))
+      # OBS_DATE = max(sample, onset) is the extraction-date proxy. It deliberately EXCLUDES
+      # date_of_notification / reporting_date, which carry far-future data-entry typos (e.g.
+      # 2027) that would inflate the observation date and switch the truncation correction off.
+      fit_epidist_both(tibble::tibble(onset = d$onset, sample = d$sample), nm, OBS_DATE)
+    })
     if (!is.null(epidist_tbl) && nrow(epidist_tbl)) print(epidist_tbl, n = Inf)
   }
 
   # ── Assemble the onset->sample fit + write outputs ───────────────────────────
-  os_fit <- estimate_dhis2_onset_sample_delay(df_all, analysis_date = OBS_DATE)
+  # Pass the AS-OF date, not OBS_DATE. OBS_DATE is the truncation reference derived from the
+  # data; feeding it back as `analysis_date` made the estimator's own `sa <= analysis_date`
+  # filter a tautology. When the as-of bound is deliberately disabled, OBS_DATE is the
+  # correct (and only) reference available.
+  os_fit <- estimate_dhis2_onset_sample_delay(
+    df_all, analysis_date = if (is.null(.asof_main)) OBS_DATE else .asof_main)
   if (is.null(os_fit)) stop("[04c_dhis2] onset->sample fit failed (too few complete pairs).")
 
   best_os <- dplyr::filter(cens_tbl, delay_type == "onset_sample", best)
@@ -613,7 +983,11 @@ if (sys.nframe() == 0L || isTRUE(getOption("dhis2_delay_run_main"))) {
   # was not run (RUN_EPIDIST=FALSE), so the default run is byte-identical to before.
   epi_marg <- NULL
   if (!is.null(epidist_tbl) && nrow(epidist_tbl)) {
-    mm <- dplyr::filter(epidist_tbl, .data$model_type == "marginal", is.finite(.data$mean_post_med))
+    # MUST filter to the onset->sample delay: epidist_tbl now holds all four delays, and
+    # without this an onset->notification or sample->lab marginal row could be written into
+    # dhis2_onset_sample_delay_params.csv and silently become the imputation/nowcast delay.
+    mm <- dplyr::filter(epidist_tbl, .data$delay == "onset_sample",
+                        .data$model_type == "marginal", is.finite(.data$mean_post_med))
     if (nrow(mm)) {
       pick <- mm[match("gamma", mm$family), , drop = FALSE]
       if (!nrow(pick) || is.na(pick$family[1])) pick <- mm[1, , drop = FALSE]
@@ -634,6 +1008,42 @@ if (sys.nframe() == 0L || isTRUE(getOption("dhis2_delay_run_main"))) {
   if (!is.null(epidist_tbl) && nrow(epidist_tbl))
     readr::write_csv(epidist_tbl, file.path(out_dir, "dhis2_delay_epidist.csv"))
 
+  # ── SELECTED estimator per delay (EpiDist marginal preferred) ────────────────
+  # One table saying, for every delay this script characterises, which estimate is the
+  # headline one and why — so methods text and QA quote the SAME number the pipeline uses
+  # instead of re-deriving it from whichever CSV was opened first. EpiDist marginal
+  # (censoring + right-truncation corrected) wins wherever it converged; the AIC-best
+  # interval-censored MLE is the documented fallback.
+  sel <- purrr::map_dfr(names(delay_dat), function(nm) {
+    cb <- dplyr::filter(cens_tbl, .data$delay_type == nm, .data$best)
+    em <- if (!is.null(epidist_tbl) && nrow(epidist_tbl))
+      dplyr::filter(epidist_tbl, .data$delay == nm, .data$model_type == "marginal",
+                    is.finite(.data$mean_post_med)) else NULL
+    if (!is.null(em) && nrow(em)) {
+      pick <- em[match("gamma", em$family), , drop = FALSE]
+      if (!nrow(pick) || is.na(pick$family[1])) pick <- em[1, , drop = FALSE]
+      tibble::tibble(delay = nm, label = delay_specs[[nm]]$lbl, window = WINDOW_NAME,
+                     estimator = "epidist_marginal_truncation_corrected",
+                     family = as.character(pick$family[1]), n = pick$n[1],
+                     mean_d = pick$mean_post_med[1], sd_d = pick$sd_post_med[1],
+                     mean_lo = pick$mean_post_lo[1], mean_hi = pick$mean_post_hi[1])
+    } else {
+      tibble::tibble(delay = nm, label = delay_specs[[nm]]$lbl, window = WINDOW_NAME,
+                     estimator = "interval_censored_mle",
+                     family = if (nrow(cb)) as.character(cb$family[1]) else NA_character_,
+                     n = if (nrow(cb)) cb$n[1] else NA_integer_,
+                     mean_d = if (nrow(cb)) cb$implied_mean_d[1] else NA_real_,
+                     sd_d = NA_real_, mean_lo = NA_real_, mean_hi = NA_real_)
+    }
+  })
+  if (nrow(sel)) {
+    cat("\n-- SELECTED delay estimates (EpiDist marginal preferred) --\n")
+    print(sel, n = Inf)
+    readr::write_csv(sel, file.path(out_dir, "dhis2_delay_selected.csv"))
+    readr::write_csv(sel, file.path(stable_dir, "dhis2_delay_selected.csv"))
+    cat(sprintf("Saved dhis2_delay_selected.csv -> %s (and %s)\n", out_dir, stable_dir))
+  }
+
   # ── QA figure: naive vs censored per delay ───────────────────────────────────
   if (.HAVE_FIG && length(panels)) {
     fig <- patchwork::wrap_plots(panels, ncol = 2) +
@@ -644,8 +1054,15 @@ if (sys.nframe() == 0L || isTRUE(getOption("dhis2_delay_run_main"))) {
                            .meta$folder))
     fig_path <- file.path(OUT_DIAGNOSTICS, sprintf("dhis2_delay_fits_%s.pdf",
                                                    format(TRUNC_DATE, "%Y%m%d")))
-    ggplot2::ggsave(fig_path, fig, width = 11, height = 8, device = "pdf")
-    cat(sprintf("Saved QA figure -> %s\n", fig_path))
+    # Retained-figure gate: dhis2_delay_fits is NOT on the published allow-list
+    # (04d's dhis2_delay_epidist_fits is the retained delay figure).
+    .fk <- get0("figure_is_kept", ifnotfound = NULL)
+    if (is.function(.fk) && !.fk(fig_path)) {
+      cat(sprintf("QA figure skipped (not on FIGURE_KEEP) -> %s\n", basename(fig_path)))
+    } else {
+      ggplot2::ggsave(fig_path, fig, width = 11, height = 8, device = "pdf")
+      cat(sprintf("Saved QA figure -> %s\n", fig_path))
+    }
   }
 
   cat(sprintf("\n%s\n04c_dhis2_delay_windows.R complete.\n%s\n",

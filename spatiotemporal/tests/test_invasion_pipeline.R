@@ -136,6 +136,46 @@ test_that("daily_to_weekly_gt of a real GT PMF is a valid weekly PMF", {
               info = "A ~15 d mean GT peaks in week 2+, not week 1")
 })
 
+# The weekly kernel must be the WEEKLY double-interval-censored pmf, not the daily pmf summed
+# into 7-day blocks. Binning measures the day-lag and so ignores where in its week the infector
+# sat; it understates lag-1 transmission by ~40% relative and lengthens the mean generation lag
+# by ~0.3 weeks. These tests pin the kernel to simulated ground truth so the two can never be
+# silently swapped again.
+test_that("a real GT PMF yields the WEEKLY-censored kernel, matching simulation", {
+  skip_if_missing("daily_to_weekly_gt")
+  skip_if_missing("make_gt_pmf")
+  skip_if_missing("weekly_censored_gt")
+
+  Gw <- daily_to_weekly_gt(make_gt_pmf(15.3, 9.3, 90))
+  expect_equal(Gw, weekly_censored_gt(15.3, 9.3), tolerance = 1e-12,
+               info = "must censor at the WEEKLY scale, not bin the daily pmf")
+
+  # Independent ground truth: P(floor((u + D)/7) = k), u ~ U(0,7), D ~ Gamma, renormalised
+  # over k >= 1 (the discrete weekly renewal cannot carry same-week transmission).
+  set.seed(42)
+  sh <- (15.3 / 9.3)^2; rt <- 15.3 / 9.3^2
+  kl <- floor((stats::runif(4e5, 0, 7) + stats::rgamma(4e5, sh, rt)) / 7)
+  mc <- as.numeric(table(factor(kl, levels = 0:14)))
+  mc <- mc[-1] / sum(mc[-1])
+  expect_equal(Gw[1:8], mc[1:8], tolerance = 5e-3,
+               info = "weekly kernel must match simulated week-lag frequencies")
+})
+
+test_that("the weekly kernel bypasses daily truncation and respects the naive flag", {
+  skip_if_missing("daily_to_weekly_gt")
+  skip_if_missing("make_gt_pmf")
+
+  # Built from the Gamma, so the daily support bound cannot change it.
+  expect_equal(daily_to_weekly_gt(make_gt_pmf(15.3, 9.3, 35)),
+               daily_to_weekly_gt(make_gt_pmf(15.3, 9.3, 90)), tolerance = 1e-12)
+
+  # An explicitly NAIVE daily pmf must not be handed a censored weekly kernel: the daily and
+  # weekly views would then describe different distributions.
+  expect_false(isTRUE(all.equal(
+    daily_to_weekly_gt(make_gt_pmf(15.3, 9.3, 90, method = "naive")),
+    daily_to_weekly_gt(make_gt_pmf(15.3, 9.3, 90)))))
+})
+
 
 # =============================================================================
 # 2. FORCE OF INFECTION — compute_foi + build_inward_contact_matrix (06)
@@ -168,7 +208,7 @@ test_that("compute_foi routes all import pressure INTO i = sum_j W[j,i]*Ytilde_j
   expect_equal(unname(Lambda["B"]), unname(Y_weighted_A), tolerance = 1e-9)
 })
 
-test_that("build_inward_contact_matrix M is symmetric, non-negative, unit-mean; presence P is row-stochastic", {
+test_that("build_inward_contact_matrix: C symmetric, M population-scaled, non-negative, unit-mean; presence P row-stochastic", {
   skip_if_missing("build_inward_contact_matrix")
 
   zones <- c("A", "B", "C", "D")
@@ -183,7 +223,22 @@ test_that("build_inward_contact_matrix M is symmetric, non-negative, unit-mean; 
 
   expect_equal(dim(M), c(4L, 4L))
   expect_identical(dimnames(M), list(zones, zones))
-  expect_equal(M, t(M), tolerance = 1e-12, info = "M must be exactly symmetric")
+  # M is deliberately NOT symmetric. build_inward_contact_matrix() returns
+  # M = C %*% diag(N) (up to the unit-mean rescale), where C is the symmetric per-person
+  # contact matrix, so that compute_foi()'s Lambda = t(M) %*% Ytilde yields
+  # Lambda_i = N_i * sum_k C[i,k] * Ytilde_k — the EXTENSIVITY factor the function's own
+  # docstring says must be kept ("M is consequently NOT symmetric (C is)"). This test asserted
+  # exact symmetry of M, which the scaling makes impossible for unequal populations, and had
+  # been failing since the scaling was introduced. Assert the two properties that ARE true:
+  #   (a) undoing the population scaling recovers a symmetric matrix, and
+  #   (b) the asymmetry is exactly the population ratio.
+  N <- as.numeric(pop[zones])
+  C_recovered <- M %*% diag(1 / N)
+  expect_equal(unname(C_recovered), unname(t(C_recovered)), tolerance = 1e-9,
+               info = "M %*% diag(1/N) must recover the symmetric contact matrix C")
+  for (i in seq_along(zones)) for (k in seq_along(zones)) if (i != k && M[i, k] > 0)
+    expect_equal(M[k, i] / M[i, k], N[i] / N[k], tolerance = 1e-9,
+                 info = "M[k,i]/M[i,k] must equal the population ratio N_i/N_k")
   expect_true(all(M >= 0), info = "M must be non-negative")
   # Rescaled to unit mean POSITIVE entry (absolute scale absorbed by beta).
   expect_equal(mean(M[M > 0]), 1, tolerance = 1e-9)
@@ -213,16 +268,22 @@ test_that("nowcast correction inflates BOTH confirmed and suspected even when su
   zw <- tibble::tibble(
     health_zone = rep("TestZone", 5L),
     week_start  = as.Date(c("2026-04-06", "2026-04-13", "2026-04-20",
-                            "2026-04-27", "2026-06-11")),  # midpoint 06-14.5, lag 0.5 d
+                            "2026-04-27", "2026-06-11")),  # last week: mean lag 1 d
     confirmed   = c(1L, 2L, 2L, 1L, 3L),
     suspected   = c(50L, 80L, 60L, 40L, 70L)
   )
-  # lag 0.5 d => raw multiplier ~9.3 > 5, so the 5x cap binds (earlier weeks stable):
-  # suspected (40-80) >> 5x max stable confirmed (5*2=10), so the OLD absolute-count
-  # cap bug would fire here, while the correct factor cap keeps suspected_nc >= suspected.
+  # The delay is PINNED to a slow Exp(0.05) (mean 20 d) so the last week's multiplier is
+  # ~12x — the condition under which the old ABSOLUTE-COUNT cap bug fired. suspected (40-80)
+  # >> 5x max stable confirmed (5*2 = 10), so an absolute-count cap would push suspected_nc
+  # BELOW its raw value here, while a factor cap cannot. That regression is what this test
+  # protects, and it does not depend on the cap binding.
+  # NOTE the cap itself became delay-derived on 2026-09-21 and no longer binds on legitimate
+  # input (see test_models.R and tests/test_truncation.R); the assertions below were rewritten
+  # from "capped at 5x" to "capped at the delay-derived bound, and not clipped".
   analysis_date <- as.Date("2026-06-15")
 
-  out <- suppressWarnings(apply_nowcast_correction(zw, analysis_date, min_lag_days = 0))
+  out <- suppressWarnings(
+    apply_nowcast_correction(zw, analysis_date, min_lag_days = 0, rate = 0.05))
 
   valid <- !is.na(out$confirmed_nc)
   expect_true(any(valid), info = "at least one row must be corrected")
@@ -236,10 +297,12 @@ test_that("nowcast correction inflates BOTH confirmed and suspected even when su
   # (b) the correction is a MULTIPLIER capped at 5x (corrected in [raw, 5*raw]).
   mult_c <- out$confirmed_nc[valid] / pmax(out$confirmed[valid], 1e-9)
   mult_s <- out$suspected_nc[valid] / pmax(out$suspected[valid], 1e-9)
-  expect_true(all(mult_c <= 5 + 1e-9), info = "confirmed multiplier capped at 5x")
-  expect_true(all(mult_s <= 5 + 1e-9), info = "suspected multiplier capped at 5x")
-  expect_true(any(mult_s >= 5 - 1e-9),
-              info = "the recent week's raw multiplier (~9.3) must be capped AT 5x (cap binds)")
+  deepest_mult <- 7 / sum(pexp(seq(0L, 4L) + 0.5, rate = 0.05))
+  cap          <- max(5, ceiling(1.5 * deepest_mult))
+  expect_true(all(mult_c <= cap + 1e-9), info = "confirmed multiplier within the delay-derived cap")
+  expect_true(all(mult_s <= cap + 1e-9), info = "suspected multiplier within the delay-derived cap")
+  expect_true(max(mult_s) > 5,
+              info = "this fixture must exceed the retired 5x cap, else it proves nothing")
 
   # confirmed and suspected in the same row share ONE multiplier (1/trunc_weight),
   # so the ratio-based correction is series-agnostic.
@@ -274,90 +337,15 @@ test_that("nowcast truncation weights are in (0,1], monotone with lag, NA for fu
 
 
 # =============================================================================
-# 4. INVASION PROBABILITY + ASCERTAINMENT BAND — .invasion_prob / forecast_workhorse (15)
+# 4. (REMOVED) INVASION PROBABILITY + ASCERTAINMENT BAND
 # =============================================================================
-
-test_that(".invasion_prob is the Poisson arrival prob 1-exp(-mu), monotone in mu", {
-  skip_if_missing(".invasion_prob")
-  mu <- c(0, 0.01, 0.1, 0.5, 1, 3, 10, 50)
-  p  <- vapply(mu, function(m) .invasion_prob(m, obs = "poisson", theta = NA_real_), numeric(1))
-
-  expect_equal(p, 1 - exp(-mu), tolerance = 1e-12,
-               info = "Poisson invasion prob must equal 1 - exp(-mu)")
-  expect_equal(p[1], 0, tolerance = 1e-15)          # mu=0 -> 0
-  expect_true(all(p >= 0 & p <= 1))
-  expect_true(all(diff(p) >= 0), info = "monotone non-decreasing in mu")
-  # NegBin arrival prob 1-(theta/(theta+mu))^theta is also monotone and <= Poisson.
-  p_nb <- vapply(mu, function(m) .invasion_prob(m, obs = "negbin", theta = 2), numeric(1))
-  expect_true(all(diff(p_nb) >= 0))
-  expect_true(all(p_nb <= p + 1e-9), info = "NegBin (overdispersed) arrival <= Poisson")
-})
-
-test_that("ascertainment band orders p_case <= p_inf_lo <= p_inf <= p_inf_hi at the three rhos", {
-  skip_if_missing(".invasion_prob")
-  skip_if(!exists("ASCERTAINMENT_GRID"), "ASCERTAINMENT_GRID not loaded")
-
-  rho    <- get0("ASCERTAINMENT_NOMINAL", ifnotfound = 0.45)
-  rho_lo <- max(ASCERTAINMENT_GRID)   # largest rho -> LOWER infection band
-  rho_hi <- min(ASCERTAINMENT_GRID)   # smallest rho -> UPPER infection band
-  ip <- function(m) .invasion_prob(m, "poisson", NA_real_)
-
-  for (mu in c(0.2, 1, 4)) {
-    p_case <- ip(mu)
-    p_lo   <- ip(mu / rho_lo)
-    p_mid  <- ip(mu / rho)
-    p_hi   <- ip(mu / rho_hi)
-    expect_true(p_case <= p_lo + 1e-12)
-    expect_true(p_lo   <= p_mid + 1e-12)
-    expect_true(p_mid  <= p_hi + 1e-12)
-    expect_gt(p_hi, p_case)   # strict when mu>0 and grid spans <1
-  }
-})
-
-test_that("forecast_workhorse output satisfies the band ordering and masks affected zones", {
-  skip_if_missing("forecast_workhorse")
-  skip_if_missing("make_gt_pmf")
-
-  weeks <- as.Date("2026-05-04") + 7 * (0:6)
-  zz    <- c("A", "B", "C", "D")
-  mk <- function(z, conf) tibble::tibble(
-    health_zone = z, week_start = weeks, confirmed = conf, confirmed_nc = conf)
-  zw <- rbind(
-    mk("A", c(2, 4, 5, 6, 3, 2, 1)),   # A affected throughout
-    mk("B", c(0, 0, 0, 1, 2, 1, 0)),   # B invades at week 4
-    mk("C", rep(0, 7)),                # C at-risk
-    mk("D", rep(0, 7)))                # D at-risk
-  W <- matrix(c(0, .5, .3, .2,
-                .4, 0, .3, .3,
-                .3, .3, 0, .4,
-                .2, .4, .4, 0),
-              nrow = 4, byrow = TRUE, dimnames = list(zz, zz))
-
-  fc <- suppressWarnings(forecast_workhorse(
-    zw, W, make_gt_pmf(9, 4.5, 30), zz, t_idx = 5L,
-    horizons = c(1L, 2L), obs = "poisson"))
-
-  # Required output columns.
-  need <- c("health_zone", "horizon", "mu_forecast", "p_case_invasion",
-            "p_infection_invasion", "p_infection_lo", "p_infection_hi",
-            "was_active_before")
-  expect_true(all(need %in% names(fc)))
-
-  # Affected zones (A, B) carry NO invasion output.
-  aff <- fc[fc$health_zone %in% c("A", "B"), ]
-  expect_true(all(is.na(aff$p_case_invasion)))
-  expect_true(all(is.na(aff$mu_forecast)))
-
-  # At-risk band ordering holds row-wise.
-  ar <- fc[!fc$was_active_before, ]
-  expect_true(nrow(ar) > 0)
-  expect_true(all(ar$p_infection_lo <= ar$p_infection_invasion + 1e-12, na.rm = TRUE))
-  expect_true(all(ar$p_infection_invasion <= ar$p_infection_hi + 1e-12, na.rm = TRUE))
-  expect_true(all(ar$p_infection_lo >= ar$p_case_invasion - 1e-12, na.rm = TRUE))
-  expect_true(all(ar$p_case_invasion >= 0 & ar$p_case_invasion <= 1, na.rm = TRUE))
-})
-
-
+# These tests covered .invasion_prob() and forecast_workhorse(), the frequentist renewal
+# engine, and the p_infection_* ascertainment band it emitted. Both were removed on
+# 2026-09-19: the frequentist arm scored ZERO models in the shipped evaluation (the field is
+# 54 Bayesian models plus three structural baselines), and ascertainment was removed from the
+# pipeline entirely because a constant ascertainment cannot identify anything the confirmed-
+# case scale does not already carry. The Bayesian hazard->probability conversion that
+# replaced .invasion_prob() is covered in test_bayes_projection.R.
 # =============================================================================
 # 5. RISK SCORES — compute_risk_scores (15)
 # =============================================================================
@@ -682,4 +670,269 @@ test_that("compute_risk_scores generalises within-province RR to every province 
   # AND within Haut-Uele here, but the columns are computed separately).
   expect_equal(rs$rr_hautuele_rank[rs$health_zone == "H2"], 1L)
   expect_equal(rs$rr_nat_rank[rs$health_zone == "H2"], 1L)
+})
+
+# -----------------------------------------------------------------------------
+# 11  Featured-model selection: the CV composite (16_invasion_eval.R)
+# -----------------------------------------------------------------------------
+# Regression guard for the 2026-08 defect: the objective had been reduced to
+# AUC-PR skill alone, which is dominated by the very top of the ranking and is
+# blind to calibration. That let a model win on a <1% skill edge while ranking
+# invaded zones worse and scoring worse on a proper score — and because the
+# 13-week cascade adopts the featured model's mobility kernel, the choice
+# propagated into the long-horizon projection. These tests pin the composite.
+test_that("selection uses the pooled CV composite, not AUC-PR skill alone", {
+  # Two horizons, three models. `disc` wins AUC-PR skill at BOTH horizons by a
+  # hair but is worst on rank-of-truth and log score; `bal` is a close second on
+  # skill and best on the other two. The composite must prefer `bal`.
+  ev <- tibble::tribble(
+    ~method, ~horizon, ~auc_pr_skill, ~mean_rank_of_truth, ~log_score, ~partial_cv,
+    "disc",  1L,       34.7,          20.0,                0.060,      FALSE,
+    "bal",   1L,       34.3,          16.0,                0.040,      FALSE,
+    "poor",  1L,       20.0,          22.0,                0.070,      FALSE,
+    "disc",  2L,       24.2,          19.0,                0.058,      FALSE,
+    "bal",   2L,       24.1,          15.0,                0.038,      FALSE,
+    "poor",  2L,       14.0,          21.0,                0.068,      FALSE)
+
+  # select_on_recal = FALSE is passed EXPLICITLY: this fixture carries only `log_score`,
+  # so under the deployed default (INVASION_SELECT_ON_RECAL = TRUE) the selector would fall
+  # back to the raw axis with a warning. The fallback is correct behaviour, but a test of the
+  # COMPOSITE rule must not silently change meaning when that flag moves — pin the axis here
+  # and let the recalibration tests cover the recalibrated one.
+  expect_equal(best_invasion_model(ev, rule = "composite", select_on_recal = FALSE), "bal")
+  # the previous rule is still reachable and still returns the discrimination lead
+  expect_equal(best_invasion_model(ev, rule = "aucpr", select_on_recal = FALSE), "disc")
+
+  # composite arithmetic is exactly sum-of-within-horizon-ranks, pooled
+  tb <- invasion_selection_table(ev, select_on_recal = FALSE)
+  comp <- tb[!duplicated(tb$method), c("method", "composite")]
+  # h1 & h2 ranks are identical here: bal = 2+1+1 = 4, disc = 1+2+2 = 5, poor = 3+3+3 = 9
+  expect_equal(comp$composite[comp$method == "bal"],  8L)
+  expect_equal(comp$composite[comp$method == "disc"], 10L)
+  expect_equal(comp$composite[comp$method == "poor"], 18L)
+})
+
+test_that("selection gates still bind ahead of the composite", {
+  # `spiky` would WIN the composite on skill+log-score, but its worst-horizon
+  # rank-of-truth is far above the field median and the gate must drop it first.
+  ev <- tibble::tribble(
+    ~method, ~horizon, ~auc_pr_skill, ~mean_rank_of_truth, ~log_score, ~partial_cv,
+    "spiky", 1L,       99.0,          200.0,               0.010,      FALSE,
+    "solid", 1L,       30.0,           18.0,               0.040,      FALSE,
+    "other", 1L,       29.0,           19.0,               0.041,      FALSE,
+    "spiky", 2L,       99.0,          200.0,               0.010,      FALSE,
+    "solid", 2L,       30.0,           18.0,               0.040,      FALSE,
+    "other", 2L,       29.0,           19.0,               0.041,      FALSE)
+  expect_equal(best_invasion_model(ev, select_on_recal = FALSE), "solid")
+
+  # a partial-CV model is scored on an incomparable support and must be excluded
+  # even when it sweeps every axis
+  ev2 <- ev
+  ev2$partial_cv[ev2$method == "spiky"] <- TRUE
+  ev2$mean_rank_of_truth[ev2$method == "spiky"] <- 1
+  expect_equal(best_invasion_model(ev2), "solid")
+
+  # a model absent at the harder horizon cannot win by sitting it out
+  ev3 <- ev[!(ev$method == "spiky" & ev$horizon == 2L), ]
+  ev3$mean_rank_of_truth[ev3$method == "spiky"] <- 1
+  expect_equal(best_invasion_model(ev3), "solid")
+})
+
+test_that("NA metrics rank last on their own axis rather than winning silently", {
+  ev <- tibble::tribble(
+    ~method, ~horizon, ~auc_pr_skill, ~mean_rank_of_truth, ~log_score, ~partial_cv,
+    "nas",   1L,       30.0,          NA_real_,            NA_real_,   FALSE,
+    "solid", 1L,       29.0,          18.0,                0.040,      FALSE,
+    "nas",   2L,       30.0,          NA_real_,            NA_real_,   FALSE,
+    "solid", 2L,       29.0,          18.0,                0.040,      FALSE)
+  expect_equal(best_invasion_model(ev, select_on_recal = FALSE), "solid")
+})
+
+# -----------------------------------------------------------------------------
+# 12  Common-support alignment  (.invasion_support / partial_cv semantics)
+# -----------------------------------------------------------------------------
+# The support is anchored on EVERY method, and `partial_cv` flags "scored on
+# fewer cells than that support" -- NOT "fitted on fewer folds". Both matter:
+# every downstream consumer DROPS partial_cv rows (17_invasion_viz.R from the
+# figures, update_bayesian_report.R from the report, best_invasion_model() from
+# the featured pick, which also sets the cascade kernel), so flagging a family
+# that covers fewer folds BY DESIGN -- the rolling-predictor floor -- would hand
+# the leaderboard, the figures and the cascade to the structural baselines.
+
+# folds x zones for `folds`, with one invasion per fold so the base rate is defined.
+.mk_lfo <- function(method, folds, zones, horizon = 1L, p = NULL) {
+  g <- expand.grid(fold_id = folds, health_zone = zones,
+                   stringsAsFactors = FALSE, KEEP.OUT.ATTRS = FALSE)
+  g$method <- method; g$horizon <- horizon
+  g$was_active_before <- FALSE
+  g$is_new_invasion <- as.integer(g$health_zone == zones[1])
+  g$p_invasion <- if (is.null(p)) ifelse(g$is_new_invasion == 1L, 0.8, 0.1) else p
+  g
+}
+.ZN <- paste0("z", 1:10)
+
+test_that(".invasion_support anchors on every method, not just the best-covered ones", {
+  # `wide` covers folds 1-3; `narrow` only 2-3. The shared support is folds 2-3
+  # for BOTH -- the old rule kept `wide` on all three and left `narrow` alone.
+  d <- rbind(.mk_lfo("wide", 1:3, .ZN), .mk_lfo("narrow", 2:3, .ZN))
+  d$.cell <- paste(d$fold_id, d$health_zone, sep = "\r")
+  hs <- .invasion_support(d, label = 1L)
+  expect_equal(length(hs$common), 2L * length(.ZN))
+  expect_equal(hs$maxf, 3L)                       # native reach still reported
+  expect_false(any(grepl("^1\r", hs$common)))     # fold 1 is outside the support
+})
+
+test_that("alignment equalises n_atrisk and base_rate across methods", {
+  d <- rbind(.mk_lfo("wide", 1:3, .ZN), .mk_lfo("narrow", 2:3, .ZN))
+  d$.cell <- paste(d$fold_id, d$health_zone, sep = "\r")
+  hs <- .invasion_support(d, label = 1L)
+  a <- d[d$.cell %in% hs$common, ]
+  n  <- tapply(a$is_new_invasion, a$method, length)
+  br <- tapply(a$is_new_invasion, a$method, mean)
+  expect_equal(length(unique(n)),  1L)   # same denominator ...
+  expect_equal(length(unique(br)), 1L)   # ... so the same skill reference
+})
+
+test_that("partial_cv is FALSE for a short-reach method that covers the whole shared support", {
+  d <- rbind(.mk_lfo("wide", 1:3, .ZN), .mk_lfo("narrow", 2:3, .ZN))
+  d$.cell <- paste(d$fold_id, d$health_zone, sep = "\r")
+  hs <- .invasion_support(d, label = 1L)
+  pc <- vapply(c("wide", "narrow"), function(m) {
+    cl <- unique(d$.cell[d$method == m & d$.cell %in% hs$common])
+    length(hs$common) > 0L && length(cl) < length(hs$common)
+  }, logical(1))
+  expect_false(pc[["narrow"]])   # fitted on fewer folds, scored on the same cells
+  expect_false(pc[["wide"]])
+})
+
+test_that("a pathological method triggers the fallback and is itself flagged partial_cv", {
+  # `sliver` covers a single fold, so the all-method intersection would leave
+  # everyone scored on 1/3 of the cells. The guard falls back to the best-covered
+  # pack (folds 1-3) and warns; `sliver` then genuinely misses cells -> flagged.
+  d <- rbind(.mk_lfo("wide", 1:3, .ZN), .mk_lfo("also_wide", 1:3, .ZN),
+             .mk_lfo("sliver", 3L, .ZN))
+  d$.cell <- paste(d$fold_id, d$health_zone, sep = "\r")
+  expect_warning(hs <- .invasion_support(d, label = 1L), "dragging it down")
+  expect_equal(length(hs$common), 3L * length(.ZN))
+  pc <- vapply(c("wide", "also_wide", "sliver"), function(m) {
+    cl <- unique(d$.cell[d$method == m & d$.cell %in% hs$common])
+    length(hs$common) > 0L && length(cl) < length(hs$common)
+  }, logical(1))
+  expect_false(pc[["wide"]]); expect_false(pc[["also_wide"]])
+  expect_true(pc[["sliver"]])   # the case the flag exists for
+})
+
+test_that("invasion_common_cells resolves the same support evaluate_invasion scores on", {
+  # compute_detection_curve() (20_forecast_detail.R) restricts through this
+  # helper while evaluate_invasion() restricts through .invasion_support(). If
+  # they diverged, the curve's random reference k/n_atrisk would not match the
+  # table's recall_at_K and Figure 2's one-row-per-k assertion would abort.
+  d <- rbind(.mk_lfo("wide", 1:3, .ZN), .mk_lfo("narrow", 2:3, .ZN))
+  d2 <- d; d2$horizon <- 2L
+  all_d <- rbind(d, d2)
+  dh <- all_d[all_d$horizon == 1L, ]
+  dh$.cell <- paste(dh$fold_id, dh$health_zone, sep = "\r")
+  expect_setequal(invasion_common_cells(all_d, 1L), .invasion_support(dh, 1L)$common)
+  expect_null(invasion_common_cells(all_d, 99L))     # absent horizon -> NULL
+})
+
+test_that("already-active and non-finite rows are excluded before the support is formed", {
+  d <- rbind(.mk_lfo("a", 1:2, .ZN), .mk_lfo("b", 1:2, .ZN))
+  d$was_active_before[d$health_zone == "z9"] <- TRUE   # drops for BOTH methods
+  d$p_invasion[d$method == "b" & d$health_zone == "z8"] <- NA_real_
+  cc <- invasion_common_cells(d, 1L)
+  expect_false(any(grepl("z9$", cc)))   # active zones never enter the support
+  expect_false(any(grepl("z8$", cc)))   # b cannot score z8, so nobody does
+  expect_equal(length(cc), 2L * (length(.ZN) - 2L))
+})
+
+# -----------------------------------------------------------------------------
+# 13  Comparability defects found by the 2026-09-22 fairness audit
+# -----------------------------------------------------------------------------
+
+test_that(".invasion_ls_col ignores rank-only rows, whose NA is structural", {
+  # A comparator that emits an ordering has no recalibrated log score by construction. The
+  # finiteness test used to run over those rows too, so one surviving rank-only comparator
+  # silently reverted the WHOLE composite to the raw axis -- with INVASION_SELECT_ON_RECAL
+  # still reporting TRUE. On the shipped frame that made the full-table pick and the
+  # Bayes-only pick disagree, and the featured pick sets CASCADE_KERNEL.
+  e <- tibble::tribble(
+    ~method, ~horizon, ~prob_calibrated, ~log_score, ~log_score_recal,
+    "bayes_a", 1L, TRUE,  0.05, 0.04,
+    "bayes_b", 1L, TRUE,  0.06, 0.045,
+    "rankonly",1L, FALSE, NA_real_, NA_real_)
+  expect_identical(.invasion_ls_col(e, select_on_recal = TRUE), "log_score_recal")
+  # A CALIBRATED row missing the column is still a real failure and must fall back, loudly.
+  e2 <- e; e2$log_score_recal[e2$method == "bayes_b"] <- NA_real_
+  expect_warning(ax <- .invasion_ls_col(e2, select_on_recal = TRUE), "CALIBRATED rows")
+  expect_identical(ax, "log_score")
+  # All rank-only: nothing can carry the axis.
+  e3 <- e[e$method == "rankonly", ]
+  expect_warning(ax3 <- .invasion_ls_col(e3, select_on_recal = TRUE), "every candidate is rank-only")
+  expect_identical(ax3, "log_score")
+})
+
+test_that("the bootstrap seed is shared across methods at a horizon (paired intervals)", {
+  # It used to hash the METHOD NAME, so every method drew a different stream -- the opposite
+  # of the pairing the call site claimed. Point estimates never depended on it; the published
+  # auc_pr_lo/hi and log_score_lo/hi did.
+  expect_identical(.key_seed(20260704L, 1L), .key_seed(20260704L, 1L))
+  expect_false(identical(.key_seed(20260704L, 1L), .key_seed(20260704L, 2L)))
+  # Same seed => identical resamples for two methods scored on the same zones.
+  z <- paste0("z", 1:40)
+  draw <- function(h) { set.seed(.key_seed(20260704L, h)); sample(z, length(z), replace = TRUE) }
+  expect_identical(draw(1L), draw(1L))
+})
+
+test_that("the metric helpers return NA on empty input instead of erroring", {
+  # .brier_skill's `if (bs_ref <= 0)` became `if (NA)` -- a hard error inside
+  # evaluate_invasion()'s per-key lapply, which would abort the entire evaluation.
+  expect_true(is.na(.brier_skill(numeric(0), integer(0))))
+  expect_true(is.na(.log_score(numeric(0), integer(0))))
+  expect_true(is.na(.brier(numeric(0), integer(0))))
+  # all rows filtered out by the finite/NA mask is the same situation
+  expect_true(is.na(.brier_skill(c(NA_real_, NaN), c(1L, 0L))))
+})
+
+test_that("spatiotemporal_skill aligns methods onto the shared support", {
+  if (!exists("spatiotemporal_skill", mode = "function"))
+    testthat::skip("spatiotemporal_skill() unavailable")
+  # `wide` keeps an extra, easier early fold that `narrow` does not have. Scored natively its
+  # mean skill is inflated by that fold; on the shared support the two are comparable. This is
+  # the defect that put Gravity-B4 into the published top-6 panel at rank 5.
+  mk <- function(m, folds, p_hit) do.call(rbind, lapply(folds, function(k) data.frame(
+    method = m, horizon = 1L, fold_id = k,
+    cutoff = as.Date("2026-05-11") + 7L * (k - 1L),
+    health_zone = paste0("z", 1:20),
+    p_invasion = c(p_hit, runif(19, 0, 0.01)),
+    is_new_invasion = c(1L, rep(0L, 19)),
+    was_active_before = FALSE, stringsAsFactors = FALSE)))
+  set.seed(4)
+  lfo <- rbind(mk("wide", 1:3, 0.9), mk("narrow", 2:3, 0.9))
+  nat <- spatiotemporal_skill(lfo, common_support = FALSE)
+  shr <- spatiotemporal_skill(lfo, common_support = TRUE)
+  expect_equal(sort(unique(nat$fold_id[nat$method == "wide"])), 1:3)
+  expect_equal(sort(unique(shr$fold_id[shr$method == "wide"])), 2:3)   # fold 1 dropped
+  expect_setequal(shr$fold_id[shr$method == "wide"], shr$fold_id[shr$method == "narrow"])
+  expect_equal(nrow(shr[shr$method == "wide", ]), nrow(shr[shr$method == "narrow", ]))
+})
+
+test_that("fs_lfo_col is not defeated by rank-only rows that cannot carry p_recal", {
+  if (!exists("fs_lfo_col", mode = "function")) {
+    .fp <- file.path(here::here(), "spatiotemporal", "forecast_scale.R")
+    if (file.exists(.fp)) suppressMessages(source(.fp))
+  }
+  if (!exists("fs_lfo_col", mode = "function")) testthat::skip("forecast_scale.R not loaded")
+  d <- data.frame(
+    method = c("bayes", "bayes", "rankonly", "rankonly"),
+    prob_calibrated = c(TRUE, TRUE, FALSE, FALSE),
+    p_invasion = c(0.1, 0.2, 0.3, 0.4),
+    p_recal = c(0.05, 0.1, NA_real_, NA_real_),
+    was_active_before = FALSE, stringsAsFactors = FALSE)
+  # Rank-only NA must not demote the whole frame to the raw column.
+  expect_identical(fs_lfo_col(d, scale = "recalibrated"), "p_recal")
+  # A CALIBRATED row missing p_recal is a real failure and must still fall back, loudly.
+  d2 <- d; d2$p_recal[1] <- NA_real_
+  expect_warning(col2 <- fs_lfo_col(d2, scale = "recalibrated"), "no recalibrated probability")
+  expect_identical(col2, "p_invasion")
 })

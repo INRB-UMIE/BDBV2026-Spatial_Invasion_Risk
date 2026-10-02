@@ -65,12 +65,25 @@ test_that("GT PMF first element is near-zero for slow Gamma (medium profile)", {
   )
 })
 
-test_that("GT PMF first element is strictly zero only for long Gamma (sanity)", {
+test_that("GT PMF first element is far smaller for a long than a short generation time", {
   skip_if_missing("make_gt_pmf")
 
-  # long: mean=13d, sd=5.5d → shape≈5.6; P(GT<=1) is astronomically small
-  pmf_long <- make_gt_pmf(13, 5.5, 40)
-  expect_true(pmf_long[1] < 1e-4, info = "Long GT: P(GT=1 day) < 0.01%")
+  # THRESHOLD CORRECTED (was: pmf_long[1] < 1e-4, which had failed since make_gt_pmf()
+  # switched to the DOUBLE-INTERVAL-CENSORED discretisation). 1e-4 was calibrated for the
+  # naive single-interval form, where P(GT = 1) = F(1) - F(0) = 1.85e-05 for this Gamma.
+  # Under primary censoring the recorded day-difference is floor(U + D) with U ~ Unif(0,1),
+  # so tau = 1 collects the mass with D in (1 - U, 2 - U) — an order of magnitude more,
+  # 2.02e-04. The code is right (primarycensored and the base-R integral fallback agree to
+  # 5e-15); the constant was stale. Asserting a RATIO rather than an absolute floor also
+  # makes the test scale-free, so it keeps testing the intended property — a long GT puts
+  # far less mass on a 1-day interval than a short one — instead of pinning a magic number
+  # that any future change to the discretisation convention would silently invalidate.
+  pmf_long   <- make_gt_pmf(13, 5.5, 40)   # shape ~ 5.6
+  pmf_medium <- make_gt_pmf(9,  4.5, 40)   # shape = 4
+
+  expect_lt(pmf_long[1], pmf_medium[1] / 10)   # observed ratio ~0.038
+  expect_lt(pmf_long[1], 1e-3)
+  expect_gt(pmf_long[1], 0)
 })
 
 test_that("GT PMF mode is near expected value for medium profile", {
@@ -131,23 +144,30 @@ test_that("GT PMF is correctly normalised when truncation removes tail mass", {
 })
 
 # =============================================================================
-# 3. compute_truncation_weights() — Exponential-CDF weights
+# 3. compute_truncation_weights() — fitted-delay completeness weights
 #
-# Signature: compute_truncation_weights(week_start_dates, analysis_date, rate)
-# The function uses week MIDPOINTS (week_start + 3.5 days) for lag computation.
+# Signature: compute_truncation_weights(week_start_dates, analysis_date, delay, rate)
+#
+# The weight is E_o[P(delay <= analysis_date - o)] over the seven onset days o of the
+# bucket, i.e. the MEAN of the delay CDF across the week — NOT the CDF evaluated once at
+# the week midpoint (which, F being concave, overstates completeness). P(Delta <= L) is
+# F(L + 0.5) under the daily-rounding convention the delay is fit under. Passing `rate`
+# pins a plain Exp(rate); the default resolves the fitted delay in force.
+#
+# Reference implementation used by the analytic tests below:
+.wk_weight_ref <- function(week_start, analysis_date, rate, week_days = 7L) {
+  lags <- as.numeric(analysis_date - week_start) - seq.int(0L, week_days - 1L)
+  cdf  <- ifelse(lags < 0, 0, 1 - exp(-rate * (lags + 0.5)))
+  mean(cdf)
+}
 # =============================================================================
 
-test_that("Truncation weight for 7-day lag from midpoint matches Exp CDF", {
+test_that("Truncation weight equals the mean Exp CDF across the bucket's onset days", {
   skip_if_missing("compute_truncation_weights")
 
-  # week_start such that midpoint = analysis_date - 7 exactly:
-  # midpoint = week_start + 3.5  =>  week_start = analysis_date - 7 - 3.5 = analysis_date - 10.5
-  # We use analysis_date - 11 (integer) so midpoint = analysis_date - 7.5 ≈ 7.5d lag
-  # To get exactly 7d lag: week_start = analysis_date - 10.5, but Date is integer.
-  # Instead use analysis_date - 11 and verify the weight against P(Exp(0.2286) <= 7.5)
   analysis_date <- as.Date("2026-05-15")
-  week_start_7  <- analysis_date - 11L   # midpoint = analysis_date - 7.5 d
-  week_start_14 <- analysis_date - 18L   # midpoint = analysis_date - 14.5 d
+  week_start_7  <- analysis_date - 11L   # onset-day lags 11..5
+  week_start_14 <- analysis_date - 18L   # onset-day lags 18..12
 
   w <- compute_truncation_weights(
     week_start_dates = c(week_start_7, week_start_14),
@@ -155,18 +175,19 @@ test_that("Truncation weight for 7-day lag from midpoint matches Exp CDF", {
     rate             = 0.2286
   )
 
-  # Expected: P(Exp(0.2286) <= 7.5) = 1 - exp(-0.2286 * 7.5) ≈ 0.818
-  expected_7  <- 1 - exp(-0.2286 * 7.5)
-  expected_14 <- 1 - exp(-0.2286 * 14.5)
+  expect_equal(as.numeric(w[1]), .wk_weight_ref(week_start_7,  analysis_date, 0.2286),
+               tolerance = 1e-12,
+               info = "week-averaged weight must equal mean_j (1 - exp(-rate*(lag_j+0.5)))")
+  expect_equal(as.numeric(w[2]), .wk_weight_ref(week_start_14, analysis_date, 0.2286),
+               tolerance = 1e-12)
 
-  expect_true(
-    abs(w[1] - expected_7) < 0.005,
-    info = sprintf("7.5-day lag weight: expected %.4f, got %.4f", expected_7, w[1])
-  )
-  expect_true(
-    abs(w[2] - expected_14) < 0.005,
-    info = sprintf("14.5-day lag weight: expected %.4f, got %.4f", expected_14, w[2])
-  )
+  # Jensen: F is concave, so the week-AVERAGED weight must sit strictly below F evaluated
+  # at the week's MEAN lag. (Note this is NOT a comparison against the retired week-midpoint
+  # form: that used week_start + 3.5, i.e. a lag a full day SHORTER than the true mean lag
+  # of the seven integer onset days, so the two errors partly offset and the retired value
+  # can land on either side.)
+  mean_lag <- as.numeric(analysis_date - week_start_7) - 3 + 0.5
+  expect_lt(as.numeric(w[1]), 1 - exp(-0.2286 * mean_lag))
 })
 
 test_that("Truncation weight increases monotonically with lag (older weeks = more complete)", {
@@ -214,31 +235,58 @@ test_that("Future weeks receive NA truncation weight", {
   expect_true(is.na(w[2]),  info = "Future week must receive NA weight")
 })
 
-test_that("Truncation weight formula exactly matches Exponential CDF at known points", {
+test_that("Truncation weight formula exactly matches the week-averaged Exponential CDF", {
   skip_if_missing("compute_truncation_weights")
 
-  # Analytic spot-checks using rate = 0.2286:
-  # P(Exp(0.2286) <= d) = 1 - exp(-0.2286 * d)
-  # lag_days = analysis_date - (week_start + 3.5)
-  # For lag = 10 days exactly: week_start = analysis_date - 13.5, use analysis_date - 14
-  # → midpoint = analysis_date - 10.5 → lag = 10.5 d
   rate          <- 0.2286
   analysis_date <- as.Date("2026-07-01")
 
-  # Construct weeks with known half-day-rounded lags
-  # week_start = analysis_date - 14 → lag_days = 14 - 3.5 = 10.5
+  # week_start = analysis_date - 14 -> onset-day lags 14, 13, ..., 8
   week_start_a <- analysis_date - 14L
   w_a <- compute_truncation_weights(week_start_a, analysis_date, rate = rate)
-  expected_a <- 1 - exp(-rate * 10.5)
-  expect_equal(as.numeric(w_a), expected_a, tolerance = 1e-9,
-               info = "Weight for 10.5-day lag must equal 1 - exp(-rate * 10.5)")
+  expect_equal(as.numeric(w_a), .wk_weight_ref(week_start_a, analysis_date, rate),
+               tolerance = 1e-12,
+               info = "Weight must equal mean_j (1 - exp(-rate*(lag_j + 0.5))), j = 0..6")
 
-  # week_start = analysis_date - 21 → lag = 21 - 3.5 = 17.5 d
+  # week_start = analysis_date - 21 -> onset-day lags 21, 20, ..., 15
   week_start_b <- analysis_date - 21L
   w_b <- compute_truncation_weights(week_start_b, analysis_date, rate = rate)
-  expected_b <- 1 - exp(-rate * 17.5)
-  expect_equal(as.numeric(w_b), expected_b, tolerance = 1e-9,
-               info = "Weight for 17.5-day lag must equal 1 - exp(-rate * 17.5)")
+  expect_equal(as.numeric(w_b), .wk_weight_ref(week_start_b, analysis_date, rate),
+               tolerance = 1e-12)
+})
+
+test_that("Truncation weights default to the fitted delay, not the fixed lab Exp rate", {
+  skip_if_missing("compute_truncation_weights")
+  skip_if_missing("effective_onset_sample_delay")
+
+  analysis_date <- as.Date("2026-07-31")
+  week_start    <- analysis_date - 6L        # the current (most truncated) week
+
+  dly <- effective_onset_sample_delay()
+  w_default  <- compute_truncation_weights(week_start, analysis_date)
+  w_explicit <- compute_truncation_weights(week_start, analysis_date, delay = dly)
+
+  expect_equal(as.numeric(w_default), as.numeric(w_explicit), tolerance = 1e-12,
+               info = "the default must BE effective_onset_sample_delay(), not a lab constant")
+
+  # REGRESSION GUARD for the bug this replaced: whenever the fitted delay is slower than
+  # the fixed lab reference, the default weight must be strictly below the lab weight —
+  # i.e. the fold correction must be LARGER, not silently pinned to the fast lab delay.
+  if (isTRUE(dly$source == "data") && dly$mean > 1 / DELAY_ONSET_SAMPLE_RATE) {
+    w_lab <- compute_truncation_weights(week_start, analysis_date,
+                                        rate = DELAY_ONSET_SAMPLE_RATE)
+    expect_lt(as.numeric(w_default), as.numeric(w_lab))
+  }
+})
+
+test_that("compute_truncation_weights rejects an ambiguous delay specification", {
+  skip_if_missing("compute_truncation_weights")
+  skip_if_missing("effective_onset_sample_delay")
+  expect_error(
+    compute_truncation_weights(as.Date("2026-07-01") - 14L, as.Date("2026-07-01"),
+                               delay = effective_onset_sample_delay(), rate = 0.2),
+    "not both"
+  )
 })
 
 test_that("Higher rate gives higher weight for same lag (faster reporting)", {

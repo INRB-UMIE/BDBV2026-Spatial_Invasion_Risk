@@ -55,10 +55,14 @@ live_modules <- c(
   "01_data_prep.R", "02_epi_params.R", "03_mobility_matrices.R",
   "04_nowcasting.R", "04b_epinowcast.R", "04c_dhis2_delay_windows.R",
   "05_baseline_models.R",
-  "06_simple_models.R", "07_hhh4_model.R", "08_stochastic_seir.R",
-  "15_workhorse.R", "16_invasion_eval.R", "18_ensemble.R",
+  "06_simple_models.R",
+  "15_workhorse.R", "16_invasion_eval.R", "16b_invasion_recalibration.R", "18_ensemble.R",
   "19_spacetime_eval.R", "20_forecast_detail.R", "21_bayesian_renewal.R",
-  "17_invasion_viz.R"
+  "17_invasion_viz.R",
+  # Cascade layer: needed by test_cascade_variance.R, which pins the parameter/process
+  # variance split that forms the published reach credible interval. Without these the
+  # tests silently SKIP, which is how a structural regression would go unnoticed.
+  "30_projection_config.R", "31_source_dynamics.R", "32_cascade_simulator.R"
 )
 for (m in live_modules) {
   safe_source(file.path(here::here(), "spatiotemporal", m), m)

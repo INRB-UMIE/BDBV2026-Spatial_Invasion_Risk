@@ -102,3 +102,99 @@ test_that("write_onset_sample_long emits long params with prefixed native params
     expect_false("shape" %in% out$quantity)   # unprefixed native names must NOT leak
   }
 })
+
+# =============================================================================
+# Onset imputation draws from the SHARED delay resolver (01_data_prep.R)
+# =============================================================================
+# 00_config.R's stated invariant is that the imputation, the nowcast and the R(t) truncation
+# model all read ONE delay estimator. The imputation used to bootstrap the raw, right-truncated
+# empirical pairs (mean 6.81 d) while the other two used the truncation-corrected EpiDist
+# marginal (7.67 d). This asserts the resolver is what a draw now reproduces.
+
+test_that("the delay resolver is a truncation-corrected fit and .draw_dhis2_delay reproduces it", {
+  skip_if_missing("effective_onset_sample_delay"); skip_if_missing(".draw_dhis2_delay")
+  dp <- effective_onset_sample_delay()
+  skip_if(!identical(dp$source, "data"), "no fitted delay params on disk")
+  # ASSERT THE TRUNCATION CORRECTION, which the test name claims and nothing checked. Stripping
+  # the epidist_* rows from the params CSV leaves source == "data" and silently falls back to
+  # the interval-censored MLE (6.832 d vs the corrected 7.667 d) — the exact 0.84 d bias this
+  # whole change removed — and every other assertion here still passed.
+  expect_identical(dp$estimator, "epidist_marginal",
+                   info = "the resolver must be the truncation-corrected EpiDist marginal")
+  expect_gt(dp$mean, 7.0)   # the truncated MLE sits near 6.8; the corrected fit near 7.7
+  expect_true(is.finite(dp$mean) && dp$mean > 0)
+  set.seed(1)
+  d <- .draw_dhis2_delay(dp, 2e5)
+  expect_equal(mean(d), dp$mean, tolerance = 0.05,
+               info = "draws must reproduce the resolver's mean, not a truncated one")
+  expect_equal(stats::sd(d), dp$sd, tolerance = 0.10,
+               info = "draws must reproduce the resolver's SD")
+})
+
+test_that("load_linelist() imputes onsets FROM the shared resolver, not the truncated pool", {
+  skip_if_missing("load_linelist"); skip_if_missing("effective_onset_sample_delay")
+  dp <- effective_onset_sample_delay()
+  skip_if(!identical(dp$source, "data"), "no fitted delay params on disk")
+  ll <- suppressWarnings(suppressMessages(load_linelist()))
+  skip_if(!("onset_imputed" %in% names(ll)) || !any(ll$onset_imputed %in% TRUE),
+          "no imputed onsets in this snapshot")
+  # The realised gap between an imputed onset and its own sample date IS the drawn delay.
+  imp <- ll[ll$onset_imputed %in% TRUE & !is.na(ll$date_index) &
+            !is.na(ll$date_of_sample_collection), ]
+  gap <- as.numeric(imp$date_of_sample_collection - imp$date_index)
+  gap <- gap[is.finite(gap) & gap >= 0]
+  skip_if(length(gap) < 100, "too few imputed onsets to test the distribution")
+  # Must track the RESOLVER, not the right-truncated empirical pool (~6.8 d). The clamp at
+  # DELAY_MAX_PLAUSIBLE_DAYS and rounding to whole days cost a little, hence the tolerance.
+  #
+  # UNDER THE GROWTH TILT THE TARGET IS NOT THE MARGINAL MEAN. ONSET_MODE = "growth_impute"
+  # (the default) importance-resamples the resolver's draws with weights exp(-r*Delta), so the
+  # realised mean delay is deliberately SHORTER than the marginal when the epidemic is growing
+  # (r > 0) and longer when it is shrinking. Asserting equality with dp$mean would forbid the
+  # very correction the mode exists to apply. What must still hold is that the draw comes from
+  # the RESOLVER: the tilt reweights a gamma with mean ~7.7 d, it does not switch to the
+  # truncated empirical pool, so the realised mean stays far from that pool's ~6.8 d unless the
+  # tilt is large — and the direction must match the sign of r.
+  .mode <- get0("ONSET_MODE", ifnotfound = "impute")
+  if (identical(.mode, "growth_impute")) {
+    # Wide band: the tilt's size depends on r, which moves with the data.
+    expect_equal(mean(gap), dp$mean, tolerance = 0.35,
+                 info = sprintf("growth-tilted gap mean %.2f d has drifted far from the resolver's %.2f d",
+                                mean(gap), dp$mean))
+  } else {
+    expect_equal(mean(gap), dp$mean, tolerance = 0.12,
+                 info = sprintf("imputed-onset gap mean %.2f d must track the resolver's %.2f d, not the truncated pool",
+                                mean(gap), dp$mean))
+  }
+  expect_gt(mean(gap), 6.9)
+})
+
+test_that("the growth tilt moves imputed onsets in the direction of the growth rate", {
+  skip_if_missing("load_linelist")
+  .old <- get0("ONSET_MODE", envir = globalenv(), ifnotfound = NULL)
+  on.exit(if (is.null(.old)) suppressWarnings(rm("ONSET_MODE", envir = globalenv()))
+          else assign("ONSET_MODE", .old, envir = globalenv()), add = TRUE)
+  .gap <- function(mode) {
+    assign("ONSET_MODE", mode, envir = globalenv())
+    ll <- tryCatch(suppressWarnings(suppressMessages(load_linelist())), error = function(e) NULL)
+    if (is.null(ll) || !any(ll$onset_imputed %in% TRUE)) return(NA_real_)
+    i <- ll[ll$onset_imputed %in% TRUE & !is.na(ll$date_index) &
+              !is.na(ll$date_of_sample_collection), ]
+    g <- as.numeric(i$date_of_sample_collection - i$date_index)
+    mean(g[is.finite(g) & g >= 0])
+  }
+  g_flat <- .gap("impute"); g_tilt <- .gap("growth_impute")
+  skip_if(!is.finite(g_flat) || !is.finite(g_tilt), "line list unavailable")
+  # The BDBV 2026 record is growing, so the tilt must SHORTEN the imputed delay — i.e. move
+  # imputed onsets LATER, toward their sample date. This is the whole point of the correction
+  # (Lison et al. 2024): epidemic processes are not time-reversible, and the untilted backward
+  # draw pushes onsets systematically too early while incidence rises.
+  #
+  # This guard caught two real defects. (1) The growth rate was fitted through the
+  # right-truncated tail of the sample-date series, reading the reporting lag as a decline.
+  # (2) More seriously, the weekly binning ran FORWARD from min(date), leaving a partial final
+  # bin that held ~23 cases against ~1,800 in the preceding full week — which alone produced
+  # r = -0.033/day for a growing epidemic and inverted the correction. Both are fixed in
+  # .estimate_growth_rate(); if either regresses, g_tilt goes ABOVE g_flat and this fails.
+  expect_lt(g_tilt, g_flat)
+})

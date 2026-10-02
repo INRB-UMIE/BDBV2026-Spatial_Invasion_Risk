@@ -34,6 +34,10 @@ theme_inv <- function(base = 12) {
 }
 
 .save <- function(p, path, w = 9, h = 6) {
+  # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
+  # is not on the published allow-list. get0() so the helper still works standalone.
+  .fk <- get0("figure_is_kept", ifnotfound = NULL)
+  if (is.function(.fk) && !.fk(path)) return(invisible(p))
   # Use the base pdf device (NOT cairo_pdf): cairo_pdf fails to load its DLL in
   # the headless/batch R environment and then silently writes nothing, leaving a
   # stale file. capabilities("cairo") reports COMPILE-time support and is TRUE
@@ -151,10 +155,13 @@ plot_invasion_risk_map <- function(risk_df, horizon = 1L, method_label = "",
 #' than the absolute probabilities (which over-predict out-of-sample), so this is the operational
 #' targeting view: at-risk zones are ranked nationally by P(first case), coloured by rank (bright =
 #' top), and the top-K are labelled with their rank number. Already-affected zones are unranked (grey).
+#' @param show_title FALSE drops the map title and the explanatory subtitle. The published
+#'   bayes_invasion_rank_map_national panels carry their caption in the manuscript text.
 plot_invasion_rank_map <- function(risk_df, horizon = 1L, method_label = "",
                                    shapefile = NULL, top_k = 12L, save = TRUE,
                                    window_txt = "", file = "invasion_rank_map",
-                                   extent = c("both", "national", "ituri")) {
+                                   extent = c("both", "national", "ituri"),
+                                   show_title = TRUE) {
   extent <- match.arg(extent)
   if (is.null(shapefile)) shapefile <- tryCatch(sf::st_read(SHAPEFILE_PATH, quiet = TRUE),
                                                 error = function(e) NULL)
@@ -171,6 +178,17 @@ plot_invasion_rank_map <- function(risk_df, horizon = 1L, method_label = "",
   # 1..N, unlike the highly-skewed probability (where 400+ zones pile at ~0 and look identical),
   # so the colour varies smoothly across EVERY zone and all 519 are distinguishable — including
   # the long tail beyond the top 50. Also carry a percentile for an interpretable legend.
+  # THIS RANK IS THE PUBLISHED ONE — checked, not assumed. compute_risk_scores()
+  # (15_workhorse.R) builds rr_nat_rank as min_rank(desc(mu)); this uses
+  # rank(-p, ties.method = "min"). p = 1 - exp(-mu) is strictly increasing in mu, so the two
+  # orderings and their tie groups are identical and the integers printed on this map equal
+  # rr_nat_rank in bayes_risk_scores_all_zones.csv. Do not "align" them by switching either
+  # side to a different tie method: "min" is what the published column uses.
+  #
+  # NOT the same quantity as rank_med/rank_lo/rank_hi in that file, which are the POSTERIOR
+  # MEDIAN rank and its 90% CrI (21_bayesian_renewal.R). Those describe how the ranking varies
+  # across draws; these labels are the point-estimate ranking. Both are published, they answer
+  # different questions, and the map deliberately shows the point estimate.
   n_ar <- sum(!(rd$affected) & is.finite(rd$p))
   rd <- rd %>% dplyr::mutate(
     rank_p = ifelse(affected | !is.finite(p), NA_real_, rank(-p, ties.method = "min", na.last = "keep")),
@@ -210,9 +228,11 @@ plot_invasion_rank_map <- function(risk_df, horizon = 1L, method_label = "",
   m_ituri <- m %>% dplyr::filter(Nom %in% ituri_zones)
   sub <- sprintf("At-risk zones shaded by national invasion-risk percentile (rank of P(first case); bright = top); numbers label the top %d; dark grey = already affected.", top_k)
   if (extent == "national") {
-    out <- base_layer(m, sprintf("DRC national — invasion-risk RANK (%s, h=%dw)", method_label, horizon),
+    out <- base_layer(m, if (show_title)
+                        sprintf("DRC national — invasion-risk RANK (%s, h=%dw)", method_label, horizon)
+                      else NULL,
                       legend = TRUE, labels = TRUE) +
-      labs(subtitle = sub, caption = window_txt) +
+      labs(subtitle = if (show_title) sub else NULL, caption = window_txt) +
       theme(plot.subtitle = element_text(size = 9, colour = "grey35"),
             plot.caption = element_text(colour = "grey40", size = 8, hjust = 0))
     if (save) .save(out, file.path(OUT_MAPS, sprintf("%s_national_h%d.pdf", file, horizon)), w = 9, h = 7)
@@ -252,12 +272,15 @@ plot_risk_scores_bars <- function(risk_df, horizon = 1L, top_n = 15L, save = TRU
   mk <- function(dd, ttl) {
     dd <- dd %>% dplyr::arrange(dplyr::desc(p_case_invasion)) %>% head(top_n) %>%
       dplyr::mutate(health_zone = factor(health_zone, levels = rev(health_zone)))
-    long <- dd %>% dplyr::select(health_zone, `P(case)` = p_case_invasion,
-                                 `P(infection)` = p_infection_invasion) %>%
+    # P(case) ONLY. The companion "P(infection)" series was p_case / rho with rho a fixed,
+    # guessed constant (0.45); it added no information the primary score did not already
+    # carry, rescaled every bar by the same factor, and invited reading a guessed constant as
+    # an estimate. Ascertainment has been removed from the pipeline entirely.
+    long <- dd %>% dplyr::select(health_zone, `P(case)` = p_case_invasion) %>%
       tidyr::pivot_longer(-health_zone)
     ggplot(long, aes(value, health_zone, fill = name)) +
-      geom_col(position = position_dodge(width = 0.7), width = 0.65) +
-      scale_fill_manual(values = c(`P(case)` = OKABE_ITO[1], `P(infection)` = OKABE_ITO[2]), name = NULL) +
+      geom_col(width = 0.65) +
+      scale_fill_manual(values = c(`P(case)` = OKABE_ITO[1]), name = NULL) +
       scale_x_continuous(labels = percent_format(accuracy = 1), expand = expansion(mult = c(0, 0.05))) +
       labs(title = ttl, x = "Next-week probability of first case(s)", y = NULL) +
       theme_inv(11)
@@ -327,7 +350,15 @@ plot_discrimination_summary <- function(eval_tbl, horizon = 1L, save = TRUE,
          x = "Mean rank among at-risk zones", y = NULL) +
     theme_inv(11)
   out <- p1 + p2 + patchwork::plot_layout(guides = "collect") & theme(legend.position = "top")
-  if (save) .save(out, file.path(OUT_DIAGNOSTICS, sprintf("%s_h%d.pdf", file, horizon)), w = 12, h = 5.5)
+  # The canvas height MUST scale with the number of models on the y-axis. theme_inv(11) draws
+  # axis text at ~8.8pt (~0.12 in per glyph), so a fixed 5.5-in canvas silently overprints the
+  # labels once the grid exceeds ~25 models — and the Bayesian grid is currently 54, which
+  # rendered the y-axis of bayes_discrimination_summary as an unreadable block of ink.
+  # 0.16 in per row leaves ~0.04 in of leading; +1.8 in covers title/subtitle/legend/axis.
+  n_lab <- dplyr::n_distinct(d$method)
+  h_fig <- max(5.5, 1.8 + 0.16 * n_lab)
+  if (save) .save(out, file.path(OUT_DIAGNOSTICS, sprintf("%s_h%d.pdf", file, horizon)),
+                  w = 12, h = h_fig)
   invisible(out)
 }
 
@@ -349,7 +380,12 @@ plot_model_vs_baseline <- function(eval_tbl, horizon = 1L, save = TRUE) {
   # recall@K is a PER-FOLD-averaged metric, so the random watch-list baseline is K / (at-risk
   # zones PER FOLD) = K * n_folds / n_atrisk (n_atrisk is pooled across folds); dividing by the
   # pooled n_atrisk would understate the random reference ~n_folds-fold.
-  .nf <- if ("n_folds" %in% names(d)) stats::median(d$n_folds, na.rm = TRUE) else 1
+  # n_folds_scored, NOT n_folds. Since the common-support fix n_folds is each method's NATIVE
+  # reach while n_folds_scored is what its metrics were actually computed on; taking the median
+  # of the former put the random reference on a fold count no row was scored at whenever the
+  # grid's composition shifted the median (it is 11 either way on this run, by majority).
+  .nfc <- if ("n_folds_scored" %in% names(d)) "n_folds_scored" else "n_folds"
+  .nf <- if (.nfc %in% names(d)) stats::median(d[[.nfc]], na.rm = TRUE) else 1
   rand <- if ("n_atrisk" %in% names(d)) kk * .nf / stats::median(d$n_atrisk, na.rm = TRUE) else NA_real_
   base_best <- suppressWarnings(max(d$auc_pr_skill[d$is_baseline], na.rm = TRUE))
   dA <- d %>% dplyr::mutate(method = forcats::fct_reorder(method, auc_pr_skill))
@@ -395,17 +431,20 @@ plot_lfo_forecast_vs_outcome <- function(lfo_results, method, horizon = 1L, save
   if (length(invaded_zones) == 0) return(invisible(NULL))
   # For each invaded zone, show predicted p at each fold cutoff + mark the invasion fold
   dd <- d %>% dplyr::filter(health_zone %in% invaded_zones) %>%
-    dplyr::mutate(cutoff = as.Date(cutoff),
+    dplyr::mutate(cutoff = lfo_origin(cutoff),   # label rounds by forecast origin
                   health_zone = factor(health_zone, levels = rev(sort(invaded_zones))))
   p <- ggplot(dd, aes(cutoff, health_zone, fill = p_invasion)) +
     geom_tile(colour = "white", linewidth = 0.4) +
     geom_point(data = dplyr::filter(dd, is_new_invasion == 1),
                shape = 4, size = 3, stroke = 1.1, colour = "black") +
     scale_fill_viridis_c(option = "plasma", name = "Predicted P", labels = percent_format(accuracy = 1)) +
-    scale_x_date(date_labels = "%d %b") +
+    # pretty_breaks rather than the default: with the cross-validation now running to the last
+    # round whose outcome window closes by the analysis date, the tile has ~16 columns and the
+    # default breaks print one label per column.
+    scale_x_date(date_labels = "%d %b", breaks = scales::pretty_breaks(8)) +
     labs(title = sprintf("LFO: predicted invasion risk vs realised invasions (%s, h=%dw)", method, horizon),
-         subtitle = "Rows = zones that were invaded; ✕ = the fold at which the invasion occurred",
-         x = "Forecast cutoff", y = NULL) +
+         subtitle = "Rows = zones that were invaded; x = the FORECAST ORIGIN of the round in which the invasion occurred",
+         x = "Forecast origin (as-of date)", y = NULL) +
     theme_inv(11)
   if (save) .save(p, file.path(OUT_DIAGNOSTICS, sprintf("%s_h%d.pdf", file, horizon)),
                   w = 9, h = max(4, 0.35 * length(invaded_zones) + 2))
@@ -423,27 +462,57 @@ plot_skill_over_time <- function(st_skill, metric = "auc_pr_skill",
   if (is.null(st_skill) || nrow(st_skill) == 0) return(invisible(NULL))
   d <- st_skill
   if (!is.null(methods)) d <- d %>% dplyr::filter(method %in% methods)
+  # X AXIS = THE WEEK BEING FORECAST, not the round's cutoff.
+  #
+  # A round with cutoff C at horizon h predicts the window (C, C + 7h], which ENDS on
+  # C + 7h + 6. Plotting against C put the last point five weeks before the end of the data
+  # and made the two horizon facets disagree about which calendar week a point referred to —
+  # the same cutoff means a different target week at h=1 and h=2. Plotting against the target
+  # week's last day puts both facets on one calendar footing and makes the series run to the
+  # analysis date, which is what "skill over time" is asking about.
+  d <- d %>% dplyr::mutate(cutoff = as.Date(cutoff),
+                           target_end = cutoff + 7L * as.integer(horizon) + 6L)
+  # ROUNDS WITH NOTHING TO SCORE ARE MARKED, NOT DELETED. Discrimination is undefined without
+  # a positive, so an event-free round has no point — but deleting it silently leaves a gap
+  # the reader will read as missing data or as a model failure. They are drawn as ticks on the
+  # axis and named in the subtitle. (A round can be event-free either because no zone was
+  # invaded in its window or, for the newest rounds, because the invasions that did occur are
+  # not yet laboratory-confirmed.)
+  empty <- if ("n_events" %in% names(d))
+    d %>% dplyr::filter(n_events %in% 0) %>% dplyr::distinct(horizon, target_end) else
+    d[0, c("horizon", "target_end"), drop = FALSE]
   d <- d %>% dplyr::filter(is.finite(.data[[metric]]))
   if (nrow(d) == 0) return(invisible(NULL))
   # keep <= 6 methods for legibility (Okabe-Ito), rest dropped
   keep <- d %>% dplyr::group_by(method) %>%
     dplyr::summarise(m = mean(.data[[metric]], na.rm = TRUE), .groups = "drop") %>%
     dplyr::arrange(dplyr::desc(m)) %>% dplyr::pull(method) %>% head(6)
+  .hlab <- function(v) paste0("h = ", v, " week", ifelse(v > 1, "s", ""))
   d <- d %>% dplyr::filter(method %in% keep) %>%
-    dplyr::mutate(method = factor(method, levels = keep),
-                  horizon = paste0("h = ", horizon, " week", ifelse(horizon > 1, "s", "")))
-  ylab <- switch(metric, auc_pr_skill = "AUC-PR skill (× base rate)",
+    dplyr::mutate(method = factor(method, levels = keep), horizon = .hlab(horizon))
+  if (nrow(empty)) empty <- empty %>% dplyr::mutate(horizon = .hlab(horizon))
+  # The per-fold auc_pr_skill from 19_spacetime_eval.R is now the prevalence-NORMALISED skill
+  # (ap - base)/(1 - base), bounded in [0,1], not the raw lift ap/base. Label and reference line
+  # follow: 0 = no better than prevalence, not 1.
+  ylab <- switch(metric, auc_pr_skill = "AUC-PR skill  (0 = prevalence, 1 = perfect)",
                  hit_at_k = "Hit-rate @K (top-K contains an invaded zone)",
                  prec_at_k = "Precision @K", metric)
-  p <- ggplot(d, aes(cutoff, .data[[metric]], colour = method, group = method)) +
-    { if (metric == "auc_pr_skill") geom_hline(yintercept = 1, linetype = "dashed", colour = "grey55") } +
+  p <- ggplot(d, aes(target_end, .data[[metric]], colour = method, group = method)) +
+    { if (metric == "auc_pr_skill") geom_hline(yintercept = 0, linetype = "dashed", colour = "grey55") } +
+    { if (nrow(empty)) geom_rug(data = empty, mapping = aes(x = target_end), sides = "b",
+                                colour = "grey55", linewidth = 0.6, length = unit(4, "pt"),
+                                inherit.aes = FALSE) } +
     geom_line(linewidth = 0.8) + geom_point(size = 2) +
     facet_wrap(~ horizon) +
     scale_colour_manual(values = setNames(OKABE_ITO[seq_along(keep)], keep), name = NULL) +
-    scale_x_date(date_labels = "%d %b") +
+    scale_x_date(date_labels = "%d %b", breaks = scales::pretty_breaks(6)) +
     labs(title = "Forecast skill over time",
-         subtitle = "Per-fold skill by forecast date; folds with no invasion event are omitted",
-         x = "Forecast cutoff", y = ylab) +
+         subtitle = paste0("Per-fold skill against the LAST DAY OF THE WEEK BEING FORECAST, so both horizons share a calendar. ",
+                           if (nrow(empty))
+                             sprintf("Ticks on the x-axis mark %d round(s) in which no invasion was recorded, where discrimination is undefined. ",
+                                     nrow(empty)) else "",
+                           "Prevalence-normalised, so rounds with different event counts are comparable."),
+         x = "Last day of the forecast window", y = ylab) +
     theme_inv(11)
   if (save) .save(p, file.path(OUT_DIAGNOSTICS, sprintf("skill_over_time_%s.pdf", metric)),
                   w = 11, h = 5)
@@ -468,7 +537,7 @@ plot_spacetime_risk <- function(lfo_results, method, horizon = 1L, top_n = 20L,
     dplyr::arrange(dplyr::desc(inv > 0), dplyr::desc(peak)) %>%
     dplyr::slice_head(n = top_n) %>% dplyr::pull(health_zone)
   dd <- d %>% dplyr::filter(health_zone %in% top) %>%
-    dplyr::mutate(cutoff = as.Date(cutoff),
+    dplyr::mutate(cutoff = lfo_origin(cutoff),   # label rounds by forecast origin
                   health_zone = factor(health_zone, levels = rev(top)))
   p <- ggplot(dd, aes(cutoff, health_zone, fill = p_invasion)) +
     geom_tile(colour = "white", linewidth = 0.3) +
@@ -478,8 +547,8 @@ plot_spacetime_risk <- function(lfo_results, method, horizon = 1L, top_n = 20L,
                          labels = percent_format(accuracy = 1)) +
     scale_x_date(date_labels = "%d %b") +
     labs(title = sprintf("Space-time invasion risk (%s, h=%dw)", method, horizon),
-         subtitle = "Top zones by peak risk; ✕ = fold at which the zone recorded its first case",
-         x = "Forecast cutoff", y = NULL) +
+         subtitle = "Top zones by peak risk; x = FORECAST ORIGIN of the round at which the zone recorded its first case",
+         x = "Forecast origin (as-of date)", y = NULL) +
     theme_inv(11)
   if (save) .save(p, file.path(OUT_DIAGNOSTICS, sprintf("%s_h%d.pdf", file, horizon)),
                   w = 9, h = max(4, 0.32 * length(top) + 2))
@@ -595,9 +664,14 @@ write_invasion_report <- function(eval_tbl, risk_scores, lfo_results = NULL,
     total_confirmed = if (!is.null(zone_week)) sum(zone_week$confirmed, na.rm = TRUE) else NA,
     zones_affected = length(affected),
     n_atrisk = n_zones - length(affected), n_zones = n_zones)
-  # primary_method is supplied by the caller (the CV-selected best renewal model); if absent,
-  # fall back to best_method, then a neutral label — never a hard-coded model name.
-  if (is.null(primary_method)) primary_method <- best_method %||% "(featured renewal model)"
+  # primary_method named the CV-selected best FREQUENTIST RENEWAL model. That arm has been
+  # removed, so run_all.R now passes NULL and the fallback below resolves to best_method — the
+  # featured BAYESIAN model. Every line that used to describe primary_method as a renewal model
+  # would then have applied a false label to it, so those lines are conditioned on whether a
+  # genuine second (non-Bayesian) featured model exists.
+  .have_primary <- !is.null(primary_method) && length(primary_method) == 1L &&
+                   !is.na(primary_method) && !identical(primary_method, best_method)
+  if (is.null(primary_method)) primary_method <- best_method %||% "(featured model)"
   fmt <- function(x, d = 3) formatC(x, format = "f", digits = d)
   L <- c()
   L <- c(L, "# BDBV 2026 — Spatiotemporal Invasion Forecast",
@@ -633,16 +707,31 @@ write_invasion_report <- function(eval_tbl, risk_scores, lfo_results = NULL,
          "Lambda_i = sum_j W[j,i] sum_k g(k) Y_nc[j,t-k], the import coefficient beta is",
          "learned from realised invasions (cloglog), and P(first case) = 1 - exp(-beta*Lambda).",
          "",
-         "Both a **frequentist** (penalised-MLE) and a **Bayesian** (brms) paradigm fit this",
-         "same renewal model. Every map and decision product is produced for the",
-         "skill-selected best model of EACH paradigm (frequentist figures unprefixed;",
-         "Bayesian figures prefixed `bayes_`; the loo-stacked Bayesian ensemble prefixed",
-         "`bayes_ensemble_`), and every figure's title names the exact model used.",
+         "The model is fitted in a **Bayesian** framework (brms/cmdstanr, cloglog with",
+         "offset(log Lambda)). Every map and decision product is produced for the",
+         "skill-selected featured model (figures prefixed `bayes_`; the loo-stacked ensemble",
+         "prefixed `bayes_ensemble_`), and every figure's title names the exact model used.",
+         "It is scored against three structural baselines on the identical folds: source-mass x",
+         "distance-decay import pressure (B4), a distance-weighted spatial null (B1) and a",
+         "nearest-affected/adjacency null (B7). The frequentist penalised-MLE renewal arm that",
+         "used to run alongside it has been removed.",
          if (!is.null(best_bayes_method))
-           sprintf(paste0("Featured models: **%s** (frequentist, selected by the calibration-aware CV ",
-                          "criterion) and **%s** (Bayesian, selected by the highest loo predictive-stacking ",
-                          "weight — a full-data PSIS-loo criterion, not the frequentist LFO composite).%s"),
-                   primary_method, best_bayes_method,
+           # The Bayesian featured model is chosen by best_invasion_model() on the
+           # leave-future-out CV composite, exactly like the frequentist one — run_all.R
+           # states plainly that the loo weights "NO LONGER pick the featured single model"
+           # (they define the stacked ENSEMBLE). This sentence claimed the opposite and was
+           # published in invasion_report.md on every run.
+           # Plain, unindexed %s only. An earlier edit used "%2$s" for the model and left the
+           # trailing "%s" unindexed: R accepts the mix but the unindexed specifier then
+           # consumes argument ONE, so the loo-weights slot would have silently rendered
+           # primary_method instead. primary_method is dropped from the arguments entirely —
+           # there is no second featured model to name.
+           sprintf(paste0("Featured model: **%s** (Bayesian), selected ",
+                          "by the leave-future-out CV composite (within-horizon ranks of AUC-PR ",
+                          "skill + mean rank-of-truth + log score, pooled across horizons). The loo ",
+                          "predictive-stacking weights below define the stacked ENSEMBLE only; they do ",
+                          "not pick the featured single model.%s"),
+                   best_bayes_method,
                    if (!is.null(bayes_weights) && length(bayes_weights))
                      sprintf(" loo-stacking weights: %s.",
                              paste(sprintf("%s=%.2f", names(bayes_weights), bayes_weights), collapse = ", "))
@@ -683,14 +772,28 @@ write_invasion_report <- function(eval_tbl, risk_scores, lfo_results = NULL,
     if (has_partial && any(e1$partial_cv %in% TRUE)) {
       pc <- e1 %>% dplyr::filter(partial_cv %in% TRUE) %>% dplyr::arrange(dplyr::desc(auc_pr_skill))
       L <- c(L, "",
-             sprintf("_Partial-CV (not co-ranked; scored on <%.0f%% of folds): %s._",
-                     100, paste(sprintf("%s (%.0f%% folds)", pc$method,
-                                        100 * (pc$coverage %||% NA)), collapse = "; ")))
+             # "scored on <100% of folds" — the literal 100 sat where a threshold belongs, so
+             # this rendered the vacuous "<100%". A partial-CV model is simply one that did
+             # not cover every fold; state that, and let the per-model coverage carry the
+             # detail rather than inventing a bound.
+             sprintf("_Partial-CV (not co-ranked; these models did not cover every fold, so their skill denominators are not comparable): %s._",
+                     paste(sprintf("%s (%.0f%% of folds)", pc$method,
+                                   100 * (pc$coverage %||% NA)), collapse = "; ")))
     }
-    L <- c(L, "", sprintf("**Primary operational model:** %s (best mobility-informed renewal).", primary_method),
+    L <- c(L, "", if (.have_primary)
+             sprintf("**Primary operational model:** %s (best mobility-informed renewal).", primary_method)
+           else sprintf("**Featured operational model:** %s (best cross-validated Bayesian model by the CV composite).",
+                        primary_method),
            "",
            "> **Calibration caveat.** The models *discriminate* which zones are at risk very well",
-           "> (AUC-ROC ~0.99; realised invasions fall in the highest-probability bins), but their",
+           # Derived, not asserted: this said "AUC-ROC ~0.99" where the best model on this run
+           # reaches 0.980 and the featured one 0.978. A published literal that rounds the
+           # headline discrimination number UP is exactly the kind of claim a reviewer checks.
+           sprintf("> (best AUC-ROC %s; realised invasions fall in the highest-probability bins), but their",
+                   { .ar <- if (!is.null(eval_tbl) && "auc_roc" %in% names(eval_tbl))
+                              suppressWarnings(max(eval_tbl$auc_roc[eval_tbl$horizon == 1], na.rm = TRUE))
+                            else NA_real_
+                     if (is.finite(.ar)) sprintf("%.3f", .ar) else "not available in this run" }),
            "> *absolute* probabilities over-predict out-of-sample (see the reliability figure) — the",
            "> invasion hazard per unit mobility force falls as susceptible neighbours of the front are",
            "> themselves invaded. Treat the absolute P(case) as an **upper bound** and prioritise on the",
@@ -702,11 +805,11 @@ write_invasion_report <- function(eval_tbl, risk_scores, lfo_results = NULL,
     tbl <- function(dd, ttl) {
       dd <- dd %>% dplyr::arrange(dplyr::desc(p_case_invasion)) %>% head(10)
       c(sprintf("### %s", ttl), "",
-        "| Zone | Province | P(case) | P(infection) | Rel. risk |",
-        "|---|---|---|---|---|",
+        "| Zone | Province | P(case) | Rel. risk |",
+        "|---|---|---|---|",
         vapply(seq_len(nrow(dd)), function(i)
-          sprintf("| %s | %s | %.3f | %.3f | %.1fx |", dd$health_zone[i], dd$province[i],
-                  dd$p_case_invasion[i], dd$p_infection_invasion[i],
+          sprintf("| %s | %s | %.3f | %.1fx |", dd$health_zone[i], dd$province[i],
+                  dd$p_case_invasion[i],
                   (if ("rr_nat" %in% names(dd)) dd$rr_nat[i] else NA)), ""), "")
     }
     L <- c(L, "## Highest-risk at-risk zones (next week)", "",
@@ -714,8 +817,8 @@ write_invasion_report <- function(eval_tbl, risk_scores, lfo_results = NULL,
            tbl(rs1, "Nationwide"))
   }
   L <- c(L, "## Risk scores provided", "",
-         "- **P(case)** — probability of >=1 confirmed case (ascertained).",
-         "- **P(infection)** — ascertainment-adjusted (rho); >= P(case).",
+         "- **P(case)** — probability of >=1 CONFIRMED case. This is the only probability the",
+         "  suite reports: it is the quantity the models are fitted to and evaluated against.",
          "- **Relative risk (Ituri / nationwide)** — multiple of the mean at-risk zone.",
          "- Ranked tables: `risk_table_ituri.csv`, `risk_table_national.csv`.", "")
 
@@ -726,22 +829,38 @@ write_invasion_report <- function(eval_tbl, risk_scores, lfo_results = NULL,
     top <- ez %>% dplyr::arrange(dplyr::desc(auc_pr_skill)) %>% head(1)
     rcol <- if ("recall_at_10" %in% names(ez)) "recall_at_10" else "recall_at_5"
     kk   <- if (rcol == "recall_at_10") 10L else 5L
-    best_rec <- suppressWarnings(max(ez[[rcol]], na.rm = TRUE))
+    # The targeting sentence below describes THE featured model, so read that model's
+    # recall — not the maximum over the whole grid, which is a best-of-~30 statistic and
+    # overstates what the published watch-list actually catches. Falls back to the field
+    # maximum only when the featured model is absent, and says so.
+    .feat_for_rec <- intersect(c(best_bayes_method, best_method, primary_method), ez$method)
+    .rec_is_max <- !length(.feat_for_rec)
+    best_rec <- if (.rec_is_max) suppressWarnings(max(ez[[rcol]], na.rm = TRUE))
+                else ez[[rcol]][match(.feat_for_rec[1], ez$method)]
     # random watch-list baseline: K per-fold at-risk zones = K * n_folds / pooled n_atrisk.
     .nf_r <- if ("n_folds" %in% names(ez)) stats::median(ez$n_folds, na.rm = TRUE) else 1
     rand_rec <- if ("n_atrisk" %in% names(ez)) kk * .nf_r / stats::median(ez$n_atrisk, na.rm = TRUE) else NA_real_
     best_roc <- suppressWarnings(max(ez$auc_roc, na.rm = TRUE))
     L <- c(L, "## Findings", "",
-      sprintf("- **Discrimination is strong and paradigm-robust.** Best AUC-ROC %.2f; best AUC-PR skill %.0fx the base rate (chance = 1). The frequentist (%s) and Bayesian (%s) featured models rank zones near-identically.",
-              best_roc, top$auc_pr_skill[1] %||% NA, primary_method %||% "n/a", best_bayes_method %||% "n/a"),
-      sprintf("- **Operationally useful targeting.** A top-%d watch-list catches %.0f%% of the next invasions vs %.0f%% for a random list of the same size — a %.0fx lift.",
-              kk, 100 * best_rec, 100 * (rand_rec %||% NA), best_rec / (rand_rec %||% NA_real_)),
+      # "paradigm-robust" was a claim about agreement between a frequentist and a Bayesian
+      # featured model. There is no frequentist arm, so with .have_primary FALSE the sentence
+      # would have compared the Bayesian model with ITSELF and called the result robustness.
+      if (.have_primary)
+        sprintf("- **Discrimination is strong and paradigm-robust.** Best AUC-ROC %.2f; best AUC-PR skill %.0fx the base rate (chance = 1). The frequentist (%s) and Bayesian (%s) featured models rank zones near-identically.",
+                best_roc, top$auc_pr_skill[1] %||% NA, primary_method %||% "n/a", best_bayes_method %||% "n/a")
+      else
+        sprintf("- **Discrimination is strong.** Best AUC-ROC %.2f; best AUC-PR skill %.0fx the base rate (chance = 1), for the featured Bayesian model `%s`. The structural baselines (source-mass x distance decay, distance-weighted, nearest-affected) are scored on the identical folds.",
+                best_roc, top$auc_pr_skill[1] %||% NA, best_bayes_method %||% "n/a"),
+      sprintf("- **Operationally useful targeting.** A top-%d watch-list from %s catches %.0f%% of the next invasions vs %.0f%% for a random list of the same size — a %.0fx lift.",
+              kk, if (.rec_is_max) "the best-performing model in the grid"
+                  else sprintf("the featured model (`%s`)", .feat_for_rec[1]),
+              100 * best_rec, 100 * (rand_rec %||% NA), best_rec / (rand_rec %||% NA_real_)),
       "- **Absolute probabilities are upper bounds.** Discrimination >> calibration: the ranking and relative risk are trustworthy; the absolute P(case) over-predicts out-of-sample (see reliability figure).",
-      "- **Uncertainty is reported everywhere** — Bayesian posterior 90% CrI and frequentist ensemble spread on every map (`*_uncertainty_map_*`), and a bootstrap CI on every skill estimate.",
+      "- **Uncertainty is reported everywhere** — the Bayesian posterior 90% CrI on every map (`*_uncertainty_map_*`), and a cluster-bootstrap CI on every skill estimate.",
       "")
     L <- c(L, "## Strengths", "",
-      "- **Leakage-free evaluation.** Leave-future-out CV with per-fold nowcasting as of each origin+7d; ground truth is the raw observed first-case week; models are compared on a single common support with one shared base rate.",
-      "- **Two independent paradigms agree** (penalised-MLE renewal and brms posterior), with a loo-stacked Bayesian ensemble and a frequentist forecast ensemble as robustness anchors.",
+      "- **Leakage-free evaluation.** Leave-future-out CV with per-fold nowcasting as of each origin (cut+6, the last day of the last training week — the deployed convention); ground truth is the raw observed first-case week; models are compared on a single common support with one shared base rate.",
+      "- **Robustness across structural assumptions** — the featured model is one of a grid spanning mobility kernels, generation times and covariate sets, all scored on the same folds, with a loo-stacked posterior ensemble as the combination anchor.",
       "- **Mechanistic mobility structure beats naive baselines and simple comparators** (see `model_vs_baseline`), so the skill is from the import-force model, not the base rate.",
       "- **Real-time ready.** Dates derive from the data snapshot; the onset->sample delay can be re-estimated from the data being processed (lab or DHIS2).",
       "")
@@ -750,7 +869,17 @@ write_invasion_report <- function(eval_tbl, risk_scores, lfo_results = NULL,
       sprintf("- **Few events.** Only ~%s invasion events inform the h=1 fit; skill CIs are wide and the leaderboard is a pack, not a strict order.",
               top$n_invasions[1] %||% "a handful"),
       "- **No BDBV-specific generation time exists;** a Zaire-ebolavirus serial-interval proxy is used (short/med/long sensitivity brackets the published range; the Bayesian GT-preference figure shows which the data favour).",
-      "- **Onset imputation** (~15% of cases) uses a single stochastic draw from the empirical onset->sample delay; a single draw does not fully propagate imputation uncertainty (multiple imputation is the extension), so imputation-dependent intervals are conditionally slightly narrow.",
+      # The share is DERIVED. "~15%" was hard-coded and wrong: the figure code computing the same
+      # quantity on the same line list gives 24.4% (the gap is largely the sitrep-appended rows,
+      # which carry a sample date and no onset). The estimator description was also stale — the
+      # draw is now from the fitted, truncation-corrected onset->sample delay, not the empirical pool.
+      # It is NO LONGER the same distribution the nowcast and R(t) use, and saying so was wrong
+      # from 2026-09-21: those correct for onset->APPEARANCE (a fitted truncation, mean ~9.8 d),
+      # while imputation targets the SAMPLE date and so keeps the onset->sample fit (mean ~7.7 d).
+      # Both are right for their own job; the sentence below no longer claims they are one.
+      sprintf("- **Onset imputation** (%s of confirmed cases) uses a single stochastic draw from the fitted, truncation-corrected onset->sample delay (the delay to the sample date, which is what is being imputed; the nowcast and R(t) instead use a separately fitted onset-to-appearance truncation); a single draw does not fully propagate imputation uncertainty (multiple imputation is the extension), so imputation-dependent intervals are conditionally slightly narrow.",
+              { .pi <- get0(".PCT_ONSET_IMPUTED", ifnotfound = NA_real_)
+                if (is.finite(.pi)) sprintf("~%.0f%%", .pi) else "a material share" }),
       "- **Two-stage nowcast.** Epinowcast-corrected counts feed the models as a fixed input; the nowcast-sensitivity figure shows robustness to the nowcast choice but does not propagate its uncertainty (a joint model would).",
       "- **Diagnostic R(t)** is right-truncation-corrected but still uncertain at the most recent 1-2 weeks; it does not feed the forecasts.",
       "- **Per-fold LFO nowcast** is a fast delay-CDF approximation (delay-consistent with epinowcast); the full probabilistic epinowcast is applied only to the live current week (refitting it per fold is intractable).",
@@ -778,11 +907,30 @@ write_invasion_report <- function(eval_tbl, risk_scores, lfo_results = NULL,
 #' the honest counterpart to the ranking metrics: the model discriminates well
 #' but its absolute probabilities are upper bounds out-of-sample.
 #' Rank-based AUC-ROC (Mann-Whitney): P(random invaded ranked above random not).
-.auc_roc <- function(p, y) {
-  y <- as.integer(y); n1 <- sum(y == 1, na.rm = TRUE); n0 <- sum(y == 0, na.rm = TRUE)
-  if (n1 == 0 || n0 == 0) return(NA_real_)
-  r <- rank(p, ties.method = "average")
-  (sum(r[y == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0)
+# NOTE: this function is ALSO defined in 16_invasion_eval.R. run_all.R sources 16 first and
+# 17 last, so whichever body sits here WINS for the whole session — including for
+# evaluate_invasion() in 16 and spatiotemporal_skill() in 19, which both call `.auc_roc`.
+# The two bodies used to DIFFER: this one omitted the finite/NA filter, so on any input with
+# a non-finite probability or a missing outcome it ranked NAs last (rank()'s default
+# na.last = TRUE gives them the HIGHEST ranks) while n1/n0 counted a different set — e.g.
+# p = (0.9, 0.2, NA, 0.7, 0.1), y = (1,0,0,1,0) returned 0.667 against the correct 1.000.
+# Both callers happen to pre-filter today, so nothing was wrong in practice, but the weaker
+# definition was silently shadowing the safe one purely by source order. The bodies are now
+# IDENTICAL, so the order cannot matter; keep them in step if either is edited.
+# DO NOT SHADOW THE EVALUATOR. This is a VISUALISATION module, but it is sourced AFTER
+# 16_invasion_eval.R in run_all.R, so an unconditional definition here wins for the whole
+# session — including inside evaluate_invasion() (16) and spatiotemporal_skill() (19), which
+# write invasion_evaluation.csv and skill_over_time.csv. The two bodies are identical today;
+# the moment one is edited, a figure file would silently redefine the published estimator.
+# Defined only as a STANDALONE fallback, so 16's version always governs when both are loaded.
+if (!exists(".auc_roc", mode = "function")) {
+  .auc_roc <- function(p, y) {
+    y <- as.integer(y); ok <- is.finite(p) & !is.na(y); p <- p[ok]; y <- y[ok]
+    n1 <- sum(y == 1); n0 <- sum(y == 0)
+    if (n1 == 0 || n0 == 0) return(NA_real_)
+    r <- rank(p, ties.method = "average")
+    (sum(r[y == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0)
+  }
 }
 
 #' Calibration / reliability — the Fig-3A analogue of Kraemer & Cauchemez 2017
@@ -795,9 +943,29 @@ plot_reliability <- function(lfo_results, horizon = 1L, methods = NULL, save = T
   d <- lfo_results %>% dplyr::filter(horizon == !!horizon, is.finite(p_invasion))
   if ("was_active_before" %in% names(d))
     d <- d %>% dplyr::filter(!(was_active_before %in% TRUE))
+  # A RELIABILITY PLOT NEEDS A PROBABILITY ON ITS X-AXIS. Rank-only comparators
+  # (prob_calibrated = FALSE: Distance-B1's unscaled neighbour-count mean, Adjacency-B7's
+  # 1/(1 + travel-time minutes)) carry an ordering, not a probability, so plotting them here
+  # would draw a calibration curve for an arbitrary monotone transform. They are dropped
+  # BEFORE the default-method selection below, which picks by AUC-ROC — a rank metric these
+  # can score well on, so without this they could be selected INTO the panel precisely because
+  # they discriminate. Absent column = calibrated (every Bayesian model).
+  if ("prob_calibrated" %in% names(d))
+    d <- d %>% dplyr::filter(!(prob_calibrated %in% FALSE))
   if (is.null(methods)) {
-    methods <- d %>% dplyr::filter(grepl("^Renewal", method)) %>% dplyr::pull(method) %>% unique()
-    if (length(methods) == 0) methods <- unique(d$method)
+    # The frequentist "^Renewal" family is gone, so this now resolves to every remaining
+    # (calibrated) method; the top-8 trim below keeps the panel legible.
+    methods <- unique(d$method)
+  } else {
+    # An explicit request for a rank-only method is a caller error, not something to draw.
+    .drop <- setdiff(methods, unique(d$method))
+    if (length(.drop))
+      warning(sprintf(paste0("[reliability] %s cannot appear on a reliability plot (no ",
+                             "calibrated probability) and %s dropped."),
+                      paste(.drop, collapse = ", "),
+                      if (length(.drop) > 1) "were" else "was"), call. = FALSE)
+    methods <- intersect(methods, unique(d$method))
+    if (!length(methods)) return(invisible(NULL))
   }
   # Keep the plot legible and within the categorical palette: if many renewal variants are
   # eligible, show the top methods by pooled discrimination (AUC-ROC). The AUC annotation is
@@ -862,12 +1030,17 @@ plot_reliability <- function(lfo_results, horizon = 1L, methods = NULL, save = T
 #' Inf Dis), the published ancestor of this invasion model: (A) calibration with AUC
 #' and (B) real-time prioritisation vs random targeting, side by side — the single
 #' most decision-legible summary of how good the model is at predicting invasion.
+#' @param support_cells the shared (fold x zone) support resolved from the SCORED table.
+#'   run_all.R passes `lfo_fig3` here (it carries the appended rank-only baselines), so
+#'   without this panel B would derive its own, smaller support and its random-targeting
+#'   reference would not match the published detection curve.
 plot_paper_figure3 <- function(lfo_results, methods, horizon = 1L, save = TRUE,
-                               file = "model_performance_figure3") {
+                               file = "model_performance_figure3", support_cells = NULL) {
   a <- tryCatch(plot_reliability(lfo_results, horizon = horizon, methods = methods[1],
                                  save = FALSE, panel_tag = "(A)"), error = function(e) NULL)
   b <- if (exists("plot_detection_curve"))
-    tryCatch(plot_detection_curve(lfo_results, methods, horizon = horizon, save = FALSE),
+    tryCatch(plot_detection_curve(lfo_results, methods, horizon = horizon, save = FALSE,
+                                  support_cells = support_cells),
              error = function(e) NULL) else NULL
   if (is.null(a) && is.null(b)) return(invisible(NULL))
   if (is.null(a)) return(invisible(b))
@@ -884,3 +1057,92 @@ plot_paper_figure3 <- function(lfo_results, methods, horizon = 1L, save = TRUE,
 }
 
 message("[viz] 17_invasion_viz.R loaded — legible invasion figure suite.")
+
+# ---------------------------------------------------------------------------
+# Delta stability: is the calibration offset constant over time?
+# ---------------------------------------------------------------------------
+
+#' Visualise the delta-stability diagnostic. READS the published tables; computes nothing.
+#'
+#' delta is an intercept shift on the cloglog scale and beta_0 is the intercept, so the
+#' per-fold delta IS a time-varying beta_0 fitted post hoc. This panel is the evidence for two
+#' design choices at once: whether the deployment delta should pool all history or use a
+#' recent window, and whether a time-varying beta_0 is worth fitting at all.
+#'
+#' Panel A forest: each fold's INDEPENDENTLY fitted delta with its 95% interval, against the
+#' random-effects pooled value. Panel B: I-squared for every method, i.e. the share of the
+#' between-fold spread that is NOT sampling noise.
+#'
+#' EVERY NUMBER IS READ from invasion_delta_stability{,_summary}.csv, which run_all.R writes
+#' from invasion_delta_stability() (16b). Nothing here re-fits, re-pools or re-tests.
+#'
+#' @param per_fold,summary_tbl the two published tables (or paths to them).
+#' @param method which method to draw in panel A; defaults to the first alphabetically.
+plot_delta_stability <- function(per_fold, summary_tbl, horizon = 1L, method = NULL,
+                                 save = TRUE, file = "delta_stability") {
+  rd <- function(x) if (is.character(x)) readr::read_csv(x, show_col_types = FALSE) else x
+  pf <- rd(per_fold); sm <- rd(summary_tbl)
+  if (is.null(pf) || !nrow(pf) || is.null(sm) || !nrow(sm)) return(invisible(NULL))
+  pf <- pf %>% dplyr::filter(horizon == !!horizon, is.finite(delta), is.finite(se_log))
+  sm <- sm %>% dplyr::filter(horizon == !!horizon)
+  if (!nrow(pf) || !nrow(sm)) return(invisible(NULL))
+  if (is.null(method)) {
+    .pref <- c(get0("best_bayes_method", ifnotfound = NA_character_),
+               "Bayes-M14-fill-med", "Bayes-M14-fill-geo")
+    .pref <- .pref[!is.na(.pref) & .pref %in% pf$method]
+    method <- if (length(.pref)) .pref[1] else sort(unique(pf$method))[1]
+  }
+  a <- pf %>% dplyr::filter(method == !!method)
+  srow <- sm %>% dplyr::filter(method == !!method)
+  if (!nrow(a) || !nrow(srow)) return(invisible(NULL))
+  a$lab <- if (all(!is.na(a$cutoff))) format(lfo_origin(a$cutoff), "%d %b") else as.character(a$fold_id)
+  a$lab <- factor(a$lab, levels = rev(a$lab[order(a$fold_id)]))
+
+  pA <- ggplot(a, aes(x = .data$delta, y = .data$lab)) +
+    annotate("rect", xmin = srow$pooled_lo[1], xmax = srow$pooled_hi[1],
+             ymin = -Inf, ymax = Inf, fill = "grey88") +
+    geom_vline(xintercept = srow$pooled_delta[1], colour = "grey35", linewidth = 0.6) +
+    geom_vline(xintercept = 1, linetype = "dotted", colour = "grey55") +
+    geom_linerange(aes(xmin = .data$lo, xmax = .data$hi), colour = "grey30", linewidth = 0.6) +
+    geom_point(aes(size = .data$n_events), colour = "grey10") +
+    scale_size_continuous(range = c(1.2, 3.4), name = "events") +
+    scale_x_log10() +
+    labs(x = expression(paste("fold-specific ", delta, "  (log scale; 1 = already calibrated)")),
+         y = NULL, subtitle = sprintf("%s  -  band = pooled delta %.2f [%.2f, %.2f]",
+                                      method, srow$pooled_delta[1], srow$pooled_lo[1],
+                                      srow$pooled_hi[1])) +
+    theme_minimal(base_size = 10)
+
+  sb <- sm %>% dplyr::filter(is.finite(.data$I2)) %>%
+    dplyr::mutate(method = forcats::fct_reorder(.data$method, .data$I2))
+  pB <- ggplot(sb, aes(x = 100 * .data$I2, y = .data$method)) +
+    geom_segment(aes(x = 0, xend = 100 * .data$I2, yend = .data$method),
+                 colour = "grey80", linewidth = 0.4) +
+    geom_point(colour = "grey10", size = 1.8) +
+    geom_vline(xintercept = 25, linetype = "dashed", colour = "grey55") +
+    scale_x_continuous(limits = c(0, 100)) +
+    labs(x = expression(paste(I^2, "  (% of between-fold spread that is NOT sampling noise)")),
+         y = NULL,
+         subtitle = sprintf("all %d methods; dashed line = 25%%, the conventional floor for 'some' heterogeneity",
+                            nrow(sb))) +
+    theme_minimal(base_size = 9)
+
+  cap <- sprintf(paste0("Each fold's delta is fitted on that fold ALONE, so the spread is not an ",
+                        "expanding window converging. Cochran Q p = %.3f on %d df; tau^2 = %.4f; ",
+                        "I^2 = %.0f%%; trend in log delta per fold = %+.3f (p = %.2f); a single ",
+                        "fold pins delta only to x/%.2f. Heterogeneity at p<0.05 in %d of %d ",
+                        "methods. The anchor-week nowcast multiplier is constant across folds ",
+                        "by construction and so cannot be tested."),
+                 srow$Q_p[1], srow$Q_df[1], srow$tau2[1], 100 * srow$I2[1],
+                 srow$trend_slope[1], srow$trend_p[1], exp(srow$median_se_log[1]),
+                 sum(sm$Q_p < 0.05, na.rm = TRUE), nrow(sm))
+  p <- (pA | pB) + patchwork::plot_layout(widths = c(1, 1.15)) +
+    patchwork::plot_annotation(
+      title = sprintf("Is the calibration offset stable over time?  (h = %s)", horizon),
+      caption = paste(strwrap(cap, width = 150), collapse = "\n"),
+      theme = ggplot2::theme(
+        plot.title   = ggplot2::element_text(size = 12, face = "bold"),
+        plot.caption = ggplot2::element_text(size = 7.5, colour = "grey35", hjust = 0)))
+  if (save) .save(p, file.path(OUT_FIGURES, sprintf("%s_h%d.pdf", file, horizon)), w = 12, h = 5.2)
+  invisible(p)
+}

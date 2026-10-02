@@ -31,12 +31,15 @@ cascade_gateway_screen <- function(sim) {
 # the top-N by the flux screen among currently-infected / high-out-flux zones.
 cascade_knockout <- function(prep, scenario, base_sim, delta, psi = CASCADE_PSI,
                              n_mc = NULL, top_n = CASCADE_KNOCKOUT_TOPN,
-                             candidates = NULL) {
+                             candidates = NULL, seed = CASCADE_SEED, pop_vec = NULL) {
   n_mc <- n_mc %||% base_sim$n_mc
-  # PAIRED baseline: re-run with NO bar at the SAME n_mc & seed. Delta_j is unbiased;
-  # the shared seed gives common random numbers at the start of each iteration (partial
-  # variance reduction — the streams diverge once the seeding paths differ in length).
-  base_ref <- simulate_cascade(prep, scenario, n_mc = n_mc, delta = delta, psi = psi)
+  # PAIRED baseline: re-run with NO bar at the SAME n_mc AND the SAME seed. Under common
+  # random numbers (CASCADE_CRN) every iteration draws from its own addressable stream of
+  # zone-indexed uniforms, so the two runs stay coupled for the whole horizon rather than
+  # only until their seeding paths differ in length — which is what the shared master seed
+  # alone used to buy. The contrast is then differenced iteration by iteration.
+  base_ref <- simulate_cascade(prep, scenario, n_mc = n_mc, delta = delta, psi = psi,
+                               seed = seed, pop_vec = pop_vec)
   base_new <- sum(rowMeans(base_ref$new_by_week))     # E[# new invasions over horizon]
   if (is.null(candidates)) {
     scr <- cascade_gateway_screen(base_sim)
@@ -46,11 +49,17 @@ cascade_knockout <- function(prep, scenario, base_sim, delta, psi = CASCADE_PSI,
   }
   rows <- lapply(candidates, function(z) {
     sk <- simulate_cascade(prep, scenario, n_mc = n_mc, delta = delta, psi = psi,
-                           bar_sources = z)
+                           bar_sources = z, seed = seed, pop_vec = pop_vec)
     ko_new <- sum(rowMeans(sk$new_by_week))
+    # delta_j from the PAIRED difference, with its standard error. Differencing the two
+    # means instead discards the pairing, and at this M the noise floor is comparable to
+    # the effect being reported — which is how a ranking of averted invasions can come out
+    # ordered by nothing but Monte-Carlo error.
+    pt <- cascade_paired_total(base_ref, sk)
     tibble::tibble(health_zone = z, base_new = base_new, knockout_new = ko_new,
-                   delta_j = base_new - ko_new,
-                   pct_reduction = 100 * (base_new - ko_new) / max(base_new, 1e-9))
+                   delta_j = pt$estimate, delta_j_se = pt$se,
+                   delta_j_lo = pt$lo, delta_j_hi = pt$hi, paired = pt$paired,
+                   pct_reduction = 100 * pt$estimate / max(base_new, 1e-9))
   })
   dplyr::bind_rows(rows) |> dplyr::arrange(dplyr::desc(delta_j))
 }
@@ -59,10 +68,19 @@ cascade_knockout <- function(prep, scenario, base_sim, delta, psi = CASCADE_PSI,
 # order. This is only used when the caller passes no `candidates`; the driver always
 # passes an incidence-ranked shortlist (run_cascade.R), so this is a last-resort default
 # and is deliberately NOT incidence-ranked (the sim object carries no incidence).
+#' The n affected zones that seed the most invasions in a simulation.
+#'
+#' Ranked by realised out-flux (expected seedings sent). It previously returned
+#' head(affected_zones, n) — the first n in the canonical zone order, i.e.
+#' alphabetically — so a NULL `candidates` screened whichever hubs happened to sort
+#' first rather than the ones that actually drive the cascade. run_cascade.R always
+#' passes `candidates`, so this never reached the published knockout table, but the
+#' function's name promised a ranking it did not perform.
 sim_top_sources <- function(sim, n) {
   aff <- sim$zones_all[sim$affected0]
   if (!length(aff)) return(character(0))
-  head(aff, n)
+  out_flux <- rowSums(sim$flux)[sim$affected0]
+  head(aff[order(out_flux, decreasing = TRUE)], n)
 }
 
 # Designed conditional experiment (PLAN §3.7-1): force-seed `hub` at week 1 and
@@ -70,10 +88,13 @@ sim_top_sources <- function(sim, n) {
 # zones" scenario to any hub. Returns the reach table under that intervention.
 cascade_conditional_seed <- function(prep, scenario, hub, delta, psi = CASCADE_PSI,
                                      n_mc = NULL, horizons = CASCADE_REPORT_HORIZONS,
-                                     force_seed_week = 1L) {
+                                     force_seed_week = 1L, seed = CASCADE_SEED,
+                                     seed_r = NA_real_, pop_vec = NULL) {
   n_mc <- n_mc %||% CASCADE_N_MC
+  # `seed` is explicit so the caller can pair this against a baseline built the same way.
   sim <- simulate_cascade(prep, scenario, n_mc = n_mc, delta = delta, psi = psi,
-                          force_seed = hub, force_seed_week = force_seed_week)
+                          force_seed = hub, force_seed_week = force_seed_week,
+                          seed = seed, seed_r = seed_r, pop_vec = pop_vec)
   reach <- cascade_reach_table(sim, horizons = horizons)
   reach$conditioned_on <- paste(hub, collapse = "+")
   list(reach = reach, sim = sim)
@@ -126,8 +147,16 @@ cascade_transmission_tree <- function(sim) {
   dest_has <- which(colSums(fl) > 0)
   rows <- lapply(dest_has, function(j) {
     col <- fl[, j]; src <- which.max(col)
+    # which.max() returns the FIRST maximum, so a tie between candidate sources is broken
+    # by zone order. flux entries are Monte-Carlo seeding counts / n_mc, so exact ties are
+    # possible (two sources each seeding this zone in the same number of iterations) and the
+    # "modal source" would then be an artefact of the spine ordering. `share` is honest
+    # either way (tied sources share the same value); n_modal_ties makes the ambiguity
+    # visible instead of presenting an arbitrary pick as the answer.
+    .nties <- sum(col == col[src])
     tibble::tibble(dest = sim$zones_all[j], modal_source = sim$zones_all[src],
-                   share = col[src] / sum(col), expected_seedings = sum(col))
+                   share = col[src] / sum(col), expected_seedings = sum(col),
+                   n_modal_ties = .nties)
   })
   dplyr::bind_rows(rows) |> dplyr::arrange(dplyr::desc(expected_seedings))
 }

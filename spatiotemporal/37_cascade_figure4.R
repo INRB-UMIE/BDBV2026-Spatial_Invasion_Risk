@@ -59,6 +59,13 @@ theme_map <- function(base = 8.6) {
     plot.margin = margin(2, 2, 2, 2))
 }
 save_dual <- function(p, name, w, h, dir) {
+  # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
+  # is not on the published allow-list. get0() so the helper still works standalone.
+  .fk <- get0("figure_is_kept", ifnotfound = NULL)
+  # Gate on the FULL destination path, not the bare stem: FIGURE_DROP entries are
+  # "<directory>/<stem>" and the raw/ exclusion inspects path components, neither of
+  # which can match a basename.
+  if (is.function(.fk) && !.fk(file.path(dir, name))) return(invisible(p))
   if (!dir.exists(dir)) dir.create(dir, recursive = TRUE, showWarnings = FALSE)
   ggsave(file.path(dir, paste0(name, ".pdf")), p, width = w, height = h, device = "pdf", bg = "white")
   ggsave(file.path(dir, paste0(name, ".png")), p, width = w, height = h, dpi = 600, bg = "white")
@@ -99,7 +106,8 @@ build_fig4_cascade <- function(H, top_n = 20L) {
     geom_sf(data = mp %>% filter(was_active_before %in% TRUE),
             fill = AFFECTED_FILL, colour = "white", linewidth = 0.08) +
     scale_fill_viridis_c(option = "viridis", trans = "log10", limits = c(RR_FLOOR, 1),
-                         breaks = c(0.001, 0.01, 0.1, 1), labels = c("0.001","0.01","0.1","1"),
+                         # the scale is floored at RR_FLOOR, so the first tick is an upper bound
+                         breaks = c(0.001, 0.01, 0.1, 1), labels = c("<=0.001","0.01","0.1","1"),
                          na.value = NA_FILL,
                          name = sprintf("Relative\ninvasion risk\n(%s, log, 0-1)", wk_label),
                          direction = 1) +
@@ -158,15 +166,41 @@ build_fig4_cascade <- function(H, top_n = 20L) {
 
 # ---- RUN for each reporting horizon (13-week = the headline 3-month figure) --
 horizons <- get0("CASCADE_REPORT_HORIZONS", ifnotfound = c(4L, 8L, 13L))
+.t_start <- Sys.time()
+.built <- stats::setNames(logical(length(horizons)), as.character(horizons))
 for (H in horizons) {
   message(sprintf("== Figure 4 (cascade, %d-week reach + uncertainty) ==", H))
-  tryCatch(build_fig4_cascade(H), error = function(e)
-    message("!! Figure4_cascade_h", H, " FAILED: ", conditionMessage(e)))
+  .built[as.character(H)] <- tryCatch({ build_fig4_cascade(H); TRUE },
+    error = function(e) { message("!! Figure4_cascade_h", H, " FAILED: ",
+                                  conditionMessage(e)); FALSE })
 }
-# copy the headline (13-week) to the canonical Figure4_cascade name
-for (ext in c("pdf","png")) {
-  src <- file.path(FIG_DIR, sprintf("Figure4_cascade_h%d.%s", max(horizons), ext))
-  if (file.exists(src)) file.copy(src, file.path(FIG_DIR, sprintf("Figure4_cascade.%s", ext)),
-                                  overwrite = TRUE)
+
+# Copy the headline (13-week) figure to the canonical Figure4_cascade name.
+# ONLY when this run actually produced it. The build is wrapped in tryCatch, so a failure was
+# previously swallowed and this loop then found LAST run's Figure4_cascade_h13.pdf still on
+# disk and republished it as the canonical headline — shipping a stale figure under a
+# current-looking name, with "[done]" printed and nothing flagged anywhere. Two conditions are
+# required: the builder returned without error, AND the source file was written during THIS
+# run (mtime at or after .t_start), which also catches a build that "succeeded" without
+# writing because the retained-figure gate suppressed it.
+.H_head <- max(horizons)
+for (ext in c("pdf", "png")) {
+  src <- file.path(FIG_DIR, sprintf("Figure4_cascade_h%d.%s", .H_head, ext))
+  dst <- file.path(FIG_DIR, sprintf("Figure4_cascade.%s", ext))
+  fresh <- isTRUE(.built[as.character(.H_head)]) && file.exists(src) &&
+           file.mtime(src) >= .t_start - 1
+  if (fresh) {
+    file.copy(src, dst, overwrite = TRUE)
+  } else if (file.exists(dst)) {
+    # A canonical file that this run did not regenerate is stale, and everything downstream
+    # (the cascade report, the key-outputs manifest) reads it as current. Remove it so the
+    # failure is loud and detectable rather than silently published. The per-horizon source
+    # file is untouched, so nothing is lost.
+    file.remove(dst)
+    warning(sprintf("[fig4] Figure4_cascade_h%d was not produced by this run; removed the STALE %s rather than republish it.",
+                    .H_head, basename(dst)), call. = FALSE, immediate. = TRUE)
+  }
 }
+if (!isTRUE(.built[as.character(.H_head)]))
+  message("[fig4] headline horizon h", .H_head, " did NOT build — canonical Figure4_cascade not written.")
 message("[done] Figure4_cascade -> ", FIG_DIR)

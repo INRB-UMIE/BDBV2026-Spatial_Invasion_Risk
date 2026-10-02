@@ -2,34 +2,14 @@
 # 04b_epinowcast.R — Probabilistic Nowcasting via epinowcast
 # BDBV 2026 DRC · Spatiotemporal Invasion Forecast Suite
 #
-# Replaces the naive Exp-CDF right-truncation correction (04_nowcasting.R) with
-# a full Bayesian nowcast (Abbott et al. / epinowcast 0.6.0). Adapted for the
-# DHIS2 pipeline from the lab-linelist implementation on branch
-# tmp_nowcasting_growth (dhis2_pipeline/scripts/16_epinowcast.R and
-# realtime_pipeline/scripts/nowcasting/).
-#
-# Approach (feasible for 519 zones): fit ONE pooled epinowcast model on the
-# national daily onset->sample reporting triangle to obtain properly
-# uncertainty-quantified per-onset-week correction factors, then apply those
-# factors to each zone's observed weekly count. The onset-to-sample delay is a
-# lab/reporting property that is essentially zone-invariant, so a shared delay
-# model with zone-specific counts is both statistically sound and ~500x cheaper
-# than fitting 519 separate Stan models. The spatial distribution of cases is
-# preserved from the observed data; only the temporal right-truncation is
-# corrected.
-#
-# Model spec (per the plan §1.2 and the branch): reference = onset date,
-# report = sample-collection date; parametric reporting-delay distribution SELECTED BY WIS
-# (EPINOWCAST_DELAY_DIST, currently "lognormal") — distinct from the simpler Exp(0.229)
-# onset->sample hazard used only for point onset imputation in 01_data_prep.R; weekly
-# random-walk expectation; negative-binomial observation; max_delay = 21 days.
-#
-# Public API:
-#   nowcast_zone_week_epinowcast(zone_week, linelist, analysis_date, ...)
-#     -> zone-week tibble with confirmed_nc / suspected_nc / trunc_weight /
-#        correction_uncertainty, drop-in compatible with the output of
-#        apply_nowcast_correction(). Falls back to the deterministic nowcast if
-#        epinowcast is unavailable or the fit fails.
+# ROLE (corrected 2026-09-19). This module is the SENSITIVITY arm, not the deployed nowcast.
+# It used to say it "replaces the naive Exp-CDF right-truncation correction (04_nowcasting.R)",
+# which has not been true since 2026-09-17: run_all.R applies apply_nowcast_correction() — the
+# deterministic delay-CDF correction — on BOTH the deployed and the fold paths (that symmetry is
+# the point: delta must be fitted and applied in the same regime), and epinowcast runs only
+# behind RUN_EPINOWCAST_DIAGNOSTIC (default FALSE) plus the bayes_nowcast_sensitivity arm.
+# It replaces nothing; it is the probabilistic cross-check on the deployed correction.
+
 # =============================================================================
 
 source(file.path(here::here(), "spatiotemporal", "00_config.R"))
@@ -45,14 +25,67 @@ HAS_EPINOWCAST <- requireNamespace("epinowcast", quietly = TRUE) &&
 
 # Fit configuration (light MCMC is sufficient for a correction-factor summary;
 # the branch uses 4x2000 for full inference — override via these if needed).
-EPINOWCAST_MAX_DELAY   <- 21L    # days; ~P99 of the onset-to-sample delay
-EPINOWCAST_CHAINS      <- 2L
-EPINOWCAST_ITER_WARMUP <- 500L
-EPINOWCAST_ITER_SAMPLE <- 500L
-EPINOWCAST_ADAPT_DELTA <- 0.95
-# Reporting-delay distribution. Selected by retrospective WIS comparison
-# (compare_epinowcast_models(): lognormal 5.49 < gamma 5.74 < exponential 8.98
-# on the held-out window), consistent with the branch's realtime default.
+# ---------------------------------------------------------------------------
+# Maximum onset->sample delay modelled by the nowcast — DERIVED, not hard-coded
+# ---------------------------------------------------------------------------
+# The bound D does two things inside epinowcast, and both matter:
+#   (1) the delay distribution is modelled on [0, D] and RENORMALISED there, so the
+#       expected eventual count for a reference date is observed * F(D) / F(lag).
+#       A short D therefore under-states every incomplete week, systematically and in
+#       one direction only;
+#   (2) reference dates older than D are declared COMPLETE and receive no correction.
+
+EPINOWCAST_MAX_DELAY_Q   <- 0.99   # quantile of the delay in force
+EPINOWCAST_MAX_DELAY_MIN <- 21L    # floor: never model a shorter support than before
+EPINOWCAST_MAX_DELAY_MAX <- 45L    # ceiling: matches the R(t) truncation clamp, and stays
+                                   # well inside DELAY_MAX_PLAUSIBLE_DAYS (60 d)
+
+#' The modelled delay support, in days.
+#'
+#' Precedence: an EPINOWCAST_MAX_DELAY environment override (for a deliberate
+#' sensitivity run) > the fitted delay's `q` quantile, clamped to [lo, hi] > `lo`.
+#' Never returns a non-finite or non-positive value.
+epinowcast_max_delay <- function(delay = NULL, q = EPINOWCAST_MAX_DELAY_Q,
+                                 lo = EPINOWCAST_MAX_DELAY_MIN,
+                                 hi = EPINOWCAST_MAX_DELAY_MAX, quiet = FALSE) {
+  env <- trimws(Sys.getenv("EPINOWCAST_MAX_DELAY", ""))
+  if (nzchar(env)) {
+    v <- suppressWarnings(as.integer(env))
+    if (!is.na(v) && v >= 1L) {
+      if (!quiet) message(sprintf("[epinowcast] max_delay = %d d (EPINOWCAST_MAX_DELAY override)", v))
+      return(v)
+    }
+    warning(sprintf("[epinowcast] unreadable EPINOWCAST_MAX_DELAY='%s'; deriving it instead.", env),
+            call. = FALSE)
+  }
+  if (is.null(delay))
+    delay <- tryCatch(effective_onset_sample_delay(), error = function(e) NULL)
+  qd <- if (is.null(delay) || !exists("delay_quantile", mode = "function")) NA_real_
+        else tryCatch(delay_quantile(delay, q), error = function(e) NA_real_)
+  if (!is.finite(qd)) {
+    if (!quiet)
+      message(sprintf("[epinowcast] max_delay = %d d (delay unavailable; floor used)", as.integer(lo)))
+    return(as.integer(lo))
+  }
+  D <- as.integer(min(hi, max(lo, ceiling(qd))))
+  if (!quiet)
+    message(sprintf(paste0("[epinowcast] max_delay = %d d (P%.0f of the %s delay in force = %.1f d, ",
+                           "clamped to [%d, %d]; covers %.1f%% of the delay mass)"),
+                    D, 100 * q, if (is.null(delay$family)) "fitted" else delay$family, qd,
+                    as.integer(lo), as.integer(hi),
+                    100 * tryCatch(delay_cdf(delay, D), error = function(e) NA_real_)))
+  D
+}
+
+EPINOWCAST_CHAINS      <- 4L
+EPINOWCAST_ITER_WARMUP <- 2500L
+EPINOWCAST_ITER_SAMPLE <- 2500L
+EPINOWCAST_ADAPT_DELTA <- 0.965
+# Reporting-delay distribution. Selected by a retrospective WIS comparison run ONCE, offline:
+# compare_epinowcast_models() gave lognormal 5.49 < gamma 5.74 < exponential 8.98 on the
+# held-out window, consistent with the branch's realtime default. NOT re-derived per run —
+# that function is never called by the pipeline (see the note at EPINOWCAST_MAX_DELAY_Q), so
+# these three numbers are a recorded historical result, not a claim about the current data.
 EPINOWCAST_DELAY_DIST  <- "lognormal"
 
 # ---------------------------------------------------------------------------
@@ -71,7 +104,7 @@ EPINOWCAST_DELAY_DIST  <- "lognormal"
 #'         lower-triangular cumulative long format, or NULL if too few cases.
 build_reporting_triangle <- function(linelist, analysis_date = ANALYSIS_DATE,
                                      outbreak_start = OUTBREAK_START,
-                                     max_delay = EPINOWCAST_MAX_DELAY) {
+                                     max_delay = epinowcast_max_delay()) {
   stopifnot(all(c("date_of_symptom_onset", "date_of_sample_collection") %in%
                   names(linelist)))
   conf <- if ("confirmed" %in% names(linelist)) {
@@ -123,7 +156,7 @@ build_reporting_triangle <- function(linelist, analysis_date = ANALYSIS_DATE,
 #' Fit the pooled epinowcast model to a reporting triangle.
 #'
 #' @return an epinowcast fit object, or NULL on failure.
-fit_epinowcast <- function(triangle, max_delay = EPINOWCAST_MAX_DELAY,
+fit_epinowcast <- function(triangle, max_delay = epinowcast_max_delay(),
                            chains = EPINOWCAST_CHAINS,
                            iter_warmup = EPINOWCAST_ITER_WARMUP,
                            iter_sampling = EPINOWCAST_ITER_SAMPLE,
@@ -206,8 +239,22 @@ epinowcast_weekly_factors <- function(fit, triangle) {
           by = week_start][order(week_start)]
 
   # Correction factor >= 1 (nowcast can't be below the already-observed count).
-  wk[, factor := pmax(nowcast_mean / pmax(observed, 1), 1)]
+  #
+  # observed == 0 gives NA, NOT a ratio against the pmax(., 1) floor. With that floor the
+  # "factor" for an unobserved week is the raw nowcast COUNT (e.g. 40), which downstream is
+  # applied as a MULTIPLIER — the raw-count unit error this module has hit before. NA routes
+  # the consumer to its `is.na(.nc_factor) -> 1` branch, i.e. no correction, which is the
+  # honest answer for a week the triangle cannot see at all.
+  wk[, factor := ifelse(observed > 0, pmax(nowcast_mean / observed, 1), NA_real_)]
   # Coefficient of variation of the weekly nowcast as an uncertainty flag.
+  # NOTE ON `cv`: nowcast_lo/hi are SUMS OF DAILY QUANTILES, and a quantile of a sum is not the
+  # sum of quantiles — summing seven daily 90% intervals overstates the weekly interval by
+  # roughly sqrt(7) for near-independent days (seven days at mean 10, q5 5, q95 15 give
+  # cv = 0.304 here against a true weekly cv of about 0.115). This is therefore an UPPER BOUND
+  # on the weekly coefficient of variation, and it is used only to set the
+  # correction_uncertainty flag, never to widen a predictive interval. Computing it properly
+  # needs summary(fit, type = "nowcast_samples") and the 5th/95th percentile of the weekly sum
+  # PER DRAW; left as an upper bound deliberately, since a conservative flag is the safe error.
   wk[, cv := (nowcast_hi - nowcast_lo) / (2 * 1.645 * pmax(nowcast_mean, 1))]
 
   tibble::as_tibble(wk)
@@ -230,7 +277,7 @@ epinowcast_weekly_factors <- function(fit, triangle) {
 #'         first, or NULL if epinowcast is unavailable.
 compare_epinowcast_models <- function(linelist, analysis_date = ANALYSIS_DATE,
                                       outbreak_start = OUTBREAK_START,
-                                      max_delay = EPINOWCAST_MAX_DELAY,
+                                      max_delay = epinowcast_max_delay(),
                                       test_days = 7L,
                                       distributions = c("exponential", "gamma",
                                                         "lognormal")) {
@@ -353,13 +400,19 @@ nowcast_zone_week_epinowcast <- function(zone_week, linelist,
 
   if (!HAS_EPINOWCAST) return(do_fallback("epinowcast/cmdstanr not installed"))
 
+  # Resolve the modelled delay support ONCE and pass it to both stages. Letting each call
+  # evaluate its own default would let the triangle and the model that consumes it disagree
+  # if the fitted delay were refreshed between them — and a triangle built on one support
+  # and pre-processed on another is silently mis-specified, not an error.
+  .maxd <- epinowcast_max_delay()
+
   triangle <- tryCatch(
-    build_reporting_triangle(linelist, analysis_date, outbreak_start),
+    build_reporting_triangle(linelist, analysis_date, outbreak_start, max_delay = .maxd),
     error = function(e) NULL
   )
   if (is.null(triangle)) return(do_fallback("could not build reporting triangle"))
 
-  fit <- fit_epinowcast(triangle)
+  fit <- fit_epinowcast(triangle, max_delay = .maxd)
   if (is.null(fit)) return(do_fallback("epinowcast fit failed"))
 
   factors <- epinowcast_weekly_factors(fit, triangle)
@@ -371,15 +424,31 @@ nowcast_zone_week_epinowcast <- function(zone_week, linelist,
                   paste(sprintf("%s=%.2f", format(factors$week_start, "%m-%d"),
                                 factors$factor), collapse = ", ")))
 
-  # Carry the model's weekly nowcast_mean (the TARGET national confirmed total) and its CV. The
-  # multiplicative factor is deliberately NOT taken from here: epinowcast_weekly_factors computes
-  # it against the reporting-TRIANGLE observed base, but the correction below scales the ZONE-WEEK
-  # confirmed base — a different count (zone_week is by date_index with onset imputation + zero-
-  # fill). Deriving the factor from the wrong base (and, when triangle observed == 0, letting it
-  # become a raw COUNT) over-inflated the corrected total and the suspected series. So recompute
-  # the factor against the zone-week base below.
+  # Carry the model's weekly COMPLETENESS RATIO and its CV.
+  #
+  # 2026-09-17 CORRECTION. This block used to carry nowcast_mean (an absolute count on the
+  # reporting-TRIANGLE scale) and divide it by the ZONE-WEEK total to derive the factor. Those
+  # two counts are different populations: the triangle holds only confirmed cases with BOTH an
+  # onset and a sample date within max_delay, while zone_week additionally holds onset-imputed
+  # and sitrep-appended cases. On the 2026-09-07 snapshot the triangle covered 4,963 of 6,669
+  # confirmed cases (74%), so nowcast_mean / zone_week_total < 1 on almost every week and the
+  # pmax(., 1) floor CLIPPED THE CORRECTION AWAY ENTIRELY: five of the six incomplete weeks got
+  # a factor of exactly 1.000, and the raw vs epinowcast beta0 posteriors came out bit-identical
+  # (outputs/forecasts/bayes_nowcast_sensitivity.csv). The pipeline was reporting a nowcast it
+  # was not performing.
+  #
+  # A ratio of two incommensurable counts is not a completeness. The transferable quantity is
+  # the DIMENSIONLESS ratio nowcast_mean / observed, both measured on the triangle's own base —
+  # which epinowcast_weekly_factors() already computes (`factor`) and this block used to discard.
+  # Applying that ratio to the zone-week base is scale-free and reconciles by construction.
+  #
+  # CAVEAT, deliberately not "corrected" away: the zone-week base is itself already partially
+  # nowcast, because the onset imputation draws missing onsets backward from sample dates and so
+  # populates recent onset-weeks that the triangle cannot see. The zone-week series is therefore
+  # somewhat MORE complete than the triangle, and this ratio modestly over-corrects the most
+  # recent week. Quantifying that is what bayes_nowcast_sensitivity is for.
   fac_lookup <- factors %>%
-    dplyr::select(week_start, cv, .nc_mean = nowcast_mean)
+    dplyr::select(week_start, cv, .nc_factor = factor)
 
   # Spatial prior for the ADDITIVE-deficit correction below: each zone's share of
   # confirmed cases over recent (but not the current, most-truncated) weeks.
@@ -388,9 +457,29 @@ nowcast_zone_week_epinowcast <- function(zone_week, linelist,
     dplyr::filter(week_start >= .cur_wk - 35, week_start <= .cur_wk - 7) %>%
     dplyr::group_by(health_zone) %>%
     dplyr::summarise(.w = sum(confirmed, na.rm = TRUE), .groups = "drop")
-  if (nrow(.recent) == 0 || sum(.recent$.w) == 0)
-    .recent <- dplyr::distinct(zone_week, health_zone) %>% dplyr::mutate(.w = 1)
-  .recent$.share <- .recent$.w / sum(.recent$.w)
+  # FALLBACK (was: uniform .w = 1 over EVERY zone). A uniform prior spreads the additive
+  # residual across all 519 zones — including zones that have NEVER had a confirmed case —
+  # giving them confirmed_nc > 0 where confirmed == 0. forecast_workhorse() then reads that
+  # as "already affected" and silently removes them from the at-risk set, corrupting both
+  # the invasion outcome and the beta fit; it also contradicts this function's own
+  # documented guarantee that it "never fabricates cases into never-recently-active zones".
+  # Degrade instead to the ALL-TIME confirmed share, which is still zero for never-affected
+  # zones; if even that is empty there is no epidemic to redistribute, so the additive step
+  # is disabled (share 0 everywhere) rather than invented.
+  if (nrow(.recent) == 0 || sum(.recent$.w) == 0) {
+    .recent <- zone_week %>%
+      dplyr::group_by(health_zone) %>%
+      dplyr::summarise(.w = sum(confirmed, na.rm = TRUE), .groups = "drop")
+    if (nrow(.recent) == 0 || sum(.recent$.w) == 0) {
+      .recent <- dplyr::distinct(zone_week, health_zone) %>% dplyr::mutate(.w = 0)
+      message("[epinowcast] No confirmed cases anywhere in the grid — additive residual ",
+              "redistribution disabled (no zone receives a fabricated case).")
+    } else {
+      message("[epinowcast] No cases in the recent window; residual redistributed by the ",
+              "ALL-TIME confirmed share (never-affected zones still receive nothing).")
+    }
+  }
+  .recent$.share <- if (sum(.recent$.w) > 0) .recent$.w / sum(.recent$.w) else 0
 
   # National ZONE-WEEK confirmed total per week — the base actually being scaled (may differ from
   # the reporting-triangle observed). The completeness factor is derived from THIS base so the
@@ -401,7 +490,13 @@ nowcast_zone_week_epinowcast <- function(zone_week, linelist,
     dplyr::summarise(.zw_conf = sum(confirmed, na.rm = TRUE), .groups = "drop")
   # Cap the multiplier (matches the deterministic nowcast's 5x) so a heavily under-observed week
   # cannot explode the multiplicative step or the suspected series; any shortfall against
-  # nowcast_mean is made up by the additive residual, which also lifts a zero-count current week.
+  # nowcast_mean is made up by the additive residual below.
+  # NOTE: the residual does NOT lift a zero-count week. The 2026-09-17 rewrite made it
+  # proportional to the clipped EXCESS (.zw_conf * pmin(pmax(factor,1) - .fac_cap, .fac_cap)),
+  # which is identically 0 whenever factor <= 5 — so a week with confirmed = 0 stays 0, as it
+  # must: with no observed cases there is no spatial pattern to distribute a correction over,
+  # and fabricating one would invent cases in zones with no evidence. (The previous wording
+  # promised the opposite and described code that no longer exists.)
   .fac_cap <- 5
 
   out <- zone_week %>%
@@ -410,22 +505,49 @@ nowcast_zone_week_epinowcast <- function(zone_week, linelist,
     dplyr::left_join(dplyr::select(.recent, health_zone, .share), by = "health_zone") %>%
     dplyr::mutate(
       cv     = dplyr::coalesce(cv, 0),
-      # Completeness factor RELATIVE TO THE ZONE-WEEK CONFIRMED TOTAL, >= 1 (nowcast can't undercut
-      # the observed count) and capped. Weeks with no nowcast row (older, fully observed) get 1.
-      factor = dplyr::if_else(is.na(.nc_mean), 1,
-                              pmin(pmax(.nc_mean / pmax(.zw_conf, 1), 1), .fac_cap)),
+      # DIMENSIONLESS completeness factor from the triangle's own base (>= 1: a nowcast cannot
+      # undercut what has already been reported), capped. Weeks with no nowcast row (older, fully
+      # observed) get 1. Being scale-free, it applies to the zone-week base without reconciliation.
+      factor = dplyr::if_else(is.na(.nc_factor), 1,
+                              pmin(pmax(.nc_factor, 1), .fac_cap)),
+      # trunc_weight is the reciprocal of the CAPPED multiplier, i.e. the completeness of the
+      # MULTIPLICATIVE step only. If the cap ever binds (raw factor > 5) the realised national
+      # correction exceeds 5x through the additive residual, so trunc_weight would read 0.2
+      # and UNDERSTATE the correction actually applied — run_all.R prints mean(trunc_weight)
+      # as the nowcast summary and beta_weighting = "completeness" consumes it. The schema is
+      # deliberately NOT widened for this (zone_week flows into many consumers); instead the
+      # cap-binding weeks are reported explicitly below, so the discrepancy cannot be silent.
       trunc_weight = 1 / factor,
-      # RESIDUAL national deficit the capped multiplicative step leaves against nowcast_mean,
-      # measured on the SAME zone-week base it scales (not the triangle observed) so the national
-      # corrected total meets nowcast_mean. Redistributed by the recent-share prior — this is also
-      # what lifts a zero-count current week (0 x factor = 0), the very week the nowcast is for.
-      .resid = dplyr::if_else(is.na(.nc_mean), 0,
-                              pmax(.nc_mean - dplyr::coalesce(.zw_conf, 0) * factor, 0)),
+      # The multiplicative step now reconciles by construction, so the additive residual carries
+      # ONLY the mass the 5x cap clips off. It is redistributed by the recent-confirmed share
+      # rather than proportionally, because a week that needs >5x correction is one where the
+      # observed spatial pattern is least informative.
+      # Residual = the mass the 5x cap clips. Bounded by a second cap so a pathological factor
+      # cannot fabricate an unbounded case count through the additive channel.
+      .resid = dplyr::if_else(is.na(.nc_factor), 0,
+                              dplyr::coalesce(.zw_conf, 0) *
+                                pmin(pmax(pmax(.nc_factor, 1) - .fac_cap, 0), .fac_cap)),
       confirmed_nc = confirmed * factor + .resid * dplyr::coalesce(.share, 0),
       suspected_nc = if ("suspected" %in% names(.)) suspected * factor else NA_real_,
       correction_uncertainty = cv > 0.25
     ) %>%
-    dplyr::select(-factor, -cv, -.nc_mean, -.zw_conf, -.share, -.resid)
+    # `cv` is RETAINED (renamed) rather than dropped: it is the coefficient of variation of
+    # the weekly NATIONAL nowcast total implied by epinowcast's 90% interval, and it is the
+    # only magnitude of nowcast uncertainty this pipeline produces. Discarding it forced every
+    # downstream model to treat a corrected count as if it were observed data.
+    dplyr::select(-factor, -.nc_factor, -.zw_conf, -.share, -.resid) %>%
+    dplyr::rename(nowcast_cv = cv)
+
+  # Report any week where the 5x cap bound, naming the raw factor: on those weeks
+  # trunc_weight is not the completeness actually achieved (see the note at its definition).
+  .capped <- factors[is.finite(factors$factor) & factors$factor > .fac_cap, , drop = FALSE]
+  if (nrow(.capped))
+    warning(sprintf(paste0("[epinowcast] the %gx multiplier cap bound on %d week(s) (raw factor ",
+                           "up to %.2f: %s); trunc_weight reports %.2f there, understating the ",
+                           "realised correction, which the additive residual completes."),
+                    .fac_cap, nrow(.capped), max(.capped$factor, na.rm = TRUE),
+                    paste(format(.capped$week_start), collapse = ", "), 1 / .fac_cap),
+            call. = FALSE)
 
   attr(out, "nowcast_method") <- "epinowcast"
   attr(out, "epinowcast_factors") <- factors

@@ -55,13 +55,21 @@ ensemble_forecasts <- function(fc_long, members, combine = c("mean", "median"),
   key_cols   <- intersect(c("fold_id", "cutoff", "training_cutoff",
                             "health_zone", "horizon"), names(d))
   val_cols   <- intersect(c("mu_forecast", "mu_wk0", "p_invasion", "p_case_invasion",
-                            "p_infection_invasion",
                             "q05", "q20", "q25", "q75", "q80", "q95"), names(d))
-  # issue_date / lead_days are constant within a (fold_id, cutoff, horizon) target
-  # (one issue date per daily fold), so carry them through unchanged like the
-  # outcome columns — otherwise the daily-backtest ensemble rows would lose them.
+  # issue_date / window_days are constant within a (fold_id, cutoff, horizon) target
+  # (one issue date per daily fold), so carry them through unchanged like the outcome
+  # columns — otherwise the daily-backtest ensemble rows would lose them. "lead_days" is
+  # accepted too: it is the former name of window_days (renamed because it carried the window
+  # LENGTH, not a lead time), so an ensemble built over an older forecast frame still carries
+  # the column instead of silently dropping it.
+  # eval_age_days / eval_reliable are properties of the FOLD's outcome window, constant
+  # within (fold_id, cutoff, horizon) exactly like is_new_invasion, so they carry through
+  # unchanged. Without them the ensemble rows would be the only rows in the frame with no
+  # reliability label, and every consumer that restricts to settled rounds (the deployment
+  # recalibration, the truncation sensitivity) would silently drop the ensembles entirely.
   carry_cols <- intersect(c("is_new_invasion", "was_active_before",
-                            "issue_date", "lead_days"), names(d))
+                            "issue_date", "window_days", "lead_days",
+                            "eval_age_days", "eval_reliable"), names(d))
   agg <- if (combine == "mean") function(x) mean(x, na.rm = TRUE) else
                                 function(x) stats::median(x, na.rm = TRUE)
 
@@ -70,10 +78,38 @@ ensemble_forecasts <- function(fc_long, members, combine = c("mean", "median"),
   # e.g. one non-NA member and two NA members is NOT emitted as a "2-member"
   # ensemble. `min_members` then genuinely guards against 1-member combinations.
   guard_col <- intersect(c("p_invasion", "p_case_invasion",
-                           "p_infection_invasion", "mu_forecast"),
+                           "mu_forecast"),
                          val_cols)[1]
   d$.valid <- if (is.na(guard_col)) 1L else as.integer(!is.na(d[[guard_col]]))
 
+  # DROP INVALID ROWS BEFORE AGGREGATING, do not merely count them. `.valid` gated the member
+  # COUNT but not which rows entered each column's aggregate, so an ensemble row could mix
+  # member sets across columns: with members at p_invasion = 0.1/0.2/NA and
+  # mu_forecast = 0.1/0.2/0.3, the emitted row had .n_members = 2, p_invasion = 0.15 (2-member
+  # mean) and mu_forecast = 0.2 (3-member mean) — and 1 - exp(-0.2) = 0.181 != 0.15, so the two
+  # columns of one published row described different ensembles.
+  .n_drop <- sum(d$.valid == 0L)
+  if (.n_drop > 0L) {
+    message(sprintf("[ensemble] %s: %d member row(s) with no usable %s excluded from every aggregate.",
+                    label, .n_drop, guard_col))
+    d <- d[d$.valid == 1L, , drop = FALSE]
+    if (!nrow(d)) return(NULL)
+  }
+
+  # WHY EACH COLUMN IS POOLED INDEPENDENTLY, and why `1 - exp(-mu_forecast) != p_invasion`
+  # on an ensemble row. That is NOT an inconsistency to be "corrected": it is the same Jensen
+  # gap every MEMBER row already carries. In 21_bayesian_renewal.R,
+  #     mu_forecast = colMeans(cum)          (posterior mean of the cumulative hazard)
+  #     p_invasion  = colMeans(1 - exp(-cum)) (posterior mean of the probability)
+  # and for a right-skewed hazard posterior these are far apart — measured on the shipped LFO,
+  # ~5% of rows (mostly h=2) have mu_forecast > 20 alongside p_invasion < 0.05, because a few
+  # draws with enormous hazard dominate E[cum] while p is bounded at 1.
+  #
+  # Linear pooling of EACH summary is exactly right for a mixture of member posteriors: by
+  # linearity of expectation the mean of the members' E[cum] IS the mixture's E[cum], and the
+  # mean of their E[p] IS the mixture's E[p] (verified numerically to full precision). Deriving
+  # one column from the other would replace a correct posterior mean with a Jensen-biased
+  # transform of the other one.
   g <- d %>% dplyr::group_by(dplyr::across(dplyr::all_of(key_cols)))
   out <- g %>%
     dplyr::summarise(
@@ -82,8 +118,28 @@ ensemble_forecasts <- function(fc_long, members, combine = c("mean", "median"),
       # weighted) twice, so `min_members` stays a true member-count guard.
       .n_members = dplyr::n_distinct(method[.valid == 1L]),
       dplyr::across(dplyr::all_of(val_cols), agg),
-      dplyr::across(dplyr::all_of(carry_cols), ~ dplyr::first(.x)),
+      # first NON-NA, not first: a member emitting is_new_invasion = NA at a target where others
+      # carry the outcome would otherwise make the ensemble row unscorable.
+      dplyr::across(dplyr::all_of(carry_cols),
+                    ~ { .v <- .x[!is.na(.x)]; if (length(.v)) .v[1] else .x[1] }),
       .groups = "drop") %>%
+    # MEMBERSHIP MUST NOT VARY BY CELL. `min_members` lets a cell through on a SUBSET of the
+    # members, so an ensemble could be a 3-model average at one (fold x zone) and a 2-model
+    # average at the next -- a different estimator per row, scored as one method, and the
+    # cells where a member dropped out are exactly the hard ones. Verified harmless on the
+    # shipped run (all 10,056 targets carry 3 of 3) precisely because nothing had yet caused a
+    # member to drop out; the rule permitted it silently. Report any cell that is short, so a
+    # ragged ensemble is visible instead of being averaged away.
+    { .short <- dplyr::filter(., .n_members >= min_members &
+                                 .n_members < max(.n_members, na.rm = TRUE))
+      if (nrow(.short))
+        warning(sprintf(paste0("[ensemble] %s: %d of %d target cells combine only %s of %d ",
+                               "members, so this ensemble is not one estimator across the ",
+                               "scored set. Check why members are missing before publishing."),
+                        label, nrow(.short), nrow(.),
+                        paste(sort(unique(.short$.n_members)), collapse = "/"),
+                        max(.$.n_members, na.rm = TRUE)), call. = FALSE)
+      . } %>%
     dplyr::filter(.n_members >= min_members) %>%
     dplyr::select(-.n_members) %>%
     dplyr::mutate(method = label,

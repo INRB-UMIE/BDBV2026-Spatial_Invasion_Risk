@@ -45,31 +45,98 @@ first_case_from_zone_week <- function(zone_week_raw) {
 #'
 #' @return tibble(method, horizon, fold_id, cutoff, n_atrisk, n_events,
 #'   base_rate, auc_pr, auc_pr_skill, hit_at_k, prec_at_k, mean_rank_of_truth).
-spatiotemporal_skill <- function(lfo_results, k = 5L) {
+#' @param common_support restrict to the (fold x zone) cells EVERY method covers
+#'   (invasion_common_cells(), 16_invasion_eval.R), so per-fold skill is comparable ACROSS
+#'   methods. TRUE by default and it must stay that way for anything published: this function
+#'   feeds skill_over_time.csv and plot_skill_over_time(), which keeps only the top six
+#'   methods BY THIS MEAN. Scored on native folds the three structural baselines keep the
+#'   earliest origin that the rolling-predictor floor denies every Bayesian model, and that
+#'   origin is far easier -- per-fold auc_pr_skill there is 0.688 / 0.647 / 0.523 for
+#'   Distance-B1 / Gravity-B4 / Adjacency-B7 against their own 11-fold means of
+#'   0.197 / 0.206 / 0.062. It inflates Gravity-B4's mean by 17.8% and Distance-B1's by 20.7%,
+#'   moving them from 5th and 9th of 23 to 14th and 15th. As shipped, Gravity-B4 entered the
+#'   published panel at rank 5 and displaced Bayes-M16-fill-med; on aligned folds it does not
+#'   appear at all. This is the same defect fixed in 16_invasion_eval.R, which did not reach
+#'   here because this module scores independently.
+spatiotemporal_skill <- function(lfo_results, k = 5L, common_support = TRUE) {
   stopifnot(all(c("method", "horizon", "fold_id", "cutoff", "health_zone",
                   "p_invasion", "is_new_invasion") %in% names(lfo_results)))
   d <- lfo_results %>%
     dplyr::filter(is.finite(p_invasion))
   if ("was_active_before" %in% names(d))
     d <- d %>% dplyr::filter(!as.logical(was_active_before) %in% TRUE)
+  if (isTRUE(common_support)) {
+    if (!exists("invasion_common_cells", mode = "function"))
+      stop("[skill] common_support = TRUE but invasion_common_cells() is not loaded ",
+           "(16_invasion_eval.R). Skipping the restriction silently would publish a ",
+           "per-fold skill panel whose methods are scored on different origins.",
+           call. = FALSE)
+    # Resolved per horizon from the SAME frame that is scored, then applied as one filter.
+    .keep <- unlist(lapply(sort(unique(d$horizon)), function(h) {
+      cl <- invasion_common_cells(lfo_results, h)
+      if (!length(cl)) character(0) else paste(h, cl, sep = "\r")
+    }), use.names = FALSE)
+    if (length(.keep))
+      d <- d[paste(d$horizon, d$fold_id, d$health_zone, sep = "\r") %in% .keep, , drop = FALSE]
+  }
 
   d %>%
     dplyr::group_by(method, horizon, fold_id, cutoff) %>%
     dplyr::group_modify(function(g, ...) {
       y <- as.integer(g$is_new_invasion); p <- g$p_invasion
       n <- length(y); n_pos <- sum(y, na.rm = TRUE)   # na.rm: never NA the guard
-      o <- order(p, decreasing = TRUE); yo <- y[o]
-      topk <- head(yo, k)
       ap <- .auc_pr(p, y)
-      rk <- rank(-p, ties.method = "max")             # pessimistic on zero-ties (1 = highest)
+      # TWO tie conventions, because the two things they serve are different:
+      #   rk_max ("max") is the OPERATIONAL rank — a zone counts as inside the top K only when
+      #     monitoring K zones necessarily includes it. Top-K membership below uses this, as do
+      #     .ranking_metrics() and lead_time_analysis().
+      #   rk_avg ("average") is the REPORTING rank, and it is what
+      #     .ranking_metrics()'s mean_rank_of_truth uses (16_invasion_eval.R). A truth tied at
+      #     p = 0 with hundreds of other zones should sit at the middle of its tie group, not
+      #     at its far end.
+      # These used to be one vector: this per-fold series published a "mean rank of invaded
+      # zones" computed under "max" while the pooled table published the same-named quantity
+      # under "average", so the two disagreed for exactly the models whose scores tie —
+      # Distance-B1 (24 exact zeros) and Adjacency-B7.
+      rk     <- rank(-p, ties.method = "max")         # pessimistic on zero-ties (1 = highest)
+      rk_avg <- rank(-p, ties.method = "average")     # reporting rank, matches 16's
+      # Top-K membership from the TIE-AWARE rank already computed above, not from
+      # head(order(p), k). order() breaks ties by row position, so the previous form made
+      # hit/prec/recall@K depend on zone ordering while mean_rank_of_truth beside it was
+      # tie-aware — the two disagreed on the same fold. `rk <= k` credits a zone only if
+      # monitoring K zones necessarily includes it, matching .ranking_metrics()
+      # (16_invasion_eval.R) and lead_time_analysis() below.
+      inK  <- rk <= k
+      nk   <- sum(inK)
+      hits <- sum(y[inK])
       tibble::tibble(
         n_atrisk = n, n_events = n_pos, base_rate = n_pos / max(n, 1),
         auc_pr = ap, auc_roc = .auc_roc(p, y),
-        auc_pr_skill = if (n_pos > 0) ap / (n_pos / n) else NA_real_,
-        hit_at_k  = if (n_pos > 0) as.integer(sum(topk) > 0) else NA_integer_,
-        prec_at_k = if (n_pos > 0) sum(topk) / k else NA_real_,
-        recall_at_k = if (n_pos > 0) sum(topk) / n_pos else NA_real_,
-        mean_rank_of_truth = if (n_pos > 0) mean(rk[y == 1]) else NA_real_)
+        # PREVALENCE-NORMALISED to [0,1], not the raw lift ap / base_rate.
+        #
+        # The lift's attainable MAXIMUM is n / n_pos, which across this outbreak's folds runs
+        # from 71 (500 at risk, 7 events) to 465 (465 at risk, 1 event). Plotted over time it is
+        # therefore dominated by how many invasions happened to land in a fold, not by how well
+        # the model ranked — and it REVERSES the true ordering: fold 1 (auc_pr 0.665) drew at
+        # 47.5 while fold 4 (auc_pr 0.559, strictly worse) drew at 135.5, 2.9x higher. That is
+        # the retained skill_over_time_auc_pr_skill figure, whose question is "does discrimination
+        # improve as the outbreak matures?".
+        #
+        # (ap - base) / (1 - base) is the standard skill form: 0 = no better than prevalence,
+        # 1 = perfect, comparable across folds. On the two folds above it gives 0.660 and 0.557 —
+        # the correct ordering. NOTE: the POOLED auc_pr_skill in 16_invasion_eval.R is left as a
+        # lift, which is defensible there because every method is scored on one shared pool with
+        # one base rate; only the per-fold series needed this.
+        auc_pr_skill = if (n_pos > 0 && n_pos < n) (ap - n_pos / n) / (1 - n_pos / n) else NA_real_,
+        # The raw lift is retained as its own column so nothing that used it is silently changed.
+        auc_pr_lift  = if (n_pos > 0) ap / (n_pos / n) else NA_real_,
+        hit_at_k  = if (n_pos > 0) as.integer(hits > 0) else NA_integer_,
+        # Denominator is the REALISED top-K size, not k: a fold with fewer than k at-risk
+        # zones (or a tie group straddling the boundary) has nk < k, and dividing by k
+        # would understate precision for a reason that has nothing to do with the model.
+        prec_at_k = if (n_pos > 0 && nk > 0) hits / nk else if (n_pos > 0) 0 else NA_real_,
+        recall_at_k = if (n_pos > 0) hits / n_pos else NA_real_,
+        mean_rank_of_truth = if (n_pos > 0) mean(rk_avg[y == 1]) else NA_real_)
     }) %>%
     dplyr::ungroup() %>%
     dplyr::mutate(cutoff = as.Date(cutoff)) %>%

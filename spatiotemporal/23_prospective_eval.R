@@ -35,8 +35,11 @@ wilson_ci <- function(k, n, conf = 0.95) {
 #'
 #' Bins predicted probabilities and, per bin, reports the mean predicted probability
 #' and the observed invasion frequency with a Wilson interval. A perfectly calibrated
-#' forecast lies on the 45-degree line; systematic over-prediction (as the manuscript
-#' reports, calibration-in-the-large 1.64x/1.94x) shows as points below it.
+#' forecast lies on the 45-degree line; systematic over-prediction shows as points below it.
+#' (The magnitude is NOT quoted here: calibration-in-the-large is published per model and
+#' horizon in invasion_evaluation.csv and moves every run. The figures that show it read it
+#' from there; a docstring that hard-codes a pair of values, and attributes them to "the
+#' manuscript", goes stale the first time the record grows.)
 #'
 #' @param pred numeric predicted probabilities in [0,1] (at-risk zone-forecasts).
 #' @param obs  0/1 realised invasion outcomes, same length as pred.
@@ -65,7 +68,9 @@ reliability_curve <- function(pred, obs, n_bins = 10L, conf = 0.95) {
 #' Per time bucket (week/origin), the predicted EXPECTED number of new invasions is
 #' the sum of at-risk zones' invasion probabilities; the observed number is the count
 #' of realised first cases. Systematic divergence and its drift over time expose the
-#' over-prediction the fixed-beta model incurs as susceptibles depletes (links §3.6/§4.2).
+#' over-prediction a fixed-beta hazard incurs over a growing record (links §3.6/§4.2). NOTE:
+#' susceptible depletion is NOT modelled anywhere in this pipeline — the drift is a property
+#' of holding beta fixed while the at-risk set and the import force change, not of depletion.
 #'
 #' @param df data.frame with columns: time (week/origin key), p_invasion, invaded (0/1).
 #' @return data.frame(time, expected, observed, n_atrisk, ratio) sorted by time.
@@ -73,14 +78,23 @@ aggregate_count_calibration <- function(df) {
   stopifnot(all(c("time", "p_invasion", "invaded") %in% names(df)))
   d <- df[is.finite(df$p_invasion) & !is.na(df$invaded), , drop = FALSE]
   if (!nrow(d)) return(data.frame())
-  g <- split(d, d$time)
-  out <- lapply(names(g), function(tk) {
-    x <- g[[tk]]; ex <- sum(x$p_invasion); ob <- sum(x$invaded)
+  # ORDER THE TIME KEY NATIVELY. This used to split() and then order(res$time); split()
+  # names are always CHARACTER, so the sort was lexicographic — with >= 10 keys that puts
+  # "10","11","12" between "1" and "2". run_all.R passes as.character(fold_id) and there
+  # are 12 folds, so forecast_count_calibration_h1.csv was written mis-ordered on every
+  # run: a table whose ENTIRE purpose is to show expected-vs-observed DRIFT over time,
+  # read in the wrong time order. Numeric-looking keys now sort numerically; anything else
+  # (e.g. ISO "YYYY-MM-DD" week starts, which sort correctly as text) falls back to sort().
+  keys <- unique(as.character(d$time))
+  .num <- suppressWarnings(as.numeric(keys))
+  keys <- if (!anyNA(.num)) keys[order(.num)] else sort(keys)
+  tchr <- as.character(d$time)
+  out <- lapply(keys, function(tk) {
+    x <- d[tchr == tk, , drop = FALSE]; ex <- sum(x$p_invasion); ob <- sum(x$invaded)
     data.frame(time = tk, expected = ex, observed = ob, n_atrisk = nrow(x),
                ratio = ifelse(ob > 0, ex / ob, NA_real_))
   })
-  res <- do.call(rbind, out)
-  res[order(res$time), , drop = FALSE]
+  do.call(rbind, out)
 }
 
 #' Prospective check: were zones invaded AFTER the last CV cutoff ranked highly
@@ -106,9 +120,16 @@ prospective_invasion_check <- function(forecast_df, invaded_after, top_k = 15L) 
   if ("rank_med" %in% names(fd) && any(is.finite(fd$rank_med))) {
     fd$.rank <- fd$rank_med
   } else if ("p_invasion" %in% names(fd)) {
+    # ties.method = "max", not "average": `in_topk` below is an OPERATIONAL claim — the
+    # zone would have been on a top-K watch-list — and a zone is only genuinely inside a
+    # top-K list if monitoring K zones necessarily includes it. With "average" a zone
+    # buried in a tie group (e.g. the many zones at p_invasion == 0 with no mobility
+    # pathway) could be credited to the watch-list it could not actually have made.
+    # Matches lead_time_analysis() (19) and .ranking_metrics() (16); this feeds the
+    # headline "n/N invaded-after-cutoff zones were in the top-15" statement.
     atrisk <- is.finite(fd$p_invasion)
     fd$.rank <- NA_real_
-    fd$.rank[atrisk] <- rank(-fd$p_invasion[atrisk], ties.method = "average")
+    fd$.rank[atrisk] <- rank(-fd$p_invasion[atrisk], ties.method = "max")
   } else stop("forecast_df needs rank_med or p_invasion")
   n_atrisk <- sum(is.finite(fd$.rank))
   hit <- fd[fd$health_zone %in% invaded_after & is.finite(fd$.rank), , drop = FALSE]
