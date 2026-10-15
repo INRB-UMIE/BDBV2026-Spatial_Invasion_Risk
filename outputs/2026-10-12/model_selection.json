@@ -1,7 +1,7 @@
 {
   "pipeline": "spatiotemporal",
   "conditional_variant": false,
-  "generated_at": "2026-10-14T14:19:37+0000",
+  "generated_at": "2026-10-15T00:17:07+0000",
   "selection_rule": "Among methods covering the most horizons (partial-CV methods excluded), drop 'spiky' models whose worst-horizon mean rank-of-truth exceeds 1.5x the field median; among the survivors the winner is the lowest CV COMPOSITE — within each horizon models are ranked by AUC-PR skill (desc), mean rank-of-truth (asc) and log score (asc), the three ranks are summed within horizon and then summed across horizons — with ties broken by higher total AUC-PR skill, then lower total rank-of-truth, then lower log score. Gates fall back to the ungated set if they would leave nothing. Log-score axis: RECALIBRATED (16b prequential delta; INVASION_SELECT_ON_RECAL=TRUE), so the axis measures refinement rather than calibration-in-the-large.",
   "horizons_pooled": [1, 2],
   "evaluation_source": {
@@ -43,7 +43,7 @@
   "featured": {
     "bayesian": {
       "method": "Bayes-M14-fill-geo",
-      "auc_pr_skill_sum": 70.84,
+      "auc_pr_skill_sum": 70.92,
       "per_horizon": [
         {
           "horizon": 1,
@@ -81,7 +81,7 @@
     },
     "headline": {
       "method": "Bayes-M14-fill-geo",
-      "auc_pr_skill_sum": 70.84,
+      "auc_pr_skill_sum": 70.92,
       "per_horizon": [
         {
           "horizon": 1,
@@ -114,17 +114,17 @@
     {
       "rank": 1,
       "method": "Bayes-M14-fill-geo-tvar1",
-      "auc_pr_skill_sum": 70.84,
-      "rank_of_truth_max": 30.99,
+      "auc_pr_skill_sum": 70.92,
+      "rank_of_truth_max": 30.96,
       "eligible": true,
       "n_horizons": 2,
       "per_horizon": [
         {
           "horizon": 1,
-          "auc_pr": 0.2174,
-          "auc_pr_skill": 43.03,
-          "mean_rank_of_truth": 23.41,
-          "log_score": 0.0195,
+          "auc_pr": 0.2176,
+          "auc_pr_skill": 43.07,
+          "mean_rank_of_truth": 23.43,
+          "log_score": 0.0194,
           "log_score_used": 0.02,
           "rank_aucpr_skill": 2,
           "rank_rank_of_truth": 2,
@@ -132,11 +132,11 @@
         },
         {
           "horizon": 2,
-          "auc_pr": 0.2712,
-          "auc_pr_skill": 27.8,
-          "mean_rank_of_truth": 30.99,
+          "auc_pr": 0.2717,
+          "auc_pr_skill": 27.85,
+          "mean_rank_of_truth": 30.96,
           "log_score": 0.0356,
-          "log_score_used": 0.0374,
+          "log_score_used": 0.0373,
           "rank_aucpr_skill": 3,
           "rank_rank_of_truth": 2,
           "rank_log_score": 3

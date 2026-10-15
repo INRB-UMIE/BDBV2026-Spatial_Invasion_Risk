@@ -1,6 +1,6 @@
 # Model selection — spatiotemporal
 
-_Generated 2026-10-14T14:19:37+0000_
+_Generated 2026-10-15T00:17:07+0000_
 
 **Featured Bayesian model (lowest non-spiky CV composite, recalibrated log-score axis):** `Bayes-M14-fill-geo`
 **Best renewal model:** _none cross-validated in this evaluation_
@@ -28,7 +28,7 @@ _Generated 2026-10-14T14:19:37+0000_
 
 | Rank | Model | AUC-PR skill (Σ) | Non-spiky | AUC-PR skill (h1/2) | Rank-of-truth (h1/2) | Log-score (h1/2) |
 |---|---|---|---|---|---|---|
-| 1 | `Bayes-M14-fill-geo-tvar1` | 70.84 | yes | 43.0 / 27.8 | 23.4 / 31.0 | 0.019 / 0.036 |
+| 1 | `Bayes-M14-fill-geo-tvar1` | 70.92 | yes | 43.1 / 27.9 | 23.4 / 31.0 | 0.019 / 0.036 |
 | 2 | `Bayes-M14-fill-geo-tvrw1` | 71.07 | yes | 43.6 / 27.5 | 23.4 / 30.9 | 0.019 / 0.035 |
 | 3 | `Bayes-M14-fill-geo` | 68.31 | yes | 39.8 / 28.5 | 24.2 / 32.0 | 0.020 / 0.037 |
 | 4 | `Bayes-M14-fill-geo-gtlong` | 67.57 | yes | 38.9 / 28.7 | 24.2 / 31.9 | 0.020 / 0.037 |
