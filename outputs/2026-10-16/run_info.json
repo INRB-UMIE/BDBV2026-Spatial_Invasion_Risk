@@ -1,7 +1,7 @@
 {
   "pipeline": "spatiotemporal",
   "conditional_variant": false,
-  "generated_at": "2026-10-17T00:14:26+0000",
+  "generated_at": "2026-10-19T15:19:06+0000",
   "linelist_snapshot": {
     "folder": "LINELIST_16102026",
     "processed_at": "2026-10-16T12:00:00",
@@ -17,11 +17,11 @@
   },
   "data_date_range": {
     "first": "2026-04-30",
-    "last": "2026-10-15"
+    "last": "2026-10-16"
   },
   "n_health_zones_total": 519,
-  "n_health_zones_invaded": 66,
-  "n_confirmed_cases": 9441,
+  "n_health_zones_invaded": 67,
+  "n_confirmed_cases": 9635,
   "health_zones_invaded": [
     "Adja",
     "Alimbongo",
@@ -88,7 +88,8 @@
     "Viadana",
     "Vuhovi",
     "Wamba",
-    "Wanierukula"
+    "Wanierukula",
+    "Wapinda"
   ],
   "forecast_horizons_weeks": [
     1,
@@ -160,9 +161,9 @@
   },
   "generation_time_primary": "medium",
   "onset_imputation": {
-    "confirmed_pct": 21.7,
+    "confirmed_pct": 23.3,
     "linelist_pct": 17.9,
-    "n_sitrep_rows": 445,
+    "n_sitrep_rows": 639,
     "mode": "resolver_growth",
     "mechanism": "the shared truncation- and interval-censoring-corrected DHIS2 onset-to-sample delay fit, growth-tilted"
   },
