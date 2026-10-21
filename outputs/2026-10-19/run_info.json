@@ -1,7 +1,7 @@
 {
   "pipeline": "spatiotemporal",
   "conditional_variant": false,
-  "generated_at": "2026-10-20T03:21:32+0000",
+  "generated_at": "2026-10-21T01:25:12+0000",
   "linelist_snapshot": {
     "folder": "LINELIST_19102026",
     "processed_at": "2026-10-19T12:00:00",
@@ -21,7 +21,7 @@
   },
   "n_health_zones_total": 519,
   "n_health_zones_invaded": 66,
-  "n_confirmed_cases": 9729,
+  "n_confirmed_cases": 9810,
   "health_zones_invaded": [
     "Adja",
     "Alimbongo",
@@ -160,9 +160,9 @@
   },
   "generation_time_primary": "medium",
   "onset_imputation": {
-    "confirmed_pct": 22.7,
+    "confirmed_pct": 23.3,
     "linelist_pct": 18,
-    "n_sitrep_rows": 563,
+    "n_sitrep_rows": 644,
     "mode": "resolver_growth",
     "mechanism": "the shared truncation- and interval-censoring-corrected DHIS2 onset-to-sample delay fit, growth-tilted"
   },
