@@ -1,7 +1,7 @@
 {
   "pipeline": "spatiotemporal",
   "conditional_variant": false,
-  "generated_at": "2026-10-21T01:25:13+0000",
+  "generated_at": "2026-10-21T23:13:28+0000",
   "selection_rule": "Among methods covering the most horizons (partial-CV methods excluded), drop 'spiky' models whose worst-horizon mean rank-of-truth exceeds 1.5x the field median; among the survivors the winner is the lowest CV COMPOSITE — within each horizon models are ranked by AUC-PR skill (desc), mean rank-of-truth (asc) and log score (asc), the three ranks are summed within horizon and then summed across horizons — with ties broken by higher total AUC-PR skill, then lower total rank-of-truth, then lower log score. Gates fall back to the ungated set if they would leave nothing. Log-score axis: RECALIBRATED (16b prequential delta; INVASION_SELECT_ON_RECAL=TRUE), so the axis measures refinement rather than calibration-in-the-large.",
   "horizons_pooled": [1, 2],
   "evaluation_source": {
@@ -15,15 +15,15 @@
     "bayesian_pick_raw": {
       "method": "Bayes-M14-fill-geo",
       "log_score_axis": "log_score",
-      "composite": 9,
-      "margin_over_runner_up": 2,
+      "composite": 8,
+      "margin_over_runner_up": 4,
       "cascade_kernel": "M14-fill"
     },
     "bayesian_pick_recal": {
       "method": "Bayes-M14-fill-geo",
       "log_score_axis": "log_score_recal",
-      "composite": 10,
-      "margin_over_runner_up": 3,
+      "composite": 11,
+      "margin_over_runner_up": 1,
       "cascade_kernel": "M14-fill"
     },
     "pick_stable_across_axes": true,
@@ -43,7 +43,7 @@
   "featured": {
     "bayesian": {
       "method": "Bayes-M14-fill-geo",
-      "auc_pr_skill_sum": 78,
+      "auc_pr_skill_sum": 77.84,
       "per_horizon": [
         {
           "horizon": 1,
@@ -81,7 +81,7 @@
     },
     "headline": {
       "method": "Bayes-M14-fill-geo",
-      "auc_pr_skill_sum": 78,
+      "auc_pr_skill_sum": 77.84,
       "per_horizon": [
         {
           "horizon": 1,
@@ -114,16 +114,16 @@
     {
       "rank": 1,
       "method": "Bayes-M14-fill-geo-tvar1",
-      "auc_pr_skill_sum": 78,
-      "rank_of_truth_max": 26.56,
+      "auc_pr_skill_sum": 77.84,
+      "rank_of_truth_max": 26.57,
       "eligible": true,
       "n_horizons": 2,
       "per_horizon": [
         {
           "horizon": 1,
-          "auc_pr": 0.2202,
-          "auc_pr_skill": 45.92,
-          "mean_rank_of_truth": 19.42,
+          "auc_pr": 0.2196,
+          "auc_pr_skill": 45.81,
+          "mean_rank_of_truth": 19.47,
           "log_score": 0.018,
           "log_score_used": 0.0181,
           "rank_aucpr_skill": 2,
@@ -132,12 +132,12 @@
         },
         {
           "horizon": 2,
-          "auc_pr": 0.2933,
-          "auc_pr_skill": 32.08,
-          "mean_rank_of_truth": 26.56,
+          "auc_pr": 0.2929,
+          "auc_pr_skill": 32.04,
+          "mean_rank_of_truth": 26.57,
           "log_score": 0.0318,
           "log_score_used": 0.032,
-          "rank_aucpr_skill": 1,
+          "rank_aucpr_skill": 2,
           "rank_rank_of_truth": 3,
           "rank_log_score": 2
         }
@@ -169,7 +169,7 @@
           "mean_rank_of_truth": 26.46,
           "log_score": 0.0312,
           "log_score_used": 0.0325,
-          "rank_aucpr_skill": 2,
+          "rank_aucpr_skill": 1,
           "rank_rank_of_truth": 2,
           "rank_log_score": 4
         }

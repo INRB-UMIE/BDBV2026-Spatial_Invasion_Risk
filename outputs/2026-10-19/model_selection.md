@@ -1,6 +1,6 @@
 # Model selection — spatiotemporal
 
-_Generated 2026-10-21T01:25:13+0000_
+_Generated 2026-10-21T23:13:28+0000_
 
 **Featured Bayesian model (lowest non-spiky CV composite, recalibrated log-score axis):** `Bayes-M14-fill-geo`
 **Best renewal model:** _none cross-validated in this evaluation_
@@ -17,8 +17,8 @@ _Generated 2026-10-21T01:25:13+0000_
 | Horizons pooled | 1, 2 |
 | Selection rule | Among methods covering the most horizons (partial-CV methods excluded), drop 'spiky' models whose worst-horizon mean rank-of-truth exceeds 1.5x the field median; among the survivors the winner is the lowest CV COMPOSITE — within each horizon models are ranked by AUC-PR skill (desc), mean rank-of-truth (asc) and log score (asc), the three ranks are summed within horizon and then summed across horizons — with ties broken by higher total AUC-PR skill, then lower total rank-of-truth, then lower log score. Gates fall back to the ungated set if they would leave nothing. Log-score axis: RECALIBRATED (16b prequential delta; INVASION_SELECT_ON_RECAL=TRUE), so the axis measures refinement rather than calibration-in-the-large. |
 | Log-score axis | recalibrated (INVASION_SELECT_ON_RECAL = TRUE) |
-| Pick under RAW axis | `Bayes-M14-fill-geo` (kernel M14-fill, composite 9, margin 2) |
-| Pick under RECALIBRATED axis | `Bayes-M14-fill-geo` (kernel M14-fill, composite 10, margin 3) |
+| Pick under RAW axis | `Bayes-M14-fill-geo` (kernel M14-fill, composite 8, margin 4) |
+| Pick under RECALIBRATED axis | `Bayes-M14-fill-geo` (kernel M14-fill, composite 11, margin 1) |
 | Axis sensitivity | none — the same model wins on both axes |
 | Cross-check (Bayesian) | OK — matches pipeline pick `Bayes-M14-fill-geo` |
 | Cross-check (renewal) | not run this session (standalone) |
@@ -28,7 +28,7 @@ _Generated 2026-10-21T01:25:13+0000_
 
 | Rank | Model | AUC-PR skill (Σ) | Non-spiky | AUC-PR skill (h1/2) | Rank-of-truth (h1/2) | Log-score (h1/2) |
 |---|---|---|---|---|---|---|
-| 1 | `Bayes-M14-fill-geo-tvar1` | 78.00 | yes | 45.9 / 32.1 | 19.4 / 26.6 | 0.018 / 0.032 |
+| 1 | `Bayes-M14-fill-geo-tvar1` | 77.84 | yes | 45.8 / 32.0 | 19.5 / 26.6 | 0.018 / 0.032 |
 | 2 | `Bayes-M14-fill-geo-tvrw1` | 78.88 | yes | 46.8 / 32.1 | 19.5 / 26.5 | 0.018 / 0.031 |
 | 3 | `Bayes-M14-fill-geo-gtlong` | 72.14 | yes | 41.5 / 30.6 | 19.9 / 26.9 | 0.019 / 0.033 |
 | 4 | `Bayes-M14-fill-geo` | 74.04 | yes | 43.3 / 30.7 | 19.9 / 27.0 | 0.019 / 0.034 |
