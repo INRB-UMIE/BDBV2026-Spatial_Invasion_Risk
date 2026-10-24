@@ -1,6 +1,6 @@
 # Run info — spatiotemporal
 
-_Generated 2026-10-22T23:33:54+0000_
+_Generated 2026-10-23T22:59:25+0000_
 
 | Key | Value |
 |---|---|
@@ -12,7 +12,7 @@ _Generated 2026-10-22T23:33:54+0000_
 | Data date range (onset/sample) | 2026-04-30 to 2026-10-21 |
 | Health zones (spine) | 519 |
 | **Health zones invaded** | **66** |
-| Confirmed cases | 9876 |
+| Confirmed cases | 9918 |
 | Forecast horizons | 1, 2 week(s) ahead |
 | **CV folds** | **20** (in-memory (this run)) |
 | CV fold cutoffs | 2026-05-08, 2026-05-15, 2026-05-22, 2026-05-29, 2026-06-05, 2026-06-12, 2026-06-19, 2026-06-26, 2026-07-03, 2026-07-10, 2026-07-17, 2026-07-24, 2026-07-31, 2026-08-07, 2026-08-14, 2026-08-21, 2026-08-28, 2026-09-04, 2026-09-11, 2026-09-18 |
