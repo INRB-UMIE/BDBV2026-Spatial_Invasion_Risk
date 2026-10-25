@@ -1,7 +1,7 @@
 {
   "pipeline": "spatiotemporal",
   "conditional_variant": false,
-  "generated_at": "2026-10-24T22:28:08+0000",
+  "generated_at": "2026-10-25T21:49:57+0000",
   "selection_rule": "Among methods covering the most horizons (partial-CV methods excluded), drop 'spiky' models whose worst-horizon mean rank-of-truth exceeds 1.5x the field median; among the survivors the winner is the lowest CV COMPOSITE — within each horizon models are ranked by AUC-PR skill (desc), mean rank-of-truth (asc) and log score (asc), the three ranks are summed within horizon and then summed across horizons — with ties broken by higher total AUC-PR skill, then lower total rank-of-truth, then lower log score. Gates fall back to the ungated set if they would leave nothing. Log-score axis: RECALIBRATED (16b prequential delta; INVASION_SELECT_ON_RECAL=TRUE), so the axis measures refinement rather than calibration-in-the-large.",
   "horizons_pooled": [1, 2],
   "evaluation_source": {
@@ -15,8 +15,8 @@
     "bayesian_pick_raw": {
       "method": "Bayes-M14-fill-geo",
       "log_score_axis": "log_score",
-      "composite": 9,
-      "margin_over_runner_up": 4,
+      "composite": 10,
+      "margin_over_runner_up": 2,
       "cascade_kernel": "M14-fill"
     },
     "bayesian_pick_recal": {
@@ -43,7 +43,7 @@
   "featured": {
     "bayesian": {
       "method": "Bayes-M14-fill-geo",
-      "auc_pr_skill_sum": 85.23,
+      "auc_pr_skill_sum": 85.86,
       "per_horizon": [
         {
           "horizon": 1,
@@ -81,7 +81,7 @@
     },
     "headline": {
       "method": "Bayes-M14-fill-geo",
-      "auc_pr_skill_sum": 85.23,
+      "auc_pr_skill_sum": 85.86,
       "per_horizon": [
         {
           "horizon": 1,
@@ -114,28 +114,28 @@
     {
       "rank": 1,
       "method": "Bayes-M14-fill-geo-tvar1",
-      "auc_pr_skill_sum": 85.23,
-      "rank_of_truth_max": 32.03,
+      "auc_pr_skill_sum": 85.86,
+      "rank_of_truth_max": 32.15,
       "eligible": true,
       "n_horizons": 2,
       "per_horizon": [
         {
           "horizon": 1,
-          "auc_pr": 0.2702,
-          "auc_pr_skill": 50.98,
-          "mean_rank_of_truth": 26.19,
-          "log_score": 0.0194,
-          "log_score_used": 0.0194,
+          "auc_pr": 0.2728,
+          "auc_pr_skill": 51.47,
+          "mean_rank_of_truth": 26.27,
+          "log_score": 0.0193,
+          "log_score_used": 0.0193,
           "rank_aucpr_skill": 2,
           "rank_rank_of_truth": 3,
           "rank_log_score": 1
         },
         {
           "horizon": 2,
-          "auc_pr": 0.334,
-          "auc_pr_skill": 34.25,
-          "mean_rank_of_truth": 32.03,
-          "log_score": 0.0325,
+          "auc_pr": 0.3354,
+          "auc_pr_skill": 34.39,
+          "mean_rank_of_truth": 32.15,
+          "log_score": 0.0324,
           "log_score_used": 0.0321,
           "rank_aucpr_skill": 1,
           "rank_rank_of_truth": 3,
