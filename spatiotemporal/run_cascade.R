@@ -1,46 +1,149 @@
 # =============================================================================
 # run_cascade.R — 3-MONTH SPATIAL INVASION CASCADE: master driver
-# BDBV 2026 DRC · runs modules 30–36 of PLAN_3MONTH_INVASION.md
+# BDBV 2026 DRC · runs modules 30-36 plus 38 (urban scenarios) and 39 (the cascade
+#                 evaluation figure); see PLAN_3MONTH_INVASION.md
 #
 # Usage:  Rscript spatiotemporal/run_cascade.R
 # Env flags:
-#   CASCADE_N_MC          MC iterations (default 1000; smoke 40)
-#   CASCADE_SMOKE=1       fast path (M=40, heavy stages off)
-#   CASCADE_LAYER_CACHE   optional rds path to cache/reuse the reconstructed layer
+#   CASCADE_N_MC          MC iterations (default 2000; smoke 40)
+#   CASCADE_SMOKE=1       fast path (M=40, heavy stages off, calibration off)
+#   CASCADE_LAYER_CACHE   optional rds path to cache/reuse the reconstructed layer (reused only
+#                         when its key matches this run). That copy is written only when the
+#                         layer is REBUILT, and before the run id is stamped, so it is a build
+#                         cache, not a provenance-stamped product. The layer actually used is
+#                         ALWAYS written, stamped with this run's id, to the canonical
+#                         cascade/layer_cache_v2.rds — the ONLY layer file 41_kindiv_sweep.R and
+#                         make_manuscript_figure2_cascade.R read.
+#   CASCADE_CALIBRATE=0   run DELIBERATELY uncalibrated (delta = 16b's short-horizon factor).
+#                         Without it a calibration that fails or fits nothing STOPS the run.
 #   CASCADE_RUN_BACKTEST / CASCADE_RUN_SBC / CASCADE_RUN_SENS  (default 1; smoke 0)
+#
+# PROVENANCE. Every run gets a CASCADE_RUN_ID, written to diagnostics/cascade_run_stamp.json at
+# the start (status "running") and at the end (status "complete"), and stamped into the
+# validation CSV/JSON products and the canonical layer cache. Each stage DELETES its own previous
+# outputs when it starts, so a stage that fails or is switched off leaves nothing behind for a
+# later script to mistake for this run's. What the two downstream readers check:
+#   * make_manuscript_figure2_cascade.R stops unless cascade_run_stamp.json has status "complete"
+#     and this analysis date, and cascade_backtest_detail.csv and the canonical layer cache carry
+#     that stamp's cascade_run_id.
+#   * 41_kindiv_sweep.R does NOT read the stamp. It stops if the canonical layer's
+#     cascade_key[["analysis_date"]] is missing or is not this analysis date, and it takes
+#     delta/psi from cascade_calibration.json only when that JSON's cascade_run_id equals the
+#     layer's and its analysis_date is this one — otherwise it recalibrates (one brms fit per
+#     origin).
 # =============================================================================
 suppressPackageStartupMessages({ library(tidyverse); library(here) })
 ST_DIR <- Sys.getenv("CASCADE_ST_DIR", unset = file.path(here::here(), "spatiotemporal"))
 t0 <- Sys.time(); tick <- function(m) message(sprintf("[cascade t=%.0fs] %s",
                                      as.numeric(Sys.time() - t0, units = "secs"), m))
-`%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 
 source(file.path(ST_DIR, "00_config.R"))
-for (f in c("01_data_prep.R","02_epi_params.R","03_mobility_matrices.R","04_nowcasting.R",
-            "04b_epinowcast.R","05_baseline_models.R","06_simple_models.R",
-            "15_workhorse.R","16_invasion_eval.R","18_ensemble.R",
-            "19_spacetime_eval.R","20_forecast_detail.R","21_bayesian_renewal.R",
-            "17_invasion_viz.R",
-            # 16b supplies fit_invasion_delta()/bootstrap_invasion_delta()/RECAL_BAND, which the
-            # cascade calibration reuses (the hazard-scale transform is the same family).
-            "16b_invasion_recalibration.R","22_daily_reissue.R",
-            "30_projection_config.R","31_source_dynamics.R","32_cascade_simulator.R",
-            "33_cascade_eval.R","33b_cascade_calibration.R",
-            "34_conditional_queries.R","35_cascade_viz.R","36_report.R",
-            "38_urban_scenarios.R","39_cascade_eval_figure.R"))
-  source(file.path(ST_DIR, f))
+# ONE module list, from 00_config.R (PIPELINE_MODULES, through "cascade"), plus the cascade's own
+# suite. This file used to hand-keep its list; it drifted when the time-varying forms' engine
+# (21c_frailty_models.R) joined the model layer, so a featured form's hazard could not be fitted
+# here. quiet = FALSE: 30_projection_config.R's warnings (form/kernel fallbacks) must be seen.
+load_pipeline_modules("cascade",
+                      extra = c("17_invasion_viz.R", "33_cascade_eval.R",
+                                "33b_cascade_calibration.R", "34_conditional_queries.R",
+                                "35_cascade_viz.R", "36_report.R", "38_urban_scenarios.R",
+                                "39_cascade_eval_figure.R"),
+                      dir = ST_DIR, quiet = FALSE)
 SMOKE <- identical(Sys.getenv("CASCADE_SMOKE"), "1")
+
+# ---- run identity, stamp, and stale-output hygiene -------------------------
+CASCADE_RUN_ID <- sprintf("%s-%d", format(Sys.time(), "%Y%m%dT%H%M%S"), Sys.getpid())
+.cd <- file.path(OUT_CASCADE, "diagnostics")
+dir.create(.cd, recursive = TRUE, showWarnings = FALSE)
+.stamp_path <- file.path(.cd, "cascade_run_stamp.json")
+.write_stamp <- function(status) {
+  jsonlite::write_json(list(cascade_run_id = CASCADE_RUN_ID,
+                            analysis_date = format(as.Date(ANALYSIS_DATE)),
+                            kernel = CASCADE_KERNEL, form = CASCADE_FORM, status = status,
+                            written_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")),
+                       .stamp_path, auto_unbox = TRUE, pretty = TRUE)
+}
+.write_stamp("running")
+# Provenance columns for every validation table this run writes. A reader compares them with
+# cascade_run_stamp.json, so a file left by an earlier run can never pass as this run's.
+.stamp_df <- function(d) {
+  if (is.null(d) || !is.data.frame(d)) return(d)
+  d$cascade_run_id <- CASCADE_RUN_ID
+  d$analysis_date  <- format(as.Date(ANALYSIS_DATE))
+  d
+}
+# Delete a stage's previous outputs at the moment the stage starts. A stage that then fails, or
+# is switched off, leaves NOTHING behind — rather than last run's files, which later stages and
+# figure scripts used to read as current (cascade_backtest_detail.csv from a run three weeks
+# older than the reach tables beside it).
+.reset_outputs <- function(paths, what) {
+  paths <- paths[file.exists(paths)]
+  if (length(paths)) {
+    file.remove(paths)
+    message(sprintf("[cascade] %s: removed %d previous output(s) before running: %s",
+                    what, length(paths), paste(basename(paths), collapse = ", ")))
+  }
+  invisible(paths)
+}
 RUN_BT   <- !SMOKE && !identical(Sys.getenv("CASCADE_RUN_BACKTEST"), "0")
 RUN_SBC  <- !SMOKE && !identical(Sys.getenv("CASCADE_RUN_SBC"), "0")
 RUN_SENS <- !SMOKE && !identical(Sys.getenv("CASCADE_RUN_SENS"), "0")
 RUN_URBAN <- !identical(Sys.getenv("CASCADE_RUN_URBAN"), "0")
 tick(sprintf("sourced (M=%d, backtest=%s sbc=%s sens=%s)", CASCADE_N_MC, RUN_BT, RUN_SBC, RUN_SENS))
+# A FRAILTY FORM IS NEVER FEATURED (TV_FORMS `selectable`, 00_config.R; since 2026-10-19). One that
+# arrives from model_selection.json, not from the CASCADE_FORM override, comes from a selection run
+# before that rule, so the main projection would be built on a model the selection can no longer
+# pick. The override stays available for a deliberate sensitivity run (30 warns).
+if (!nzchar(Sys.getenv("CASCADE_FORM")) && !identical(CASCADE_FORM, "fixed") &&
+    !isTRUE(Filter(function(x) identical(x$form, CASCADE_FORM), TV_FORMS)[[1]]$selectable))
+  stop(sprintf(paste0("[run_cascade] model_selection.json features the '%s' form, which is a secondary ",
+                      "analysis and is never featured: that selection predates the rule. Re-run ",
+                      "run_all.R first (or set CASCADE_FORM explicitly for a sensitivity run)."),
+               CASCADE_FORM), call. = FALSE)
 
 # ---- reconstruct modelling layer (cache option) ----------------------------
+# THE CACHE IS KEYED. A layer is a function of the analysis date, the line-list snapshot, the
+# onset-imputation seed/stratum and the data definition; one built for any other combination has
+# a different week grid and different counts. It used to be loaded unconditionally whenever the
+# file existed, so a cache from an earlier frame silently became this run's modelling layer.
+.layer_key <- c(analysis_date = format(as.Date(ANALYSIS_DATE)),
+                linelist_snapshot = tryCatch(rlang::hash(readLines(LINELIST_JSON, warn = FALSE)),
+                                             error = function(e) NA_character_),
+                random_seed = as.character(get0("RANDOM_SEED", ifnotfound = NA)),
+                # The onset-imputation draw has its own seed (defaults to RANDOM_SEED, 00_config.R);
+                # a layer built under another onset draw has different counts.
+                onset_impute_seed = as.character(get0("ONSET_IMPUTE_SEED",
+                                                      ifnotfound = get0("RANDOM_SEED", ifnotfound = NA))),
+                onset_impute_stratum = as.character(get0("ONSET_IMPUTE_STRATUM",
+                                                         ifnotfound = NULL) %||% "pooled"),
+                data_definition_tag = as.character(get0("DATA_DEFINITION_TAG", ifnotfound = "")),
+                # The CODE that builds the layer (data prep, delays and truncation, nowcast): a
+                # change there (e.g. the truncation's support renormalisation) changes the layer
+                # without changing any of the keys above.
+                code = paste(unname(tools::md5sum(file.path(ST_DIR,
+                  c("00_config.R", "01_data_prep.R", "02_epi_params.R", "03_mobility_matrices.R",
+                    "04_nowcasting.R")))),
+                  collapse = "|"),
+                # The MOBILITY MATRICES the layer carries are read from OUT_MOBILITY: a kernel
+                # rebuilt since the cache was written changes the layer under the same code.
+                mobility = local({
+                  .ks <- sort(unique(c(CASCADE_KERNEL, CASCADE_KERNEL_FALLBACK, CASCADE_SENS_KERNELS)),
+                              method = "radix")
+                  paste(unname(tools::md5sum(file.path(OUT_MOBILITY, sprintf("mobility_%s.rds", .ks)))),
+                        collapse = "|")
+                }))
 CACHE <- Sys.getenv("CASCADE_LAYER_CACHE")
+layer <- NULL
 if (nzchar(CACHE) && file.exists(CACHE)) {
-  layer <- readRDS(CACHE); tick("layer loaded from cache")
-} else {
+  layer <- readRDS(CACHE)
+  if (!identical(layer$cascade_key, .layer_key)) {
+    message(sprintf(paste0("[cascade] layer cache %s was built for a different frame (key %s vs this ",
+                           "run's %s); REBUILDING it rather than reuse a stale layer."),
+                    CACHE, paste(layer$cascade_key %||% "none", collapse = "|"),
+                    paste(.layer_key, collapse = "|")))
+    layer <- NULL
+  } else tick("layer loaded from cache (key matches this run)")
+}
+if (is.null(layer)) {
   dat <- prep_all_data()
   gt_pmfs <- compute_all_gt_pmfs(); osrm_mat <- load_osrm()
   zones_all <- names(dat$pop)
@@ -88,26 +191,58 @@ if (nzchar(CACHE) && file.exists(CACHE)) {
   layer <- list(zone_week_nc = zw, zones_all = zones_all, covariates = dat$covariates,
                 gt_pmfs = gt_pmfs, osrm_mat = osrm_mat, mobility_matrices = mobility_matrices,
                 pop = dat$pop, ll = dat$ll)
+  layer$cascade_key <- .layer_key
+  # The optional build cache. Written HERE, before cascade_run_id is set below, and never
+  # re-written when it is loaded, so it carries no run id; nothing downstream reads it (they read
+  # the canonical copy written below).
   if (nzchar(CACHE)) saveRDS(layer, CACHE)
   tick("layer reconstructed")
 }
+# THE LAYER THIS RUN USED IS ALWAYS WRITTEN to the canonical path the later stages read
+# (41_kindiv_sweep.R, make_manuscript_figure2_cascade.R), stamped with this run's id and week
+# grid. It was written only when CASCADE_LAYER_CACHE was set — never on a default run_all.R pass —
+# so those scripts rebuilt per-origin baselines from whatever layer a hand-run had left there,
+# on a different week grid from the backtest they were drawn beside.
+layer$cascade_run_id <- CASCADE_RUN_ID
+layer$week_grid <- sort(unique(as.Date(layer$zone_week_nc$week_start)))
+.canon_cache <- file.path(OUT_CASCADE, "layer_cache_v2.rds")
+tryCatch(saveRDS(layer, .canon_cache),
+         error = function(e) stop("[cascade] could not write the layer cache ", .canon_cache, ": ",
+                                  conditionMessage(e), call. = FALSE))
 zones_all <- layer$zones_all; gt_pmfs <- layer$gt_pmfs
 province_map <- load_province_map()
 zone_province <- setNames(province_map$province, province_map$nom)
 vuln <- compute_vulnerability_index(layer$covariates, zones_all, layer$osrm_mat)
 
 # ---- fit covariate-bearing hazards (featured + sensitivity kernels) --------
+# ON THE VALIDATED MODEL'S DESIGN: rolling as-of predictors with the shared as-of truncation,
+# exactly as run_all.R builds the cross-validated and deployed fits (trunc_delay = .trunc_asof).
+# This used to fit on the shared count matrix, so the hazard's intercept — and therefore the
+# meaning of every delta carried into it, 16b's short-horizon factor included — was on a
+# different scale from the model it claims to reuse (cascade_invasion_design(), 33b).
+.trunc_asof <- cascade_asof_truncation(layer$ll)
 kernels <- unique(c(CASCADE_KERNEL, if (RUN_SENS) CASCADE_SENS_KERNELS))
 kernels <- kernels[kernels %in% names(layer$mobility_matrices)]
 iter_fit <- if (SMOKE) 800L else 2000L
 designs <- list(); fits <- list()
+# THE FEATURED MODEL'S FORM (CASCADE_FORM, 30_projection_config.R): fixed beta, or the
+# time-varying form the two-stage selection featured, refitted with the cascade's covariates on
+# every kernel through the one entry point the calibration origins use (cascade_fit_hazard()).
 for (kern in kernels) {
-  designs[[kern]] <- build_invasion_design(layer$zone_week_nc, layer$mobility_matrices, gt_pmfs,
-                       layer$covariates, layer$osrm_mat, zones_all, mob = kern, gt = CASCADE_GT)
-  fits[[kern]] <- fit_bayes_renewal(designs[[kern]], cov_spec = CASCADE_COV_SPEC,
-                                    iter = iter_fit, chains = 2L)
+  designs[[kern]] <- cascade_invasion_design(layer$zone_week_nc, layer, kernel = kern,
+                                             gt = CASCADE_GT, linelist = layer$ll,
+                                             trunc_delay = .trunc_asof)
+  fits[[kern]] <- cascade_fit_hazard(designs[[kern]], layer$zone_week_nc, layer, kernel = kern,
+                                     gt = CASCADE_GT, linelist = layer$ll,
+                                     trunc_delay = .trunc_asof, iter = iter_fit)
 }
-tick(sprintf("fitted %d kernel hazard(s): %s", length(fits), paste(names(fits), collapse=",")))
+if (is.null(fits[[CASCADE_KERNEL]]))
+  stop(sprintf("[run_cascade] the %s hazard on the featured kernel %s did not fit.", CASCADE_FORM,
+               CASCADE_KERNEL), call. = FALSE)
+fits <- Filter(Negate(is.null), fits)
+ROLLING_ON <- isTRUE(designs[[CASCADE_KERNEL]]$rolling_predictors)
+tick(sprintf("fitted %d kernel hazard(s): %s (form %s; rolling as-of predictors: %s)", length(fits),
+             paste(names(fits), collapse=","), CASCADE_FORM, if (ROLLING_ON) "ON" else "OFF"))
 
 # The import term in the CONJUGATE estimator's denominator needs a hazard scale, so a delta is
 # resolved first. It comes from 16b's prequential recalibration of the short-horizon model — not
@@ -117,8 +252,9 @@ tick(sprintf("fitted %d kernel hazard(s): %s", length(fits), paste(names(fits), 
 # Its reach is now much smaller than it was. The import term feeds estimate_zone_reff(), which
 # is a DIAGNOSTIC: the reproduction number the projection transmits on comes from EpiNow2 and
 # never passes through delta_imp. The note further down records any disagreement with the
-# out-of-sample delta rather than warning, because the two are no longer required to agree.
-delta_imp <- tryCatch(cascade_fit_delta(cov_model = paste0("Bayes-", CASCADE_KERNEL, "-geo")),
+# K-week delta fitted on the calibration windows rather than warning, because the two are no
+# longer required to agree.
+delta_imp <- tryCatch(cascade_fit_delta(cov_model = cascade_hazard_label(CASCADE_KERNEL)),
                       error = function(e) NA_real_)
 if (!is.finite(delta_imp) || delta_imp <= 0) {
   warning("[run_cascade] no recalibration factor available for the import term; using the RAW ",
@@ -137,41 +273,82 @@ prep  <- cascade_prepare(layer, fits[[CASCADE_KERNEL]], designs[[CASCADE_KERNEL]
                          kernel = CASCADE_KERNEL, gt = CASCADE_GT)
 
 # ---- CALIBRATION (33b) -----------------------------------------------------
-# ONE fitted parameter. delta is fitted OUT OF SAMPLE so that the cascade's expected
-# new-invasion count over held-out K-week windows matches the count that actually occurred,
-# and is then verified on the same origins. psi (frontier saturation) is no longer fitted:
-# it was not identifiable on this outbreak and is fixed at 0 (30_projection_config.R).
-# The h=1 refit and 16b's short-horizon factor are both retained as comparisons, so the gap
-# between a one-week and a K-week level is reported rather than hidden. Set
-# CASCADE_CALIBRATE=0 to skip calibration entirely (delta then falls back to the
-# short-horizon factor), e.g. when no held-out origin is reporting-complete yet.
+# ONE fitted parameter. delta is fitted against the realised new-invasion counts over K-week
+# windows at the calibration origins, so the cascade's expected count matches the count that
+# actually occurred. Each origin's hazard and R are trained on counts as known at that origin (or,
+# where that reconstruction fails, the final-count slice — recorded per origin as
+# training_source), but delta itself is FITTED to those windows' outcomes: the level calibration
+# is IN-SAMPLE, and re-scoring the same windows cannot test it. psi (frontier saturation)
+# is no longer fitted: it was not identifiable on this outbreak and is fixed at 0
+# (30_projection_config.R). The h=1 refit and 16b's short-horizon factor are both retained as
+# comparisons, so the gap between a one-week and a K-week level is reported rather than hidden.
+#
+# A FAILED CALIBRATION IS FATAL. It used to be caught by a tryCatch that only warned, so when
+# cascade_calibration_origins() went missing (a stray `if (!exists("%||%"))` in 33b swallowed
+# its definition) the run carried on with 16b's ONE-week factor, zero calibration uncertainty,
+# and a report that read "fitted OUT OF SAMPLE against realised NA-week invasion counts". The
+# same now holds for a calibration that returns but fits nothing (no settled K-week origin).
+# CASCADE_CALIBRATE=0 runs deliberately uncalibrated — e.g. when no held-out origin is settled
+# yet — and every product then says so (`calibrated = FALSE`); CASCADE_SMOKE=1 implies it.
+.reset_outputs(file.path(.cd, c("cascade_calibration.json", "cascade_delta_fit.json",
+                                "cascade_delta_fit_curve.csv", "cascade_psi_fit.json",
+                                "cascade_psi_fit_curve.csv", "cascade_calibration_origin_reff.csv",
+                                "cascade_calibration_per_origin.csv",
+                                "cascade_calibration_pooled.csv",
+                                "cascade_calibration_reliability.csv",
+                                "cascade_psi_pace_diagnostic_curve.csv")), "calibration")
 CALIB_K  <- as.integer(Sys.getenv("CASCADE_CALIB_K", unset = "6"))
-DO_CALIB <- !SMOKE && !identical(Sys.getenv("CASCADE_CALIBRATE"), "0")
-calib <- if (DO_CALIB)
-  tryCatch(cascade_calibrate(layer, zone_province = zone_province, K = CALIB_K,
+CALIB_DISABLED_BY <- if (SMOKE) "CASCADE_SMOKE=1" else
+                     if (identical(Sys.getenv("CASCADE_CALIBRATE"), "0")) "CASCADE_CALIBRATE=0" else
+                     NA_character_
+DO_CALIB <- is.na(CALIB_DISABLED_BY)
+.calib_fail <- function(why) {
+  .write_stamp(paste("failed: calibration -", why))
+  stop(sprintf(paste0("[run_cascade] calibration FAILED (%s). The 13-week level would be ",
+                      "uncalibrated at the horizon it is read at, so nothing is published. Fix ",
+                      "the cause, or set CASCADE_CALIBRATE=0 to run DELIBERATELY uncalibrated ",
+                      "(every product is then labelled calibrated = FALSE)."), why), call. = FALSE)
+}
+calib <- NULL
+if (DO_CALIB) {
+  calib <- tryCatch(cascade_calibrate(layer, zone_province = zone_province, K = CALIB_K,
              kernel = CASCADE_KERNEL, gt = CASCADE_GT, seed = CASCADE_SEED,
              # 600, not 400: n_mc_report DEFAULTS TO n_mc_search, so the delta search and the
-             # out-of-sample verification use the same Monte-Carlo size and their modelled
-             # counts are comparable. They are NOT identical — the verification runs at an
+             # residual check use the same Monte-Carlo size and their modelled
+             # counts are comparable. They are NOT identical — the residual check runs at an
              # offset seed on purpose (33b, "INDEPENDENT SEED"), so the two differ by Monte-
              # Carlo error. Matching the SIZE is what keeps that error small; at 400 vs 600
              # the report printed 72.96 and 71.7 for one quantity.
              n_mc_search = as.integer(Sys.getenv("CASCADE_CALIB_NMC", unset = "600"))),
-           error = function(e) { warning("[run_cascade] calibration failed (", conditionMessage(e),
-                                 "); falling back to delta-only.", call. = FALSE); NULL }) else NULL
-if (is.null(calib))
-  calib <- list(delta = cascade_fit_delta(cov_model = paste0("Bayes-", CASCADE_KERNEL, "-geo")),
-                psi = CASCADE_PSI, psi_fit = NULL, delta_oos = NULL, delta_prior = NA_real_,
-                report = NULL, origins = list(),
-                delta_info = list(estimator = "not calibrated this run"),
-                note = paste("calibration skipped or failed; delta is 16b's SHORT-HORIZON factor",
-                             "and the 13-week level is therefore uncalibrated at the horizon it",
-                             "is read at; psi at its configured default"))
+           error = function(e) .calib_fail(conditionMessage(e)))
+  if (is.null(calib$delta_oos) || !is.finite(calib$delta_oos$delta %||% NA_real_))
+    .calib_fail(sprintf("no delta could be fitted on settled %d-week held-out outcomes: %s",
+                        CALIB_K, calib$note %||% "no note"))
+} else {
+  # DELIBERATELY uncalibrated. The short-horizon factor is carried WITH its attributes, so its
+  # zone-clustered bootstrap SE still reaches delta_sd_log and the projection's intervals: this
+  # path used to keep only `estimator`, which silently set delta_sd_log to 0 and delta_prior to NA.
+  .d0 <- cascade_fit_delta(cov_model = cascade_hazard_label(CASCADE_KERNEL))
+  calib <- list(delta = .d0, psi = CASCADE_PSI, psi_fit = NULL, delta_oos = NULL,
+                delta_prior = as.numeric(.d0), report = NULL, origins = list(),
+                delta_info = cascade_short_horizon_delta_info(.d0), rolling_predictors = NA,
+                note = sprintf(paste0("calibration DISABLED deliberately (%s): delta is 16b's ",
+                                      "SHORT-HORIZON (1-week) factor, so the 13-week level is ",
+                                      "uncalibrated at the horizon it is read at; psi at its ",
+                                      "configured default"), CALIB_DISABLED_BY))
+  warning("[run_cascade] ", calib$note, call. = FALSE, immediate. = TRUE)
+}
+CALIBRATED <- !is.null(calib$delta_oos) && is.finite(calib$delta_oos$delta %||% NA_real_)
+CALIB_STATUS <- if (!CALIBRATED) {
+  sprintf("not calibrated (disabled: %s)", CALIB_DISABLED_BY)
+} else if (isTRUE(calib$delta_oos$boundary_hit)) {
+  sprintf("calibrated, CENSORED at the %s bound", calib$delta_oos$boundary_side)
+} else if (!isTRUE(calib$delta_oos$converged)) "calibrated, NOT converged" else "calibrated"
 delta <- calib$delta
 psi   <- calib$psi
 # delta_imp (16b's short-horizon factor) built the import term in the CONJUGATE estimator's
-# denominator; `delta` is now fitted out of sample against realised K-week counts and drives the
-# simulated hazard. They are no longer required to agree, and the old >25% warning would fire on
+# denominator; `delta` is now fitted to the realised K-week counts at the calibration origins
+# (in-sample for that level) and drives the simulated hazard. They are no longer required to agree, and the old >25% warning would fire on
 # a legitimate difference.
 #
 # WHY THE COUPLING NO LONGER MATTERS, which is the substantive change: the import term feeds
@@ -182,8 +359,9 @@ psi   <- calib$psi
 # week and the level implied over K weeks disagree — and that belongs in the record.
 if (is.finite(delta) && delta > 0 && is.finite(delta_imp) && delta_imp > 0 &&
     abs(log(delta / delta_imp)) > log(1.25))
-  message(sprintf(paste0("[run_cascade] the out-of-sample %d-week delta (%.3f) differs from the ",
-                         "short-horizon factor the import term was built on (%.3f) by %.0f%%. ",
+  message(sprintf(paste0("[run_cascade] the %d-week delta fitted on the calibration windows ",
+                         "(%.3f) differs from the short-horizon factor the import term was built ",
+                         "on (%.3f) by %.0f%%. ",
                          "This no longer affects R (EpiNow2 supplies it); it records that the ",
                          "one-week and %d-week levels disagree."),
                   CALIB_K, delta, delta_imp, 100 * abs(delta / delta_imp - 1), CALIB_K))
@@ -201,9 +379,9 @@ tick(sprintf("reff R_nat=%.2f | %s | delta_sd_log=%.3f", reff$R_nat, calib$note,
 # The reproduction numbers the projection actually ran on. These were previously not
 # written anywhere: R_eff drives every zone's onward transmission and therefore the whole
 # 13-week extrapolation, and a manuscript cannot report or defend numbers that exist only
-# inside a function call. Recorded per zone with the posterior, the shrinkage diagnostics
-# and the local/imported split, so a reader can see which zones are data-driven and which
-# are carried by the province pool.
+# inside a function call. The single national R is recorded with its posterior; the per-zone
+# file keeps the case/importation bookkeeping and the conjugate estimator's DIAGNOSTICS (which
+# do not drive the projection).
 .cd <- file.path(OUT_CASCADE, "diagnostics")
 dir.create(.cd, recursive = TRUE, showWarnings = FALSE)
 # TWO files, because there are now two different kinds of quantity and writing them in one
@@ -257,6 +435,10 @@ readr::write_csv(tibble::tibble(draw = seq_along(reff$R_draws), R = as.numeric(r
 # reached an artifact, so a manuscript could cite only the single-GT anchor while the run used
 # something else. Each row is one grid point: its generation time, its prior weight, and the R
 # posterior fitted AT that generation time.
+# Removed first: on a default (non-marginalised) run a previous sensitivity run's files would
+# otherwise sit beside this run's single-GT R as though they described it.
+.reset_outputs(file.path(.cd, c("cascade_reff_by_gt.csv", "cascade_reff_gt_marginal.json")),
+               "GT marginalisation")
 if (!is.null(reff$R_draws_by_gt) && length(reff$R_draws_by_gt)) {
   .gq <- function(v, p) unname(stats::quantile(v, p, names = FALSE))
   readr::write_csv(tibble::tibble(
@@ -299,17 +481,20 @@ tick(sprintf(paste0("R written: national EpiNow2 R = %.3f [%.3f, %.3f] over %s..
              reff$n_with_cases, 100 * reff$import_share))
 
 # Persist the whole calibration, including the delta search path (so a censored or
-# non-converged fit is auditable rather than reduced to one scalar) and the
-# out-of-sample verification.
+# non-converged fit is auditable rather than reduced to one scalar) and the held-out
+# residual check (whose COUNT is in-sample for delta; see cascade_calibration_report()).
 .cd <- file.path(OUT_CASCADE, "diagnostics")
 if (!is.null(calib$delta_oos)) {
-  readr::write_csv(calib$delta_oos$curve, file.path(.cd, "cascade_delta_fit_curve.csv"))
-  jsonlite::write_json(calib$delta_oos[setdiff(names(calib$delta_oos), "curve")],
+  readr::write_csv(.stamp_df(calib$delta_oos$curve), file.path(.cd, "cascade_delta_fit_curve.csv"))
+  jsonlite::write_json(c(list(cascade_run_id = CASCADE_RUN_ID,
+                              analysis_date = format(as.Date(ANALYSIS_DATE))),
+                         calib$delta_oos[setdiff(names(calib$delta_oos), "curve")]),
                        file.path(.cd, "cascade_delta_fit.json"),
                        auto_unbox = TRUE, pretty = TRUE, digits = 6)
   if (!isTRUE(calib$delta_oos$converged))
-    warning("[run_cascade] delta did not converge out of sample — the 13-week layer is NOT fit ",
-            "for publication until this is resolved (see cascade_delta_fit.json).", call. = FALSE)
+    warning("[run_cascade] the K-week delta search did not converge — the 13-week layer is NOT ",
+            "fit for publication until this is resolved (see cascade_delta_fit.json).",
+            call. = FALSE)
 }
 # psi is no longer fitted (30_projection_config.R). This block stays so that a run which
 # deliberately re-enables the retired search still writes its path rather than dropping it.
@@ -320,22 +505,32 @@ if (!is.null(calib$psi_fit)) {
                        auto_unbox = TRUE, pretty = TRUE, digits = 6)
 }
 if (!is.null(calib$origin_diagnostics) && NROW(calib$origin_diagnostics))
-  readr::write_csv(calib$origin_diagnostics,
+  readr::write_csv(.stamp_df(calib$origin_diagnostics),
                    file.path(.cd, "cascade_calibration_origin_reff.csv"))
 if (!is.null(calib$report)) {
-  readr::write_csv(calib$report$per_origin, file.path(.cd, "cascade_calibration_per_origin.csv"))
-  readr::write_csv(calib$report$pooled,     file.path(.cd, "cascade_calibration_pooled.csv"))
+  readr::write_csv(.stamp_df(calib$report$per_origin), file.path(.cd, "cascade_calibration_per_origin.csv"))
+  readr::write_csv(.stamp_df(calib$report$pooled),     file.path(.cd, "cascade_calibration_pooled.csv"))
   if (!is.null(calib$report$reliability))
-    readr::write_csv(calib$report$reliability, file.path(.cd, "cascade_calibration_reliability.csv"))
-  tick(paste("calibration verification:", calib$report$note))
+    readr::write_csv(.stamp_df(calib$report$reliability), file.path(.cd, "cascade_calibration_reliability.csv"))
+  tick(paste("calibration residual check (count in-sample):", calib$report$note))
 }
 jsonlite::write_json(list(
     generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
-    kernel = CASCADE_KERNEL, calib_K = CALIB_K,
+    cascade_run_id = CASCADE_RUN_ID, analysis_date = format(as.Date(ANALYSIS_DATE)),
+    kernel = CASCADE_KERNEL, form = CASCADE_FORM, calib_K = CALIB_K,
+    # THE FLAG EVERY CONSUMER BRANCHES ON. FALSE only when calibration was disabled
+    # deliberately (CASCADE_CALIBRATE=0 / smoke); a FAILED calibration stops the run instead.
+    calibrated = CALIBRATED, calibration_status = CALIB_STATUS,
+    calibration_disabled_by = CALIB_DISABLED_BY,
+    # Whether the hazards (production and every calibration origin) were refit on the validated
+    # model's rolling as-of design (cascade_invasion_design()).
+    rolling_predictors = ROLLING_ON,
+    rolling_predictors_origins = calib$rolling_predictors %||% NA,
+    settled_label_age_days = get0("LFO_RELIABLE_EVAL_AGE_DAYS", ifnotfound = NA_integer_),
     delta = as.numeric(delta), delta_info = calib$delta_info, delta_sd_log = delta_sd_log,
     delta_short_horizon = calib$delta_prior,
-    delta_estimator = if (is.null(calib$delta_oos)) "short-horizon factor (no OOS fit)"
-                      else sprintf("out-of-sample %d-week count match", CALIB_K),
+    delta_estimator = if (is.null(calib$delta_oos)) "short-horizon factor (no K-week fit)"
+                      else sprintf("%d-week count match at held-out origins", CALIB_K),
     delta_oos_converged = if (is.null(calib$delta_oos)) NA else isTRUE(calib$delta_oos$converged),
     delta_oos_boundary_hit = if (is.null(calib$delta_oos)) NA
                              else isTRUE(calib$delta_oos$boundary_hit),
@@ -348,14 +543,17 @@ jsonlite::write_json(list(
     psi = psi, psi_fitted = !is.null(calib$psi_fit),
     psi_converged = if (is.null(calib$psi_fit)) NA else isTRUE(calib$psi_fit$converged),
     psi_boundary_hit = if (is.null(calib$psi_fit)) NA else isTRUE(calib$psi_fit$boundary_hit),
-    verification = if (is.null(calib$report)) NULL else as.list(calib$report$pooled),
-    # NOT "verification": the pooled count is the quantity delta was fitted to, so its residual
-    # is in-sample by construction (see cascade_calibration_report). Recorded under a name that
-    # says what it is, with an explicit flag, so nothing downstream can read it as validation.
+    # The pooled residual-check row (cascade_calibration_report()$pooled). RENAMED from
+    # `verification`: the pooled count is the quantity delta was fitted to, so its residual is
+    # in-sample by construction. Recorded under a name that says what it is, with explicit flags,
+    # so nothing downstream can read it as validation. Its AUC-PR / skill columns are the part
+    # delta was not fitted to.
+    count_residual_in_sample = if (is.null(calib$report)) NULL else as.list(calib$report$pooled),
     count_residual_ok        = if (is.null(calib$report)) NA else isTRUE(calib$report$count_residual_ok),
     count_level_in_sample    = if (is.null(calib$report)) NA else isTRUE(calib$report$count_level_in_sample),
     note = calib$note),
-  file.path(.cd, "cascade_calibration.json"), auto_unbox = TRUE, pretty = TRUE, digits = 6, null = "null")
+  file.path(.cd, "cascade_calibration.json"), auto_unbox = TRUE, pretty = TRUE, digits = 6,
+  null = "null", na = "null")
 
 # Naive-pace comparison, retired as an estimator (see 33_cascade_eval.R) and off by default.
 if (identical(Sys.getenv("CASCADE_RUN_PACE_DIAG"), "1")) {
@@ -407,7 +605,13 @@ prov_of <- function(z) zone_province[match(z, names(zone_province))]
 affected_provinces0 <- unique(prov_of(zones_all[base_sim$affected0]))
 agg <- lapply(names(sims), function(sk) {
   sim <- sims[[sk]]; cum <- apply(sim$new_by_week, 2, cumsum)
-  # new provinces reached by 13w (provinces with no affected zone at t0)
+  # Horizons from CASCADE_REPORT_HORIZONS, not the literals 4/8/13: hard-coded row indices
+  # abort with a subscript error (or silently report the wrong weeks) if the reporting
+  # horizons or CASCADE_HORIZON_WEEKS change — and only AFTER every scenario has been simulated.
+  .h <- sort(unique(as.integer(CASCADE_REPORT_HORIZONS)))
+  .h <- .h[.h >= 1L & .h <= nrow(cum)]
+  .hmax <- max(.h)
+  # new provinces reached by the last reporting horizon (provinces with no affected zone at t0)
   # DROP unmapped zones rather than counting them as a province. prov_of() returns NA for any
   # zone absent from province_map; NA survives setdiff() unless it is already in
   # affected_provinces0, so a single unmapped zone being reached added a phantom "newly reached
@@ -415,18 +619,12 @@ agg <- lapply(names(sims), function(sk) {
   # case (34_conditional_queries.R:133); this call did not.
   .provs <- function(z) { pv <- prov_of(z); unique(pv[!is.na(pv)]) }
   newprov <- vapply(seq_len(sim$n_mc), function(m) {
-    zr <- zones_all[!is.na(sim$tau[, m]) & sim$tau[, m] <= 13L]
+    zr <- zones_all[!is.na(sim$tau[, m]) & sim$tau[, m] <= .hmax]
     length(setdiff(.provs(zr), affected_provinces0)) }, numeric(1))
   # ONE consistent estimator throughout: the MEDIAN of the cumulative-new-zone
   # distribution at each horizon (+ 90% predictive band), so 4/8/13w are comparable
   # (means and medians differ for the right-skewed count; do not mix them).
   q <- function(h, p) stats::quantile(cum[h, ], p, names = FALSE)
-  # Horizons from CASCADE_REPORT_HORIZONS, not the literals 4/8/13: hard-coded row indices
-  # abort with a subscript error (or silently report the wrong weeks) if the reporting
-  # horizons or CASCADE_HORIZON_WEEKS change — and only AFTER every scenario has been simulated.
-  .h <- sort(unique(as.integer(CASCADE_REPORT_HORIZONS)))
-  .h <- .h[.h >= 1L & .h <= nrow(cum)]
-  .hmax <- max(.h)
   list(label = CASCADE_SCENARIOS[[sk]]$label,
        new4 = stats::median(cum[.h[1], ]),
        new8 = stats::median(cum[.h[min(2L, length(.h))], ]),
@@ -451,11 +649,15 @@ cascade_map_timetoinvasion(rs_primary)
 # PUBLISH THE BAND, not just the picture. cascade_fig_fanchart() returns the per-week median
 # and 90% interval its ribbon draws; that result was assigned here and never used, so the
 # credible band on a published figure was unreadable as data.
+.reset_outputs(file.path(OUT_CASCADE, "tables", "cascade_newzones_fanchart.csv"), "fan-chart band")
 fan <- cascade_fig_fanchart(sims)
 tryCatch({
   if (!is.null(fan) && nrow(fan)) {
     .fanp <- file.path(OUT_CASCADE, "tables", "cascade_newzones_fanchart.csv")
     dir.create(dirname(.fanp), recursive = TRUE, showWarnings = FALSE)
+    # The primary scenario flagged in the table, so a reader (37_cascade_figure4.R) can pick the
+    # headline total without re-deriving the scenario config.
+    fan$is_primary <- fan$scenario == CASCADE_SCENARIOS[[scP_key]]$label
     readr::write_csv(dplyr::mutate(fan, dplyr::across(dplyr::where(is.numeric), ~ signif(.x, 12))),
                      .fanp)
     message(sprintf("[cascade] wrote the fan-chart band (%d row(s)) -> %s",
@@ -484,21 +686,73 @@ cascade_fig_corridors(flux_net)
 readr::write_csv(cascade_transmission_tree(base_sim), file.path(TAB, "cascade_transmission_tree.csv"))
 tick("gateway + corridors + tree written")
 
+# ---- designed conditional experiment: force-seed a hub NOT YET INVADED --------------
+# THE HUBS MUST BE ZONES THAT CAN STILL BE INVADED. They were taken from the gateway list —
+# head(gateway$health_zone, 2), the currently INFECTED sources — and simulate_cascade() forces
+# only zones that are not already infected, so the "conditional" runs were the baseline under
+# another name: identical across hubs, published as each hub's downstream reach.
+#
+# RULE (stated in the report): CASCADE_HUBS_FOR_COND when set; otherwise the two zones NOT
+# invaded at the projection origin with the largest expected onward seedings in the baseline
+# projection (cascade_gateway_screen()'s out-flux, the flux screen of PLAN §3.7) — the
+# not-yet-invaded zones the projection expects to act as hubs. Each is force-seeded at week 1
+# and its downstream effect is the PAIRED attributable increase over a same-seed, same-M
+# baseline, ranked among zones whose paired 90% interval excludes zero — so the list is the
+# hub's own catchment, not the zones that were already likely without it.
+.reset_outputs(list.files(TAB, pattern = "^cascade_conditional_.*\\.csv$", full.names = TRUE),
+               "conditional hubs")
 conditional <- list()
-for (hub in head(gateway$health_zone, 2L)) {
-  cs <- cascade_conditional_seed(prep, CASCADE_SCENARIOS[[scP_key]], hub, delta, psi = psi,
-                                 n_mc = min(CASCADE_N_MC, if (SMOKE) 40L else 800L),
-                                 pop_vec = layer$pop)
-  rs_c <- cascade_enrich_reach(cs$reach, province_map, vuln, method_label = paste0("cond-", hub))
-  cascade_map_conditional(rs_c, hub)
-  r13 <- cs$reach[cs$reach$horizon == 13L & !cs$reach$was_active_before, ]
-  conditional[[hub]] <- list(top = head(r13$health_zone[order(-r13$p_invasion)], 6))
-  readr::write_csv(rs_c, file.path(TAB, sprintf("cascade_conditional_%s.csv",
-                                    gsub("[^A-Za-z0-9]+","_",hub))))
+.Hc  <- max(CASCADE_REPORT_HORIZONS)
+.scr <- cascade_gateway_screen(base_sim)
+.cond_explicit <- !is.null(get0("CASCADE_HUBS_FOR_COND", ifnotfound = NULL))
+cond_hubs <- if (.cond_explicit) as.character(CASCADE_HUBS_FOR_COND) else
+  head(.scr$health_zone[!.scr$was_active_before & .scr$out_flux > 0], 2L)
+if (!length(cond_hubs)) {
+  warning("[cascade] conditional experiment NOT RUN: no zone outside the current front seeded any ",
+          "onward invasion in the baseline projection, so no hub qualifies under the rule.",
+          call. = FALSE, immediate. = TRUE)
+} else {
+  .n_cond <- min(CASCADE_N_MC, if (SMOKE) 40L else 800L)
+  scP_c   <- CASCADE_SCENARIOS[[scP_key]]
+  # The paired baseline: same seed, same M, same (default) delta_sd_log as the conditional runs.
+  .base_cond <- simulate_cascade(prep, scP_c, n_mc = .n_cond, delta = delta, psi = psi,
+                                 seed = CASCADE_SEED, pop_vec = layer$pop)
+  for (hub in cond_hubs) {
+    cs <- cascade_conditional_seed(prep, scP_c, hub, delta, psi = psi, n_mc = .n_cond,
+                                   seed = CASCADE_SEED, pop_vec = layer$pop)
+    rs_c <- cascade_enrich_reach(cs$reach, province_map, vuln, method_label = paste0("cond-", hub))
+    cascade_map_conditional(rs_c, hub)
+    ctr <- cascade_paired_contrast(.base_cond, cs$sim, horizon = .Hc, exclude = hub)
+    pz  <- ctr$per_zone[ctr$per_zone$eligible & ctr$per_zone$elevated %in% TRUE, , drop = FALSE]
+    pz  <- pz[order(-pz$delta), , drop = FALSE]
+    conditional[[hub]] <- list(
+      top = head(pz$health_zone, 6), n_elevated = nrow(pz),
+      expected_added = ctr$total, expected_added_lo = ctr$lo, expected_added_hi = ctr$hi,
+      paired = isTRUE(ctr$paired), horizon = .Hc, n_mc = .n_cond,
+      baseline_reach = rs_primary$p_case_invasion[rs_primary$health_zone == hub &
+                                                    rs_primary$horizon == .Hc][1],
+      out_flux = .scr$out_flux[match(hub, .scr$health_zone)],
+      rule = if (.cond_explicit) "CASCADE_HUBS_FOR_COND" else "auto: top-2 not-yet-invaded by baseline onward seedings")
+    # The conditional reach table, plus the paired attributable increase at the headline horizon
+    # (joined on horizon, so the 4/8-week rows do not carry a 13-week contrast).
+    .att <- tibble::tibble(health_zone = ctr$per_zone$health_zone, horizon = .Hc,
+                           attributable_delta = ctr$per_zone$delta,
+                           attributable_lo = ctr$per_zone$delta_lo,
+                           attributable_hi = ctr$per_zone$delta_hi,
+                           attributable_elevated = ctr$per_zone$elevated)
+    readr::write_csv(dplyr::left_join(rs_c, .att, by = c("health_zone", "horizon")),
+                     file.path(TAB, sprintf("cascade_conditional_%s.csv",
+                                            gsub("[^A-Za-z0-9]+","_",hub))))
+  }
 }
 tick("conditional hubs written")
 
 # ---- urban-hub invasion scenarios (timing-aware) ---------------------------
+# Previous tables removed whether or not the stage runs: 40_cascade_next_dominoes.R draws
+# manuscript Figure 4 from them, and a disabled or failed stage must not leave last run's urban
+# scenarios beside this run's reach table.
+.reset_outputs(list.files(TAB, pattern = "^urban_(scenario_summary|impact_.*|cases_.*|hub_selection)\\.csv$",
+                          full.names = TRUE), "urban scenarios")
 urban <- NULL
 if (RUN_URBAN) {
   urban <- tryCatch({
@@ -549,10 +803,14 @@ if (RUN_URBAN) {
 # change; the psi axis itself still sweeps psi internally. psi is now fixed at 0, so the
 # baseline is the no-saturation model and the psi axis reports what enabling saturation
 # would do — it is a sensitivity, not a perturbation around a fitted value.
+.reset_outputs(file.path(OUT_CASCADE, "diagnostics",
+                         c("cascade_sensitivity.csv", "cascade_kindiv_sweep.csv",
+                           "cascade_kindiv_sweep_byzone.csv", "cascade_kindiv_sweep_meta.json")),
+               "sensitivity + k_indiv sweep")
 sens <- if (RUN_SENS) tryCatch(cascade_sensitivity(layer, designs, fits, reff, delta,
                         base_reach = reaches[[scP_key]], psi = psi),
                         error = .stage_failed("sensitivity")) else NULL
-if (!is.null(sens)) readr::write_csv(sens, file.path(OUT_CASCADE, "diagnostics", "cascade_sensitivity.csv"))
+if (!is.null(sens)) readr::write_csv(.stamp_df(sens), file.path(OUT_CASCADE, "diagnostics", "cascade_sensitivity.csv"))
 
 # ---- comprehensive individual-offspring overdispersion (k_indiv) sweep ------
 # Dense k grid at the fitted (delta, psi); reuses the production `prep` (no refit).
@@ -565,7 +823,9 @@ if (!is.null(ksweep)) {
   readr::write_csv(ksweep$summary, file.path(OUT_CASCADE, "diagnostics", "cascade_kindiv_sweep.csv"))
   readr::write_csv(ksweep$byzone,  file.path(OUT_CASCADE, "diagnostics", "cascade_kindiv_sweep_byzone.csv"))
   # provenance sidecar (kept in step with the CSVs so kernel/delta/psi never go stale)
-  ksweep_meta <- list(kernel = CASCADE_KERNEL, M = CASCADE_N_MC,
+  ksweep_meta <- list(cascade_run_id = CASCADE_RUN_ID, analysis_date = format(as.Date(ANALYSIS_DATE)),
+                      calibrated = CALIBRATED,
+                      kernel = CASCADE_KERNEL, form = CASCADE_FORM, M = CASCADE_N_MC,
                       k_grid = CASCADE_K_INDIV_SWEEP, k_base = CASCADE_K_INDIV,
                       delta = as.numeric(delta), cal_in_large = attr(delta, "cal_in_large") %||% NA,
                       psi = psi,
@@ -573,6 +833,8 @@ if (!is.null(ksweep)) {
                       psi_boundary_hit = if (is.null(psi_fit)) NA else isTRUE(psi_fit$boundary_hit),
                       psi_horizon_pace_ratio = if (is.null(psi_fit)) NA else psi_fit$horizon_pace_ratio,
                       gate_spearman = gate$spearman_signal, gate_n_signal = gate$n_signal,
+                      gate_x2 = gate$x2, gate_x2_df = gate$x2_df, gate_x2_p = gate$x2_p,
+                      # ~delta by construction: a plumbing check, not calibration (33).
                       gate_level_ratio = gate$level_ratio, gate_pass = isTRUE(gate$pass),
                       scenario = scP_key, seed = CASCADE_SEED)
   jsonlite::write_json(ksweep_meta, file.path(OUT_CASCADE, "diagnostics", "cascade_kindiv_sweep_meta.json"),
@@ -584,16 +846,29 @@ if (!is.null(ksweep)) {
 # Reuses the calibration's held-out origins when they exist, so the per-origin hazards
 # are fitted ONCE rather than twice, and the backtest scores exactly the origins the
 # calibration was fitted on.
+.reset_outputs(c(file.path(OUT_CASCADE, "diagnostics",
+                           c("cascade_backtest.csv", "cascade_backtest_detail.csv",
+                             "cascade_eval_figure_inputs.rds")),
+                 file.path(get0("CASCADE_OUT_DIR", ifnotfound = OUT_DIR), "key_outputs",
+                           "cascade_backtest_per_origin.csv")), "backtest")
 backtest <- if (RUN_BT) tryCatch(cascade_backtest(layer, delta = delta, psi = psi, K = CALIB_K,
                         zone_province = zone_province, linelist = layer$ll,
                         origins = if (length(calib$origins)) calib$origins else NULL),
                         error = .stage_failed("backtest")) else NULL
+# WHETHER THE BACKTEST'S LEVEL IS IN-SAMPLE. When calibration ran, the backtest scores exactly the
+# origins and K delta was fitted on (calib$origins), so its count ratio / calibration-in-the-
+# large is ~1 by construction; only the ranking metrics are out-of-sample. Recorded per row so no
+# consumer has to infer it.
+BT_LEVEL_IN_SAMPLE <- CALIBRATED && length(calib$origins) > 0L
 if (!is.null(backtest)) {
-  readr::write_csv(backtest, file.path(OUT_CASCADE, "diagnostics", "cascade_backtest.csv"))
+  .bt_out <- .stamp_df(backtest); .bt_out$level_in_sample <- BT_LEVEL_IN_SAMPLE
+  readr::write_csv(.bt_out, file.path(OUT_CASCADE, "diagnostics", "cascade_backtest.csv"))
   # per-zone detail (drives the Figure2_cascade capture-curve / mean-rank / top-K panels)
   bt_detail <- attr(backtest, "detail")
-  if (!is.null(bt_detail)) readr::write_csv(bt_detail,
-    file.path(OUT_CASCADE, "diagnostics", "cascade_backtest_detail.csv"))
+  if (!is.null(bt_detail)) {
+    bt_detail <- .stamp_df(bt_detail); bt_detail$level_in_sample <- BT_LEVEL_IN_SAMPLE
+    readr::write_csv(bt_detail, file.path(OUT_CASCADE, "diagnostics", "cascade_backtest_detail.csv"))
+  }
 }
 sbc <- if (RUN_SBC) tryCatch(cascade_sbc(designs[[CASCADE_KERNEL]], n_sbc = 20L),
                         error = .stage_failed("sbc")) else NULL
@@ -602,6 +877,16 @@ tick("validation done")
 # ---- report + key_outputs bundle -------------------------------------------
 ctx <- list(reach_primary = rs_primary, n_mc = CASCADE_N_MC, delta = delta, psi = psi,
             calib = calib, delta_sd_log = delta_sd_log,
+            # Provenance and the flags the report branches on (36_report.R never prints a
+            # calibration claim that these do not support).
+            cascade_run_id = CASCADE_RUN_ID, calibrated = CALIBRATED,
+            # The run's hazard: a context re-rendered later describes THIS run, not the session's.
+            form = CASCADE_FORM, kernel = CASCADE_KERNEL,
+            calibration_status = CALIB_STATUS, calibration_disabled_by = CALIB_DISABLED_BY,
+            rolling_predictors = ROLLING_ON, backtest_level_in_sample = BT_LEVEL_IN_SAMPLE,
+            # Whether the CROSS-VALIDATED model rolls (ROLLING_PREDICTORS): 36_report.R needs it to
+            # say whether a non-rolling cascade hazard is on that model's scale.
+            rolling_predictors_requested = isTRUE(get0("ROLLING_PREDICTORS", ifnotfound = TRUE)),
             gate = gate, agg = agg, gateway = gateway, conditional = conditional,
             sens = sens, ksweep = ksweep, backtest = backtest, sbc = sbc, urban = urban,
             reff = reff, delta_imp = delta_imp)
@@ -626,24 +911,78 @@ if (!is.null(ksweep))
 tryCatch(cascade_fig_evaluation(ctx),
          error = function(e) message("[cascade] evaluation figure skipped: ", conditionMessage(e)))
 
-# key_outputs bundle (mirror the short-horizon key_outputs style)
-KO <- file.path(OUT_DIR, "key_outputs")
+# key_outputs bundle (mirror the short-horizon key_outputs style).
+# CASCADE_OUT_DIR is OUT_DIR unless CASCADE_OUT_ROOT redirected it (30_projection_config.R):
+# the bundle must follow the tables it bundles, or an imputation arm would copy its own
+# sandboxed tables over the published key_outputs.
+KO <- file.path(get0("CASCADE_OUT_DIR", ifnotfound = OUT_DIR), "key_outputs")
 if (!dir.exists(KO)) dir.create(KO, recursive = TRUE)
 figdir <- file.path(OUT_CASCADE, "figures")
 ko_files <- c(file.path(TAB, "cascade_reach_scores_all_zones.csv"),
               file.path(TAB, "cascade_gateway_knockout.csv"),
               file.path(TAB, "urban_scenario_summary.csv"),
+              # The national new-zone TOTAL with its interval: mean, median and the 5th-95th
+              # percentiles of the SIMULATED total per week and scenario. Bundled beside the
+              # per-zone reach scores because a total's interval must come from here — summing
+              # the per-zone p_case_lo/p_case_hi is not an interval for the total.
+              file.path(TAB, "cascade_newzones_fanchart.csv"),
               list.files(figdir, pattern = "^cascade_(reach_map_national_h13|time_to_invasion|newzones_fanchart|scenario_reach_maps_h13|gateway_knockout|corridors)", full.names = TRUE),
               list.files(figdir, pattern = "^(urban_impact_summary|urban_timing_sensitivity|urban_case_burden|urban_seed_r_sweep)", full.names = TRUE))
-for (f in ko_files) if (file.exists(f)) file.copy(f, file.path(KO, basename(f)), overwrite = TRUE)
+for (f in ko_files) {
+  .dst <- file.path(KO, basename(f))
+  if (file.exists(f)) file.copy(f, .dst, overwrite = TRUE)
+  # A bundle entry whose source this run did not produce is STALE — remove the old copy rather
+  # than leave last run's table in key_outputs beside this run's.
+  else if (file.exists(.dst)) {
+    file.remove(.dst)
+    message("[cascade] key_outputs: removed stale ", basename(.dst), " (not produced by this run)")
+  }
+}
 
-# publication-style Figure 4 (cascade): relative-risk map + top-20 ranked reach,
-# written to key_outputs/figures/Figure4_cascade_h{4,8,13}.{pdf,png} (+ data CSVs).
-tryCatch(source(file.path(ST_DIR, "37_cascade_figure4.R")),
-         error = function(e) message("[cascade] Figure4_cascade skipped: ", conditionMessage(e)))
+# THE CASCADE FIGURE SCRIPTS WRITE INTO THE CANONICAL TREE, whatever CASCADE_OUT_ROOT says:
+# 37 targets key_outputs/figures/ and 40 targets key_outputs/manuscript_figures/Figure4 —
+# and 40 DELETES the existing Figure4 when a panel fails. An onset-imputation arm must
+# therefore not run them: arm 7's Figure 4 is not a deliverable, and twenty arms in
+# succession would leave the published figure describing one arbitrary completion. The MI
+# figure is drawn once, from the POOLED tables, by 48/49. Default is on, so an ordinary
+# cascade run is unchanged.
+.run_cascade_figs <- !identical(trimws(Sys.getenv("CASCADE_RUN_FIGURES", "1")), "0")
+if (.run_cascade_figs) {
+  # publication-style Figure 4 (cascade): relative-risk map + top-20 ranked reach,
+  # written to key_outputs/figures/Figure4_cascade_h{4,8,13}.{pdf,png} (+ data CSVs).
+  FIG4C_OK <- tryCatch({ source(file.path(ST_DIR, "37_cascade_figure4.R")); TRUE },
+           error = function(e) { message("[cascade] Figure4_cascade skipped: ", conditionMessage(e))
+                                 FALSE })
 
-# "next dominoes" narrative figure (main-text Figure 4): anchor frontier map + city ranking
-# + per-city watch-lists, written to key_outputs/manuscript_figures/Figure4.{pdf,png} (+ CSV).
-tryCatch(source(file.path(ST_DIR, "40_cascade_next_dominoes.R")),
-         error = function(e) message("[cascade] Figure4 (next dominoes) skipped: ", conditionMessage(e)))
-tick(sprintf("DONE — report + %d key_outputs files + Figure4_cascade + Figure4 (next dominoes)", length(ko_files)))
+  # "next dominoes" narrative figure (main-text Figure 4): anchor frontier map + city ranking
+  # + per-city watch-lists, written to key_outputs/manuscript_figures/Figure4.{pdf,png} (+ CSV).
+  # LAUNCHED AS ITS OWN Rscript, not source()d. 40 is a guarded script (is_script_run()): sourced
+  # from here it only defined its helpers and wrote NOTHING, while the final log line below
+  # announced "Figure4 (next dominoes)" as produced. A child process is how run_all.R runs it
+  # too, and it keeps 40's top-level globals out of this session. Its exit status is reported.
+  .rscript <- file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript")
+  .st40 <- tryCatch(
+    system2(.rscript, c("--no-save", "--no-restore",
+                        shQuote(file.path(ST_DIR, "40_cascade_next_dominoes.R"))),
+            env = c(sprintf("ANALYSIS_DATE=%s", format(as.Date(ANALYSIS_DATE))),
+                    sprintf("CASCADE_ST_DIR=%s", ST_DIR),
+                    # This run's id: the stamp still reads "running" here, and 40 accepts that
+                    # only for the run that launched it (cascade_live_run_id(), 35_cascade_viz.R).
+                    # 37, source()d above, sees CASCADE_RUN_ID as a global instead.
+                    sprintf("CASCADE_RUN_ID=%s", CASCADE_RUN_ID))),
+    error = function(e) { message("[cascade] Figure4 (next dominoes) could not start: ",
+                                  conditionMessage(e)); 127L })
+  FIG4_OK <- identical(as.integer(.st40), 0L)
+  if (!FIG4_OK)
+    warning(sprintf("[cascade] Figure4 (next dominoes) FAILED (exit %s) — see its output above.",
+                    format(.st40)), call. = FALSE, immediate. = TRUE)
+} else {
+  FIG4C_OK <- FIG4_OK <- NA
+  message("[cascade] CASCADE_RUN_FIGURES=0 — Figure4_cascade and Figure4 NOT drawn ",
+          "(tables only; this is the onset-imputation arm path).")
+}
+.write_stamp("complete")
+.fig_word <- function(ok) if (is.na(ok)) "not drawn" else if (isTRUE(ok)) "written" else "FAILED"
+tick(sprintf("DONE (%s; run %s) — report + %d key_outputs file(s); Figure4_cascade %s; Figure4 (next dominoes) %s",
+             CALIB_STATUS, CASCADE_RUN_ID, sum(file.exists(file.path(KO, basename(ko_files)))),
+             .fig_word(FIG4C_OK), .fig_word(FIG4_OK)))

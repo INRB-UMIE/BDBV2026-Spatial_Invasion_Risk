@@ -15,6 +15,10 @@
 #   Lam_i   = (Wᵀ own)_i                          (import force = same own routed out)
 #   mu_i    = delta * exp(eta0_i + gamma_dmin*z_dmin_i(w) + log Lam_i) * sat_i(w)
 #   seed_i  ~ Bernoulli(1 - exp(-mu_i))           (Layer B, at-risk i)
+# Under a featured TIME-VARYING FORM (CASCADE_FORM) the log hazard gains the drift u(w) (RW1,
+# one path per parameter group) and, with a gamma frailty, a never-invaded zone's exp(...) is
+# replaced by its conditional hazard log1p(theta*h/(1 + theta*C_i))/theta, C_i its cumulative
+# hazard (training exposure + the simulated weeks).
 # Verified against predict_bayes_invasion: the (eta0 + gamma*z + logLam) hazard is
 # byte-identical (recon smoke test, cor=1, max|diff|=0).
 #
@@ -25,9 +29,10 @@
 # Precompute the static simulation context (does NOT depend on scenario / draw).
 # @param layer  list(zone_week_nc, zones_all, covariates, gt_pmfs, osrm_mat,
 #                     mobility_matrices)
-# @param fit    covariate-bearing brms invasion fit (draws source)
+# @param fit    covariate-bearing invasion fit (draws source): a brms fixed-beta fit, or the
+#               featured time-varying form's Stan fit (cascade_fit_hazard(), 33b)
 # @param design build_invasion_design() output (center/scale/feat/beta0)
-# @param reff   estimate_zone_reff() output
+# @param reff   cascade_reff() output (31_source_dynamics.R)
 # ---------------------------------------------------------------------------
 cascade_prepare <- function(layer, fit, design, reff,
                             kernel = CASCADE_KERNEL, gt = CASCADE_GT,
@@ -43,10 +48,11 @@ cascade_prepare <- function(layer, fit, design, reff,
   # ---- per-GT weekly kernels, when the projection marginalises over GT_PRIOR -----------
   # Built ONLY when reff carries an R posterior per grid point, so the kernel and the
   # reproduction number always come from the same grid point. Each kernel is built with
-  # weekly_censored_gt(mean, sd) DIRECTLY rather than through cascade_weekly_gt(), because that
-  # helper looks up GT_PROFILES first and a grid key has no profile entry — it would silently
-  # fall through to BINNING the daily pmf, which is the older mis-censored construction and a
-  # different kernel from the one every other part of this suite uses.
+  # weekly_censored_gt(mean, sd) DIRECTLY from the grid point's mean and sd. cascade_weekly_gt()
+  # looks up GT_PROFILES first, and a grid key has no profile entry: it would route through
+  # daily_to_weekly_gt(), which rebuilds the same weekly kernel when the daily pmf carries its
+  # gt_mean/gt_sd attributes (and bins it, with a warning, when it does not). Building it here
+  # does not depend on that.
   G_list <- NULL; gt_weights <- NULL; gt_keys <- NULL
   if (!is.null(reff$R_draws_by_gt) && length(reff$R_draws_by_gt) > 1L) {
     gt_keys    <- reff$gt_keys
@@ -75,8 +81,26 @@ cascade_prepare <- function(layer, fit, design, reff,
     if (is.null(c0)) return(rep(0, nz))
     v <- (raw - c0) / s0; v[!is.finite(v)] <- 0; v
   }
-  z_logpop <- if ("log_pop" %in% cov_spec) z_of("log_pop", static$log_pop) else rep(0, nz)
-  z_ccvi   <- if ("ccvi"    %in% cov_spec) z_of("ccvi",    static$ccvi)    else rep(0, nz)
+  # EVERY COVARIATE IN THE HAZARD IS SIMULATED, OR THE RUN STOPS. This used to map log_pop and
+  # ccvi by name and nothing else, so a covariate added to CASCADE_COV_SPEC (it reads
+  # BAYES_GEO_COVARIATES, which has changed before) would be FITTED into the hazard and then
+  # silently dropped from every simulated week — a projection from a hazard other than the one
+  # fitted, with nothing in any output to say so. The static terms are now handled generically
+  # (any covariate .static_features() supplies), d_min is the one DYNAMIC term the simulator
+  # recomputes as the front advances, and anything else — the alert/suspected-case covariates,
+  # which have no 13-week trajectory to simulate — is refused.
+  dyn_cov  <- "d_min"
+  stat_cov <- setdiff(as.character(cov_spec), dyn_cov)
+  .unsim <- setdiff(stat_cov, names(static))
+  if (length(.unsim))
+    stop(sprintf(paste0("[cascade_prepare] covariate(s) %s are in cov_spec but are neither a static ",
+                        "zone feature (.static_features(): %s) nor the dynamic d_min term, so the ",
+                        "simulator cannot carry them forward. Remove them from CASCADE_COV_SPEC or ",
+                        "add a projection for them."),
+                 paste(.unsim, collapse = ", "), paste(names(static), collapse = ", ")),
+         call. = FALSE)
+  Z_static <- matrix(0, nz, length(stat_cov), dimnames = list(zones_all, stat_cov))
+  for (nm in stat_cov) Z_static[, nm] <- z_of(nm, static[[nm]])
 
   # OSRM travel-time matrix aligned to the spine (missing -> Inf); for dynamic d_min.
   osrm <- layer$osrm_mat
@@ -88,19 +112,43 @@ cascade_prepare <- function(layer, fit, design, reff,
   has_dmin <- ("d_min" %in% cov_spec) && !is.null(dmin_center)
   DMIN_SENTINEL <- 1e4                                # matches .dmin_vec
 
-  # Posterior draws of (beta0, gamma) — the covariate-bearing hazard.
-  dr <- posterior::as_draws_df(fit)
-  b_int <- dr[["b_Intercept"]]
-  gvec <- function(nm) if (paste0("b_", nm) %in% names(dr)) dr[[paste0("b_", nm)]] else rep(0, length(b_int))
-  g_logpop <- gvec("log_pop"); g_ccvi <- gvec("ccvi"); g_dmin <- gvec("d_min")
+  # Posterior draws of (beta0, gamma) — the covariate-bearing hazard — and, for a time-varying
+  # form, its drift level, drift SD, frailty variance and each zone's training exposure
+  # (.cascade_hazard_draws(), 31: one reader for both engines).
+  hz <- .cascade_hazard_draws(fit, zones_all)
+  b_int <- hz$b_int
+  gvec <- function(nm) if (nm %in% colnames(hz$slopes)) hz$slopes[, nm] else rep(0, length(b_int))
+  # The converse check: a slope the FIT carries but the simulator would not apply. Same failure
+  # as above seen from the other side (a fit made with a wider cov_spec than this call's).
+  .slopes <- colnames(hz$slopes)
+  .dropped <- setdiff(.slopes, c(stat_cov, dyn_cov))
+  if (length(.dropped))
+    stop(sprintf(paste0("[cascade_prepare] the fitted hazard carries slope(s) %s that cov_spec = [%s] ",
+                        "does not simulate; the projection would run on a different hazard from the ",
+                        "one fitted. Fit and prepare with the same covariate set."),
+                 paste(.dropped, collapse = ", "), paste(cov_spec, collapse = ", ")), call. = FALSE)
   n_draws <- length(b_int)
+  # n_draws x p slopes for the static terms, column-aligned with Z_static (p may be 0).
+  G_static <- matrix(0, n_draws, length(stat_cov), dimnames = list(NULL, stat_cov))
+  for (nm in stat_cov) G_static[, nm] <- gvec(nm)
+  g_dmin <- gvec("d_min")
+  # A FORM's training exposure ends at the last training transition, which must be the week
+  # before the projection's first: the fit and this layer must describe the same weeks.
+  if ((hz$use_rw || hz$use_frailty) && !identical(as.integer(hz$S), as.integer(ncol(Y0) - 1L)))
+    stop(sprintf(paste0("[cascade_prepare] the time-varying fit ends at transition %s but the ",
+                        "layer has %d observed weeks; fit and layer must cover the same weeks."),
+                 hz$S, ncol(Y0)), call. = FALSE)
 
   list(zones_all = zones_all, nz = nz, W = W, Wt = Wt, denom_fi = denom_fi,
        G = G, kmax = kmax, G_list = G_list, gt_weights = gt_weights, gt_keys = gt_keys,
        Y0 = Y0, W0 = W0, affected0 = affected0,
-       z_logpop = z_logpop, z_ccvi = z_ccvi, OS = OS, has_dmin = has_dmin,
+       Z_static = Z_static, OS = OS, has_dmin = has_dmin,
        dmin_center = dmin_center, dmin_scale = dmin_scale, DMIN_SENTINEL = DMIN_SENTINEL,
-       b_int = b_int, g_logpop = g_logpop, g_ccvi = g_ccvi, g_dmin = g_dmin,
+       b_int = b_int, G_static = G_static, g_dmin = g_dmin,
+       # the time-varying form (both FALSE for fixed beta): drift at the last training week and
+       # its innovation SD, frailty variance, each zone's training exposure (draws x zones)
+       use_rw = hz$use_rw, use_frailty = hz$use_frailty, uS = hz$uS, sigma_rw = hz$sigma,
+       theta = hz$theta, C0 = hz$C0,
        n_draws = n_draws, reff = reff, prov = reff$prov, kernel = kernel, gt = gt)
 }
 
@@ -152,7 +200,7 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
     if (!is.null(.old_seed)) assign(".Random.seed", .old_seed, envir = .GlobalEnv)
     else if (exists(".Random.seed", envir = .GlobalEnv)) rm(".Random.seed", envir = .GlobalEnv)
   }, add = TRUE)
-  set.seed(seed)
+  set_fixed_seed(seed)
   seed_r_scope <- match.arg(seed_r_scope)
   if (!is.null(seed_r) && length(seed_r) == 1L && is.na(seed_r)) seed_r <- NULL
   nz <- prep$nz; zones_all <- prep$zones_all; W0 <- prep$W0; G <- prep$G; kmax <- prep$kmax
@@ -161,12 +209,18 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
   bar_idx0 <- which(zones_all %in% bar_sources)
   force_idx <- which(zones_all %in% force_seed)
   aff0_idx <- which(prep$affected0)
-  # For a clean knockout, a barred zone contributes to NEITHER the import force NOR
-  # the frontier (d_min / saturation): exclude it from the initial front too.
-  aff0_src_idx <- setdiff(aff0_idx, bar_idx0)
+  # A KNOCKOUT BARS THE IMPORT FORCE ONLY. A barred zone is still an INFECTED zone: it is
+  # contained (it seeds no one — own_src is zeroed below for Lam and for the flux attribution),
+  # not removed from the map. It therefore stays in the frontier: in d_min, which is the
+  # observed-risk covariate "travel time to the nearest affected zone", and in the invaded-
+  # fraction numerator behind saturation. Dropping it from the front, as this used to ("a
+  # barred zone contributes to NEITHER the import force NOR the frontier"), raised d_min for
+  # the barred hub's neighbours and — with a negative d_min slope — lowered their hazard
+  # through a channel containment does not act on, so Delta_j credited the knockout with
+  # invasions it did not prevent.
   # frontier numerator for the initial infected set: sum over infected origins j of W[j,i]
-  inf_num0 <- if (length(aff0_src_idx)) as.numeric(Wt[, aff0_src_idx, drop = FALSE] %*% rep(1, length(aff0_src_idx))) else numeric(nz)
-  dmin0 <- if (prep$has_dmin) .cascade_dmin0(OS, aff0_src_idx, prep$DMIN_SENTINEL) else NULL
+  inf_num0 <- if (length(aff0_idx)) as.numeric(Wt[, aff0_idx, drop = FALSE] %*% rep(1, length(aff0_idx))) else numeric(nz)
+  dmin0 <- if (prep$has_dmin) .cascade_dmin0(OS, aff0_idx, prep$DMIN_SENTINEL) else NULL
   # Frontier saturation is measured RELATIVE to the initial front (PLAN §3.5: the
   # hazard falls as neighbours *become* invaded). f_inv0 is the baseline invaded
   # fraction of each zone's source neighbourhood, so sat = 1 at week 1 (h1 ranking
@@ -208,7 +262,8 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
   # only flip 0 -> 1, and scaling `own` scales the negative binomial's mean and size
   # together (stochastically ordered), so no per-zone difference can be negative.
   #
-  # TWO SEPARATE CHANNELS BREAK IT. Both are model features, not coupling failures:
+  # SEPARATE CHANNELS BREAK IT -- two in every run, a third under a frailty form. All are model
+  # features, not coupling failures:
   #   * FRONTIER SATURATION (psi > 0). sat = exp(-psi * max(f_inv - f_inv0, 0)) is a
   #     negative feedback: seeding a city raises its neighbours' invaded fraction and lowers
   #     a third zone's hazard. This was DOMINANT while psi was fitted (it reached 11.25 on
@@ -229,7 +284,15 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
   #     the worry that a zone seeded in different weeks reads different branching uniforms
   #     and so follows a different path. If that were a live channel the negatives would grow
   #     with horizon; constrained, they stay at zero from horizon 1 to 13.
-  # Do not "fix" either by clipping; both are consequences of the fitted model. NOTHING in
+  #   * THE GAMMA FRAILTY (a featured frailty form). Seeding a source raises its neighbours'
+  #     import force, hence their cumulative hazard C, hence LOWERS their later conditional
+  #     hazard 1/(1 + theta*C): exposure without invasion is evidence of low susceptibility. A
+  #     neighbour can therefore be less likely to be invaded in a given LATER week of the run
+  #     where a source was added, so individual paths are not monotone. Its probability of being
+  #     invaded BY any horizon still rises (the marginal survival (1 + theta*C)^(-1/theta) falls
+  #     with C), so this channel cannot make an EXPECTED cumulative difference negative; it only
+  #     widens the paired contrast. Active whenever the featured form carries the frailty.
+  # Do not "fix" any of these by clipping; they are consequences of the fitted model. NOTHING in
   # the reported analysis depends on exact pathwise monotonicity — the variance reduction
   # does not require it, and it is measured directly (per-zone SD 0.017 -> 0.0006).
   #
@@ -291,10 +354,40 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
   # noise within a trajectory, so it belongs at the parameter-group level — the same level as
   # delta_by_grp, which does widen the interval as intended. Drawn LAST in the seeded region so
   # iter_seed, param_idx, gt_idx, R0_by_grp and delta_by_grp keep their exact streams, and
-  # keyed on (zone, week, group) so a baseline and its intervention still see identical shocks
-  # and every paired contrast stays paired.
-  Z_Rw_grp <- if (isTRUE(crn) && is.finite(rw_sigma) && rw_sigma > 0)
-    array(stats::rnorm(nz * horizon * D), dim = c(nz, horizon, D)) else NULL
+  # keyed on (week, group) so a baseline and its intervention still see identical shocks and
+  # every paired contrast stays paired.
+  #
+  # ONE SHOCK PER (WEEK, GROUP), NOT PER ZONE. The projection transmits on ONE national R
+  # (31_source_dynamics.R: one draw shared by every zone, because no between-zone heterogeneity
+  # was detectable), so the walk is a walk of THAT number. It used to draw an independent shock
+  # per zone (an nz x horizon x D array), which let the infected zones' R drift apart week by
+  # week — re-introducing exactly the per-zone heterogeneity the national anchor removed, and
+  # averaging the walk's national uncertainty away across zones instead of applying it to all
+  # of them at once. The group now carries a single walked national log R(t); every
+  # transmitting zone, including one seeded mid-projection, transmits at that CURRENT value.
+  # Drawn whether or not `crn` is on: the shock is a parameter-group quantity, and drawing it
+  # per iteration on the non-CRN path would put it back on the process side of the variance
+  # decomposition, where it is subtracted out of the interval.
+  Z_Rw_grp <- if (is.finite(rw_sigma) && rw_sigma > 0)
+    matrix(stats::rnorm(horizon * D), horizon, D) else NULL
+  # THE FEATURED FORM'S DRIFT (prep$use_rw, CASCADE_FORM): the weekly random walk of the log
+  # import coefficient continues from its fitted level u_S with the draw's own innovation SD,
+  # ONE PATH PER PARAMETER GROUP -- the hazard's future level is epistemic uncertainty, so, like
+  # the national R walk above, it belongs on the parameter side of the variance decomposition.
+  # Drawn from ITS OWN stream (seed + 7411, the forecast drift's offset) with the main stream
+  # restored afterwards: every other draw is exactly as in a fixed-beta run, and the path does
+  # not move with knobs that change how many numbers the main stream consumes (delta_sd_log,
+  # rw_sigma), so runs differing only in those stay paired. horizon x D.
+  u_path_grp <- if (isTRUE(prep$use_rw)) {
+    .st <- get(".Random.seed", envir = .GlobalEnv)
+    set_fixed_seed(as.integer(seed) + 7411L)
+    .Zu <- matrix(stats::rnorm(horizon * D), horizon, D)
+    assign(".Random.seed", .st, envir = .GlobalEnv)
+    matrix(vapply(seq_len(D), function(gg)
+      prep$uS[param_idx[gg]] + prep$sigma_rw[param_idx[gg]] * cumsum(.Zu[, gg]), numeric(horizon)),
+      horizon, D)
+  } else NULL
+  frail <- isTRUE(prep$use_frailty)
   # WITHIN-ZONE SUSCEPTIBLE DEPLETION WAS REMOVED (2026-09-19). It was controlled by
   # CASCADE_WITHIN_ZONE_DEPLETION, which was FALSE and was never overridden by any caller in
   # this suite, so `s_frac` was NULL and the whole path was dead. Its only implementation also
@@ -338,9 +431,8 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
   U_seed <- .mk(); U_br <- .mk(); U_flux <- .mk()
   U_ns <- if (isTRUE(crn)) numeric(nz) else NULL
   Z_Rs <- if (isTRUE(crn)) numeric(nz) else NULL
-  # Innovations for the R walk, keyed by (zone, week) like every other CRN stream so a
-  # baseline and its intervention see the SAME shocks and the contrast stays paired.
-  Z_Rw <- .mk()
+  # (The R-walk innovations are not a per-iteration buffer: they are one per (week, group),
+  # Z_Rw_grp above, read directly by the group's national walk below.)
 
   # First TRUE of a cumulative-weight comparison: the paired analogue of sample.int(prob=).
   .pick_src <- function(wts, u) {
@@ -349,13 +441,19 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
     which.max(cw >= u * tot)
   }
 
+  # The R -> M(R) map of each kernel, built ONCE (weekly_renewal_R_eff_fun(), 06): applied every
+  # simulated week, re-interpolating the 40,001-point grid on each call was ~75% of the
+  # simulator's time. Its values are identical to weekly_renewal_R_eff()'s.
+  .R_eff_by_k <- if (.has_gtgrid) lapply(prep$G_list, weekly_renewal_R_eff_fun)
+                 else list(weekly_renewal_R_eff_fun(G))
+
   for (m in seq_len(n_mc)) {
     # Fixed-shape draws for the whole iteration. Seeding, branching and flux are keyed by
     # (zone, week); the initial seed size and a seeded zone's reproduction number are keyed
     # by ZONE ALONE, so a zone seeded in different weeks in the two runs still starts from
     # the same size and the same R — which is what keeps the coupling monotone.
     if (isTRUE(crn)) {
-      set.seed(iter_seed[m])
+      set_fixed_seed(iter_seed[m])
       # Refilled IN PLACE rather than reallocated: three nz x horizon matrices per iteration
       # is ~160 KB, which at M = 4000 is 650 MB of allocation churn and the GC pressure that
       # goes with it, for no benefit. The number and ORDER of runif/rnorm calls is unchanged,
@@ -367,11 +465,6 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
       Z_Rs[]   <- stats::rnorm(nz)
     }
     g <- draw_group[m]; di <- param_idx[g]                # parameter draw for this replicate
-    # This GROUP's R-walk innovations: shared by every process replicate in the group, so the
-    # walk is posterior (between-group) variation and survives the variance decomposition.
-    # Refilled IN PLACE (like the other CRN streams): reuses the one nz x horizon allocation
-    # instead of materialising a fresh slice every iteration. Z_Rw was allocated by .mk() above.
-    if (!is.null(Z_Rw_grp)) Z_Rw[] <- Z_Rw_grp[, , g]
     delta_m <- delta_by_grp[g]                            # calibration factor for this group
     # This group's weekly generation-time kernel. Falls back to the single kernel when the
     # projection is not marginalising over GT. kmax varies with the grid point (a longer GT
@@ -383,21 +476,29 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
     # carry a self-referential term — but the R this simulator deploys is EpiNow2's DAILY-scale
     # posterior (31_source_dynamics.R sets R_draws from the EpiNow2 fit), which retains it.
     # Applying a daily-scale R to a lag-0-dropped kernel lengthens the effective generation
-    # interval and so understates growth for a given R. .R_eff_m() is the exact algebraic
-    # correction; it is the identity at R = 1 and when the kernel carries no lag-0 mass, and it
-    # is per-draw because the GT grid point (hence G_0) varies with the draw.
-    .g0_m <- { a <- attr(Gm, "lag0_mass"); if (is.null(a) || !is.finite(a)) 0 else as.numeric(a) }
-    .R_eff_m <- if (.g0_m > 0) function(R) weekly_renewal_R_eff(R, .g0_m) else function(R) R
-    eta0 <- prep$b_int[di] + prep$g_logpop[di] * prep$z_logpop + prep$g_ccvi[di] * prep$z_ccvi
+    # interval and so understates growth for a given R. .R_eff_m() is the exact correction (the
+    # Euler-Lotka growth-matching multiplier carried by the kernel, weekly_renewal_R_eff()); it is
+    # the identity at R = 1, and per-draw because the GT grid point varies with the draw.
+    .R_eff_m <- .R_eff_by_k[[if (.has_gtgrid) gt_idx[g] else 1L]]   # = weekly_renewal_R_eff(., Gm)
+    # Static terms of the hazard, generic over the fitted covariate set (cascade_prepare()).
+    eta0 <- prep$b_int[di] + as.numeric(prep$Z_static %*% prep$G_static[di, ])
     gdmin <- prep$g_dmin[di]
+    # GAMMA FRAILTY: this draw's frailty variance and every zone's cumulative hazard over the
+    # training weeks (the fit's own exposure); the simulated weeks are added to it below.
+    if (frail) { th_m <- prep$theta[di]; Cz <- prep$C0[di, ] }
     # incidence matrix (preallocated); first W0 cols = observed nowcast counts
     I <- matrix(0, nz, ncol_tot); I[, seq_len(W0)] <- prep$Y0
     infected <- prep$affected0
-    # currently-infected zones' R_eff is the draw's fixed value (held across replicates)
+    # Each transmitting zone's R AT THE GROUP'S REFERENCE LEVEL (the draw's national R, or a
+    # forced zone's seed_r premise), held across replicates. The national walk below is applied
+    # to it as a multiplier, so it is never overwritten by the walk.
     R0v <- numeric(nz); R0v[infected] <- R0_by_grp[infected, g]
-    # The walk reverts to each zone's OWN starting R, so it adds spread without adding trend.
-    logR_anchor <- numeric(nz)
-    logR_anchor[infected] <- log(pmax(R0v[infected], 1e-12))
+    # THE GROUP'S NATIONAL WALK: one log R(t) per iteration, started at this group's national
+    # draw and advanced once per week by the group's shock Z_Rw_grp[w, g]. With rho > 0 it
+    # reverts to that starting value; at the configured rho = 0 it is a pure random walk.
+    logR_ref <- log(pmax(R0_by_grp[1L, g], 1e-12))
+    logR_w   <- logR_ref
+    walk_mult <- 1                              # exp(logR_w - logR_ref): applied to every zone
     inf_num <- inf_num0
     dmin <- dmin0
     cumI <- rowSums(prep$Y0)                    # cumulative incidence (for establishment)
@@ -413,17 +514,26 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
       for (k in seq_len(kmax_m)) { tp <- cw - k; if (tp >= 1) own <- own + Gm[k] * I[, tp] }
       # susceptible fraction (optional within-zone depletion)
       # Layer A: advance infected zones' incidence for week cw
-      # R_eff EVOLVES. Mean-reverting walk on log R toward each zone's anchor: adds
-      # uncertainty that grows with horizon and then plateaus, without adding a trend (the
-      # scenario multiplier c(t) owns policy). rw_sigma = 0 reproduces constant-R exactly.
-      if (rw_sigma > 0 && any(infected)) {
-        .ii  <- which(infected)
-        .lr  <- log(pmax(R0v[.ii], 1e-12))
-        .eps <- if (isTRUE(crn)) Z_Rw[.ii, w] else stats::rnorm(length(.ii))
-        .lr  <- .lr + rw_rho * (logR_anchor[.ii] - .lr) + rw_sigma * .eps
-        R0v[.ii] <- pmin(pmax(exp(.lr), prep$reff$r_min), prep$reff$r_max)
+      # R_eff EVOLVES: one walk on the NATIONAL log R, advanced once per week by this group's
+      # shock and applied to every transmitting zone at once. At the configured rho = 0 it is a
+      # pure random walk (spread grows as sigma*sqrt(t), no plateau); rho > 0 makes it revert to
+      # the group's starting value. Either way E[log R] is unchanged, so it adds uncertainty,
+      # not a trend (the scenario multiplier c(t) owns policy). rw_sigma = 0 reproduces
+      # constant-R exactly. The national value is clamped to the numerical guard every step.
+      if (!is.null(Z_Rw_grp)) {
+        .lr <- logR_w + rw_rho * (logR_ref - logR_w) + rw_sigma * Z_Rw_grp[w, g]
+        logR_w <- log(pmin(pmax(exp(.lr), prep$reff$r_min), prep$reff$r_max))
+        walk_mult <- exp(logR_w - logR_ref)
       }
-      Rt <- R0v * c_mult
+      # Current R per zone = its reference-level R x the group's walked national factor. A zone
+      # at the national value therefore transmits at exactly the walked national R; a forced
+      # zone on a seed_r premise keeps its ratio to it.
+      Rcur <- R0v
+      if (walk_mult != 1) {
+        .on <- R0v > 0
+        Rcur[.on] <- pmin(pmax(R0v[.on] * walk_mult, prep$reff$r_min), prep$reff$r_max)
+      }
+      Rt <- Rcur * c_mult
       # Convert to the weekly-kernel multiplier AFTER the scenario multiplier and the
       # susceptible-depletion factor, both of which act on the daily-scale R.
       inc <- cascade_branch_step(.R_eff_m(Rt), own, k_indiv,
@@ -451,18 +561,35 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
       forced_now <- if (w == force_seed_week && length(force_idx))
                       force_idx[!infected[force_idx]] else integer(0)
       seeded_idx <- integer(0)
-      if (any(atrisk)) {
+      # This week's log hazard multiplier: the static terms, the drift (0 without one) and the
+      # frontier term at the front as it stands at the START of the week. Computed for every
+      # zone when a frailty is tracked, because each zone's exposure accumulates every week.
+      uw <- if (!is.null(u_path_grp)) u_path_grp[w, g] else 0
+      if (any(atrisk) || frail) {
         z_dmin <- if (prep$has_dmin) (log1p(dmin) - prep$dmin_center) / prep$dmin_scale else rep(0, nz)
         if (prep$has_dmin) z_dmin[!is.finite(z_dmin)] <- 0
+        lin <- eta0 + uw + gdmin * z_dmin
+      }
+      if (any(atrisk)) {
         f_inv <- ifelse(denom_fi > 0, inf_num / denom_fi, 0)
         sat <- exp(-psi * pmax(f_inv - f_inv0, 0))   # increment over the initial front
-        eta <- eta0 + gdmin * z_dmin + log(pmax(Lam, 1e-12))
-        mu  <- delta_m * exp(eta) * sat
+        h   <- exp(lin + log(pmax(Lam, 1e-12)))
+        # The frailty conditions a NEVER-INVADED zone's hazard on its cumulative hazard so far,
+        # H = log1p(theta*h/(1 + theta*C))/theta (21c_frailty_models.R). A zone invaded before
+        # and being re-seeded takes the frailty's prior instead (C = 0): the model does not
+        # track a zone's frailty after its first invasion. delta multiplies the cumulative
+        # hazard, as in the deployed forecast's recalibration.
+        H <- if (frail) ifelse(infected, log1p(th_m * h) / th_m,
+                               log1p(th_m * h / (1 + th_m * Cz)) / th_m) else h
+        mu  <- delta_m * H * sat
         p   <- 1 - exp(-mu)
         u   <- if (isTRUE(crn)) U_seed[, w] else stats::runif(nz)
         hit <- atrisk & (u < p)
         seeded_idx <- which(hit)
       }
+      # Each zone's exposure grows by this week's MODEL hazard (no delta, no saturation: C is
+      # the frailty's own cumulative hazard), at the start-of-week front used above.
+      if (frail) Cz <- Cz + exp(lin) * Lam
       seeded_idx <- union(seeded_idx, forced_now)
       if (length(seeded_idx)) {
         # FIRST invasions only, separated here once and used for every piece of first-passage
@@ -515,14 +642,16 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
               z = if (isTRUE(crn)) Z_Rs[seeded_idx[.is_forced]] else NULL,
               seed_r = seed_r, R_grp = .Rg, gt_key = .Gk)
         }
-        # A zone seeded mid-projection anchors on the R it was seeded with, not on a value
-        # it never had, so its walk starts from its own draw.
-        logR_anchor[seeded_idx] <- log(pmax(R0v[seeded_idx], 1e-12))
+        # R0v holds the REFERENCE-level value (the group's starting national R, or the forced
+        # zone's seed_r premise); the walk is applied as the group's national multiplier at the
+        # top of each week, so a zone seeded mid-projection transmits at the CURRENT walked
+        # national R from its first week of transmission, not at the value R had at week 0.
         infected[seeded_idx] <- TRUE
         if (length(newly)) tau[cbind(newly, m)] <- w
         new_by_week[w, m] <- length(newly)
-        # update frontier numerator + d_min for the new front (unless barred as a source):
-        # both use add_idx (barred zones do not advance the front) for knockout consistency.
+        # update frontier numerator + d_min for the new front. EVERY first invasion advances
+        # the front, barred or not: a knockout bars a zone's import force only (see the note
+        # at inf_num0), so a barred zone that is invaded is part of the frontier like any other.
         # `newly`, NOT `seeded_idx`. seeded_idx includes RE-SEEDINGS of already-invaded zones
     # (atrisk deliberately re-admits burnt-out zones), so every re-introduction added that
     # zone's column to inf_num again and f_inv — documented as "the mobility-weighted invaded
@@ -530,7 +659,7 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
     # First invasions are already separated for tau/new_by_week/flux one line above; the
     # frontier update was the one place that used the wrong set. Inert while CASCADE_PSI = 0
     # (sat == 1), live in the psi sweep that feeds cascade_sensitivity.csv.
-    add_idx <- newly[!barred[newly]]
+    add_idx <- newly
         if (length(add_idx)) {
           inf_num <- inf_num + as.numeric(Wt[, add_idx, drop = FALSE] %*% rep(1, length(add_idx)))
           if (prep$has_dmin) for (z in add_idx) {
@@ -576,6 +705,8 @@ simulate_cascade <- function(prep, scenario, n_mc = CASCADE_N_MC,
                     seed_r = if (is.null(seed_r)) NA_real_ else as.numeric(seed_r),
                     seed_r_scope = seed_r_scope,
                     rw_sigma = rw_sigma, rw_rho = rw_rho,
+                    form = if (isTRUE(prep$use_rw) && frail) "rw1_frailty"
+                           else if (isTRUE(prep$use_rw)) "rw1" else if (frail) "frailty" else "fixed",
                     seed = seed, n_rep = n_rep, scenario = scenario$label))
 }
 
@@ -659,7 +790,15 @@ cascade_reach_table <- function(sim, horizons = CASCADE_REPORT_HORIZONS) {
                         hi[.flat] <- pmin(p[.flat] + .res / 2, 1) }
     } else {
       lo <- pmax(p - z90 * psd, 0); hi <- pmin(p + z90 * psd, 1)
+      .flat <- rep(FALSE, length(p))
     }
+    # WHICH INTERVALS ARE THE FLOOR, recorded per row (`p_ci_at_mc_floor`). A floored interval is
+    # NOT an estimated credible interval: it is p +- 1/(2D) clipped to [0, 1], so its width is at
+    # most 1/D (1/250 at the shipped M = 2000, n_rep = 8) — exactly 1/D unless clipped at 0 or 1 —
+    # by construction, saying only that the posterior spread is below what D parameter draws can
+    # resolve. Every consumer of p_lo/p_hi — the reach CSVs, Figure 4's forest
+    # bars and data file, the report's top-15 table, the urban impact tables — carries this flag
+    # or reports the count, so a floor width is never read as a measured precision.
     est <- rowMeans(!is.na(sim$est_tau) & sim$est_tau <= H)    # established BY H (horizon-consistent)
     fp_med <- apply(sim$tau, 1, function(x) { x <- x[!is.na(x) & x <= H]; if (length(x)) stats::median(x) else NA_real_ })
     masked <- sim$affected0
@@ -669,6 +808,7 @@ cascade_reach_table <- function(sim, horizons = CASCADE_REPORT_HORIZONS) {
       p_invasion  = ifelse(masked, NA_real_, p),
       p_case_invasion = ifelse(masked, NA_real_, p),  # confirmed-case scale (= reach)
       p_lo = ifelse(masked, NA_real_, lo), p_hi = ifelse(masked, NA_real_, hi),
+      p_ci_at_mc_floor = ifelse(masked, NA, .flat),
       p_sd = ifelse(masked, NA_real_, psd),
       p_establishment = ifelse(masked, NA_real_, est),
       first_passage_week = ifelse(masked, NA_real_, fp_med),
@@ -852,8 +992,8 @@ cascade_paired_total <- function(sim_base, sim_alt, conf = 0.90) {
 #' differently across a seeded-R sweep.
 #'
 #' WHAT "CASES" MEANS. Confirmed cases on the projection window only (weeks 1..horizon), on
-#' the same confirmed-case scale as the rest of the suite — so ascertainment (rho ~ 0.45) is
-#' already inside the calibration and these are modelled CONFIRMED cases, not infections.
+#' the same confirmed-case scale as the rest of the suite: these are modelled CONFIRMED cases,
+#' not infections, and no ascertainment fraction is estimated to convert one into the other.
 #' The in-city total also contains the SEED CASES THEMSELVES, which are an assumption rather
 #' than a prediction: E[n_seed] cases per forced zone (about 1.5 under the default Poisson
 #' seeding), so roughly 4-5 cases for a three-zone metro hub, not 1-2. They are deliberately
@@ -889,8 +1029,7 @@ cascade_paired_cases <- function(sim_base, sim_cond, in_city = character(), conf
   # with `pred_lo`/`pred_hi` describes the SPREAD OF OUTCOMES across iterations — what might
   # actually happen. They diverge sharply here because projected case counts are
   # right-skewed: parameter uncertainty enters an exponential, so E[R^t] far exceeds
-  # median(R)^t. On this frame the baseline projection has mean 15.7k against median 13.2k,
-  # with the top 5% of iterations carrying 15% of the mean. Reporting only the mean would
+  # median(R)^t (the report prints this run's mean and median side by side). Reporting only the mean would
   # overstate the typical outcome; only the median would understate the expected burden. The
   # suite's scenario burden table already uses medians with predictive bands, so this follows
   # that convention rather than inventing a second one.

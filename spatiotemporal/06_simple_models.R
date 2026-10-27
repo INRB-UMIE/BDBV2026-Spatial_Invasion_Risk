@@ -3,8 +3,13 @@
 # BDBV 2026 DRC · Spatiotemporal Invasion Forecast Suite
 #
 # Provides the shared mobility-informed renewal primitives used by the workhorse
-# (15_workhorse.R) and the Bayesian suite (21_bayesian_renewal.R):
-#   * daily_to_weekly_gt()          — weekly-aggregated generation-time PMF
+# (15_workhorse.R), the Bayesian suite (21_bayesian_renewal.R) and the cascade (31/32):
+#   * weekly_censored_gt()          — WEEKLY generation-time pmf, double-interval censored at
+#                                     the 7-day scale (lag 0 dropped, its mass carried)
+#   * weekly_renewal_R_eff()        — daily-scale R -> the multiplier for that weekly kernel
+#   * cascade_weekly_gt()           — the one weekly kernel the cascade uses
+#   * daily_to_weekly_gt()          — weekly kernel from a daily pmf (weekly_censored_gt() from
+#                                     the pmf's generating parameters; bins a bare pmf)
 #   * compute_foi()                 — the import force Lambda = t(W) %*% Ytilde
 #   * build_inward_contact_matrix() — the manuscript-motivated inward /
 #                                     meeting-location FOI kernel (M11), Mills 2026
@@ -13,7 +18,7 @@
 #
 # Core principle: Lambda_i,t = sum_j W[j,i] * sum_k G_w[k] * Y_nc[j, t-k]
 # where W is the outflow matrix (W[j,i] = fraction of j's outflow to i),
-# and G_w is the weekly-aggregated generation-time PMF.
+# and G_w is the weekly generation-time pmf (weekly_censored_gt()).
 # =============================================================================
 
 source(file.path(here::here(), "spatiotemporal", "00_config.R"))
@@ -22,29 +27,16 @@ suppressPackageStartupMessages({
   library(tidyverse)
 })
 
-# ONE canonical definition, identical in every module that declares it, so that source()
-# ORDER CANNOT CHANGE SEMANTICS. This file's version used to be
-#   function(a, b) if (!is.null(a) && !is.na(a)[1]) a else b
-# and was declared UNCONDITIONALLY, so sourcing 06 installed it over every other module's and
-# it governed the whole cascade run. It differs in two ways that silently corrupt results:
-# it falls back whenever the FIRST ELEMENT of a vector is NA (blanking an entire otherwise-good
-# vector, e.g. run_cascade.R's R_zone_conjugate column or 33b's pop_vec), and it ERRORS on a
-# zero-length left-hand side ("missing value where TRUE/FALSE needed") instead of falling back.
-`%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 
 # ---------------------------------------------------------------------------
 # Helper: weekly generation-time PMF
 # ---------------------------------------------------------------------------
 
-#' Aggregate a daily GT PMF to weekly intervals
-#' @param gt_pmf_daily numeric vector, g[1..tau_max] (daily, sums to ~1)
-#' @param n_weeks number of weekly lags to return
-#' @return normalised numeric vector G_weekly[1..n_weeks]
 #' WEEKLY generation-time pmf under the SAME double-interval censoring as the daily pmf.
 #'
-#' WHY THIS REPLACES BINNING A DAILY PMF. `daily_to_weekly_gt()` sums a daily pmf into 7-day
-#' bins, the renewal equation here runs on WEEKLY
-#' aggregates, so the infector's time is known only to the week, and both the primary
+#' WHY THIS REPLACES BINNING A DAILY PMF. Binning sums a daily pmf into 7-day blocks (what
+#' daily_to_weekly_gt() did, and still does for a bare pmf). But the renewal equation here runs
+#' on WEEKLY aggregates, so the infector's time is known only to the week, and both the primary
 #' (infector) and secondary (infectee) event times are interval-censored at a 7-day window.
 #' Binning a daily-censored pmf applies a 1-day primary window and then aggregates, which
 #' measures the lag from the infector's exact DAY rather than from the start of its week.
@@ -64,8 +56,9 @@ suppressPackageStartupMessages({
 #' evaluated on the day grid 0, 7, 14, ... This is the same construction
 #' `.gt_daily_censored_pmf()` (02_epi_params.R) applies at pwindow = swindow = 1.
 #'
-#' Lag 0 is DROPPED and the pmf renormalised: the renewal sum runs over strictly past weeks
-#' (an infector cannot infect in a week before its own), matching .gweighted_own().
+#' Lag 0 is DROPPED and the pmf renormalised: the renewal sum runs over strictly past weeks,
+#' because a lag-0 term would make a week's incidence depend on itself (see lag0_mass below),
+#' matching .gweighted_own() (15_workhorse.R).
 #'
 #' @param mean,sd generation-interval mean and SD in DAYS (moment-matched Gamma).
 #' @param n_weeks weekly lags to retain; default covers the 0.999 quantile.
@@ -115,41 +108,85 @@ weekly_censored_gt <- function(mean, sd, n_weeks = NULL, week_len = 7L) {
   # applying a DAILY-scale R (which EpiNow2 estimates, retaining that mass) to this kernel
   # understates growth. weekly_renewal_R_eff() below undoes exactly that, and needs this number.
   attr(pmf, "lag0_mass") <- if (is.finite(tot0) && tot0 > 0) pk0[1L] / tot0 else 0
+  # The EXACT daily-R -> weekly-multiplier map for this kernel (weekly_renewal_R_eff()):
+  # tabulated over the growth rate r, R(r) = (1 + r/rate)^shape (the Euler-Lotka relation of the
+  # continuous Gamma generation interval) and M(r) = 1 / sum_{L>=1} pmf_L exp(-7 r L), the
+  # multiplier with which this lag-0-free weekly kernel reproduces growth at rate r.
+  attr(pmf, "R_eff_grid") <- local({
+    r <- seq(-0.999 * rate, 2, length.out = 40001L)
+    L <- seq_along(pmf)
+    list(R = (1 + r / rate)^shape,
+         M = 1 / as.numeric(exp(-week_len * outer(r, L)) %*% as.numeric(pmf)))
+  })
   pmf
 }
 
 #' Daily-scale R -> the multiplier for a lag-0-dropped weekly kernel.
 #'
-#' The weekly renewal including the self-term is
-#'     Y_W = R * ( G_0 Y_W + sum_{L>=1} G_L Y_{W-L} )
-#' whose explicit solution is
-#'     Y_W = [ R / (1 - R G_0) ] * sum_{L>=1} G_L Y_{W-L}.
-#' `weekly_censored_gt()` returns the RENORMALISED kernel Gt_L = G_L / (1 - G_0) over L >= 1, so
-#' substituting sum_{L>=1} G_L Y = (1 - G_0) * sum_{L>=1} Gt_L Y gives the multiplier
-#'     R_eff = R (1 - G_0) / (1 - R G_0).
-#' R_eff == R exactly when G_0 == 0 or R == 1, and exceeds R whenever R > 1 — i.e. the
-#' correction is null at the critical point and grows with the epidemic's speed, which is the
-#' behaviour you want. Measured at the medium profile (lag-0 mass 0.058076): at the deployed
-#' national R (1.02) it is +0.12%; at R = 1.3, +1.9%; at the urban seeded arm (R = 2.5), +10.2%.
+#' The weekly kernel (weekly_censored_gt()) drops the weekly lag-0 mass G_0 (infector and infectee
+#' in the same week; 5.8% at the medium profile) and renormalises, while R is EpiNow2's
+#' DAILY-renewal reproduction number. The multiplier M(R) applied to that kernel must therefore
+#' reproduce the growth R implies, not R itself.
 #'
-#' @param R daily-scale reproduction number (scalar or vector), e.g. an EpiNow2 posterior draw.
-#' @param g0 weekly lag-0 mass, from attr(weekly_censored_gt(...), "lag0_mass").
-#' @return R_eff, the multiplier to apply to the renormalised weekly kernel.
-weekly_renewal_R_eff <- function(R, g0) {
-  R <- as.numeric(R)
-  if (!length(g0) || !is.finite(g0) || g0 <= 0) return(R)
-  g0 <- min(g0, 0.95)
-  den <- 1 - R * g0
-  # R * g0 >= 1 means the WITHIN-week process is itself supercritical and the explicit solution
-  # diverges. That needs R >= 1/g0 (17.2 at the medium profile, where g0 = 0.058076), far
-  # outside anything this analysis sweeps. Cap rather than return Inf, and say so.
-  bad <- !is.finite(den) | den <= 1e-6
-  if (any(bad, na.rm = TRUE)) {
-    warning(sprintf("[gt] %d reproduction number(s) at or above 1/G0 = %.2f; the within-week renewal is supercritical and R_eff is capped.",
-                    sum(bad, na.rm = TRUE), 1 / g0), call. = FALSE)
-    den[bad] <- 1e-6
+#' EXACT FORM (2026-10-15). Under a constant R the daily renewal grows at the rate r solving the
+#' Euler-Lotka equation 1 = R * E[exp(-r T)], T the generation interval; for the Gamma generation
+#' interval E[exp(-r T)] = (1 + r/rate)^(-shape). A weekly kernel reproduces that growth if
+#' 1 = M * sum_{L>=1} Gt_L exp(-7 r L), so M = 1 / sum_{L>=1} Gt_L exp(-7 r L). The pair (R(r),
+#' M(r)) is tabulated on the kernel (attr "R_eff_grid") and interpolated here. M is finite for
+#' every R, equals R at R = 1, and agrees with the discretised daily generation-time pmf's
+#' Euler-Lotka relation to within 0.2% for R up to 5.
+#'
+#' WHY NOT THE CLOSED FORM R (1 - G_0) / (1 - R G_0) that this used to be. It solves the weekly
+#' recursion with the self-term Y_W = R (G_0 Y_W + sum_{L>=1} G_L Y_{W-L}), which treats every
+#' same-week infection as able to seed further same-week infections with probability G_0 again,
+#' without limit. Against the exact M it is +0.4% at R = 1.5, +4% at R = 3, +13% at R = 5, +64%
+#' at R = 10, and it DIVERGES at R = 1/G_0 (17.2 at the medium profile), where the code then
+#' capped its denominator at 1e-6 and returned R_eff of order 1e7. Discovery-phase back-test
+#' rounds produced R draws in that range, so their two-week hazards were inflated a millionfold.
+#'
+#' @param R daily-scale reproduction number (scalar or vector), e.g. EpiNow2 posterior draws.
+#' @param kernel the weekly kernel from weekly_censored_gt() (via daily_to_weekly_gt() or
+#'   cascade_weekly_gt()), carrying attr "R_eff_grid". A kernel without the grid but with attr
+#'   "lag0_mass" falls back to the closed form, returned as NA (not capped) where it is
+#'   undefined; a kernel with neither (a plain binned pmf) returns R unchanged.
+#' @return M(R), the multiplier to apply to the renormalised weekly kernel.
+weekly_renewal_R_eff <- function(R, kernel) weekly_renewal_R_eff_fun(kernel)(R)
+
+#' The map R -> M(R) of weekly_renewal_R_eff() as a FUNCTION of R, built once per kernel.
+#'
+#' For a caller that applies the same kernel many times (the cascade simulator, every simulated
+#' week): stats::approx() re-takes the log of the 40,001-point grid and re-regularises it on every
+#' call, which was ~75% of simulate_cascade()'s time. stats::approxfun() does that once; its
+#' values are identical to approx()'s (same interpolation, same rule = 2).
+weekly_renewal_R_eff_fun <- function(kernel) {
+  grid <- attr(kernel, "R_eff_grid")
+  if (!is.null(grid)) {
+    f <- stats::approxfun(log(grid$R), log(grid$M), rule = 2)
+    return(function(R) {
+      R <- as.numeric(R)
+      out <- rep(0, length(R))
+      pos <- is.finite(R) & R > 0
+      out[pos] <- exp(f(log(R[pos])))
+      out[!is.finite(R)] <- NA_real_
+      out
+    })
   }
-  R * (1 - g0) / den
+  function(R) .weekly_renewal_R_eff_closed(as.numeric(R), kernel)
+}
+
+# The closed form, for a kernel without the tabulated grid (see weekly_renewal_R_eff()).
+.weekly_renewal_R_eff_closed <- function(R, kernel) {
+  g0 <- attr(kernel, "lag0_mass")
+  if (is.null(g0) || !length(g0) || !is.finite(g0) || g0 <= 0) return(R)
+  den <- 1 - R * g0
+  bad <- !is.finite(den) | den <= 0
+  if (any(bad, na.rm = TRUE))
+    warning(sprintf(paste0("[gt] %d reproduction number(s) at or above 1/G0 = %.2f on a kernel without ",
+                           "generating parameters: the closed form is undefined there and returns NA."),
+                    sum(bad, na.rm = TRUE), 1 / g0), call. = FALSE)
+  out <- R * (1 - g0) / den
+  out[bad] <- NA_real_
+  out
 }
 
 #' The ONE weekly generation-time pmf the cascade uses.
@@ -159,9 +196,11 @@ weekly_renewal_R_eff <- function(R, g0) {
 #' infectiousness profile and deployed against another. This is the single entry point.
 #'
 #' Prefers the weekly double-interval-censored pmf built from the profile's mean/sd, which
-#' matches the censoring of the weekly aggregates the renewal actually runs on. Falls back to
-#' binning the daily pmf ONLY when the profile is unavailable, and says so — that fallback is
-#' the older, mis-censored construction, not an equivalent.
+#' matches the censoring of the weekly aggregates the renewal actually runs on. When the
+#' profile is unavailable it falls back to the daily pmf through daily_to_weekly_gt(): a pmf
+#' carrying its generating Gamma parameters (make_gt_pmf() attaches them) yields the SAME
+#' censored kernel, so that is silent; a pmf without one (bare, or discretised "naive") is
+#' BINNED, the older mis-censored construction and not an equivalent, and that case warns.
 cascade_weekly_gt <- function(gt = get0("CASCADE_GT", ifnotfound = "medium"),
                               gt_pmfs = NULL,
                               profiles = get0("GT_PROFILES", ifnotfound = NULL)) {
@@ -169,36 +208,57 @@ cascade_weekly_gt <- function(gt = get0("CASCADE_GT", ifnotfound = "medium"),
   if (!is.null(pr) && is.finite(pr$mean %||% NA_real_) && is.finite(pr$sd %||% NA_real_))
     return(weekly_censored_gt(pr$mean, pr$sd))
   if (!is.null(gt_pmfs) && !is.null(gt_pmfs[[gt]])) {
-    warning(sprintf(paste0("[gt] no GT_PROFILES entry for '%s'; falling back to BINNING the ",
-                           "daily pmf, which measures the lag from the infector's exact day ",
-                           "rather than from its week and is not the same kernel."), gt),
-            call. = FALSE)
+    if (!.gt_pmf_has_generator(gt_pmfs[[gt]]))
+      warning(sprintf(paste0("[gt] no GT_PROFILES entry for '%s', and its daily pmf carries no ",
+                             "censored generator (gt_mean/gt_sd, method 'censored'); falling back ",
+                             "to BINNING it, which measures ",
+                             "the lag from the infector's exact day rather than from its week ",
+                             "and is not the same kernel."), gt),
+              call. = FALSE)
     return(daily_to_weekly_gt(gt_pmfs[[gt]]))
   }
   stop(sprintf("[gt] cannot build a weekly generation time for '%s'.", gt), call. = FALSE)
 }
 
+#' Does a daily pmf carry the generating Gamma of the censored construction (make_gt_pmf())?
+#' The ONE test daily_to_weekly_gt() dispatches on, shared with cascade_weekly_gt()'s warning so
+#' the warning fires exactly when the kernel is binned.
+.gt_pmf_has_generator <- function(gt_pmf_daily) {
+  .m <- attr(gt_pmf_daily, "gt_mean"); .s <- attr(gt_pmf_daily, "gt_sd")
+  .meth <- attr(gt_pmf_daily, "gt_method")
+  !is.null(.m) && !is.null(.s) && length(.m) == 1L && length(.s) == 1L &&
+    is.finite(.m) && is.finite(.s) && (is.null(.meth) || identical(.meth, "censored"))
+}
+
+#' Weekly generation-time pmf from a DAILY pmf.
+#'
+#' When the pmf carries its generating parameters (.gt_pmf_has_generator(); make_gt_pmf()
+#' attaches them) this is weekly_censored_gt() on them, NOT a function of the daily values. A bare
+#' pmf (no parameters, or one discretised "naive") is binned into 7-day blocks and renormalised.
+#' @param gt_pmf_daily numeric vector, g[1..tau_max] (daily, sums to ~1)
+#' @param n_weeks number of weekly lags to return (NULL: weekly_censored_gt()'s default, or
+#'   ceiling(tau_max / 7) when binning)
+#' @return normalised numeric vector G_weekly[1..n_weeks]
 daily_to_weekly_gt <- function(gt_pmf_daily, n_weeks = NULL) {
   # CENSOR ONCE, AT THE WEEKLY SCALE. When the pmf carries its generating parameters, the weekly
   # kernel is rebuilt straight from the Gamma with a 7-day PRIMARY and SECONDARY window. That is
   # the estimand a weekly renewal needs: P(infectee's week - infector's week = k), with the
   # infector uniform within its own week. Summing a daily pmf into 7-day blocks answers a
   # different question — whether the DAY-lag falls in a 7-day band — and so discards where in its
-  # week the infector sat. Measured against 4e6 draws of floor((u + D)/7): the weekly form matches
-  # to ~2e-4, while binning understates lag-1 transmission by 38-43% relative and inflates the
-  # mean generation lag by ~0.3 weeks in every profile.
+  # week the infector sat. Measured on the shipped GT_PROFILES against 4e6 draws of
+  # floor((u + D)/7): the weekly form matches to within 4e-4 (Monte-Carlo noise), while binning
+  # understates lag-1 transmission by 36-43% relative (short 37.5%, medium 35.7%, long 42.5%)
+  # and inflates the mean generation lag by 0.30-0.34 weeks.
   #
   # This is NOT censoring twice. It BYPASSES the daily pmf and returns to the continuous
   # distribution, so primary-censoring uncertainty is applied exactly once, at the scale the
   # model actually runs at. Chaining daily then weekly censoring would double-count it.
-  .m <- attr(gt_pmf_daily, "gt_mean"); .s <- attr(gt_pmf_daily, "gt_sd")
-  .meth <- attr(gt_pmf_daily, "gt_method")
-  if (!is.null(.m) && !is.null(.s) && is.finite(.m) && is.finite(.s) &&
-      (is.null(.meth) || identical(.meth, "censored")) &&
-      exists("weekly_censored_gt", mode = "function"))
-    return(weekly_censored_gt(.m, .s, n_weeks = n_weeks))
-  # Fallback: a bare pmf with no generating parameters (synthetic vectors in the tests, or a
-  # pmf built by hand). Binning is retained rather than refused so those callers keep working.
+  if (.gt_pmf_has_generator(gt_pmf_daily) && exists("weekly_censored_gt", mode = "function"))
+    return(weekly_censored_gt(attr(gt_pmf_daily, "gt_mean"), attr(gt_pmf_daily, "gt_sd"),
+                              n_weeks = n_weeks))
+  # Fallback: a pmf without a censored generator — no generating parameters (synthetic vectors
+  # in the tests, a pmf built by hand or subset) or an explicitly naive one. Binning is retained
+  # rather than refused so those callers keep working.
   tau_max <- length(gt_pmf_daily)
   weeks_back <- ceiling(tau_max / 7)
   if (!is.null(n_weeks)) weeks_back <- n_weeks
@@ -257,9 +317,9 @@ compute_foi <- function(Y_wide, W, G_weekly, t_idx, zones_all) {
 
 #' Manuscript-motivated inward / meeting-location effective-contact matrix.
 #'
-#' Builds a SYMMETRIC effective-contact matrix M such that the mobility-informed
+#' Builds an effective-contact matrix M such that the mobility-informed
 #' inward force of infection is
-#'     Lambda_i = sum_k M[i,k] * Ytilde_k = ( t(M) %*% Ytilde )_i ,
+#'     Lambda_i = sum_k M[k,i] * Ytilde_k = ( t(M) %*% Ytilde )_i ,
 #' i.e. M can be dropped straight into compute_foi() as a "mobility" matrix with
 #' NO other code change. This implements the frequency-dependent, TWO-SIDED
 #' inward FOI of Mills (2026, "Multi-scale measures of time-varying epidemic

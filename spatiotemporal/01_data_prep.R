@@ -9,7 +9,6 @@
 #     dat$zone_week   — zone × week observation matrix (7-day buckets ending on ANALYSIS_DATE; zero-filled)
 #     dat$pop         — named numeric vector: zone → WorldPop population count
 #     dat$covariates  — static covariate tibble joined on `nom`
-#     dat$sitrep      — INSP sitrep weekly zone tibble (optional)
 #
 # Run order: source 00_config.R first (done below), then source this file.
 # =============================================================================
@@ -37,28 +36,6 @@ suppressPackageStartupMessages({
     raw %in% c("FALSE", "false", "0", "no")  ~ FALSE,
     TRUE                                       ~ NA
   )
-}
-
-# Safe date parser: handles character, Date, POSIXt.
-# Returns a Date vector; unparseable values become NA with a warning-free path.
-.parse_date <- function(x) {
-  if (inherits(x, "Date"))   return(x)
-  if (inherits(x, "POSIXt")) return(as.Date(x))
-  raw <- trimws(as.character(x))
-  raw[raw == ""] <- NA_character_
-  # Parse PER ELEMENT, not per vector: base as.Date(tryFormats=) picks ONE format
-  # from the first non-NA element and applies it to the whole column, silently
-  # NA-ing every value in a different format. Instead try each format in priority
-  # order (ISO first — unambiguous — then day/month slash formats) and coalesce,
-  # so a mixed-format column keeps all parseable values.
-  fmts <- c("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y")
-  out <- as.Date(rep(NA_real_, length(raw)), origin = "1970-01-01")
-  for (fmt in fmts) {
-    todo <- is.na(out) & !is.na(raw)
-    if (!any(todo)) break
-    out[todo] <- suppressWarnings(as.Date(raw[todo], format = fmt))
-  }
-  out
 }
 
 # Apply zone name aliases from data/aliases.csv to a character vector of
@@ -92,50 +69,72 @@ suppressPackageStartupMessages({
   invisible(TRUE)
 }
 
+# The canonical modelling spine (WorldPop zone names), or NULL when the file is unreadable.
+.zone_spine_names <- function() {
+  tryCatch(
+    readr::read_csv(file.path(WORLDPOP_DIR, "worldpop__pop_count__static.csv"),
+      col_types = readr::cols(nom = "c", pop_count = "d"), show_col_types = FALSE)$nom,
+    error = function(e) NULL)
+}
+
+# Case-, accent- and punctuation-insensitive key for comparing province names
+# ("Kasai Central" and "Kasaï-Central" compare equal).
+.province_key <- function(x) {
+  # stringi transliterates in any locale; chartr() with an accented `old` string fails under
+  # LANG=C ("'old' is longer than 'new'": the literal is read as bytes there).
+  x <- tolower(stringi::stri_trans_general(trimws(as.character(x)), "Latin-ASCII"))
+  gsub("[^a-z0-9]", "", x)
+}
+
+# Resolve, by the record's own PROVINCE, a bare zone name that the spine carries only in its
+# "Name (Province)" form. The spine separates its same-named zones that way ("Bili (Bas-Uele)"
+# and "Bili (Nord-Ubangi)", likewise Lubunga), while the line list writes the bare name and
+# records the province in its own column; an exact-name match therefore never finds them, and
+# every such record fell out of the zone-week grid and the alert counts. A name the spine
+# carries as written, a bare name whose province matches no candidate (or is missing), and
+# every other name are returned unchanged. Vectorised over records.
+.resolve_zone_by_province <- function(zone, province, spine) {
+  out <- zone
+  if (is.null(spine) || is.null(province) || !length(zone)) return(out)
+  qual <- spine[grepl(" \\([^()]*\\)$", spine)]
+  if (!length(qual)) return(out)
+  key <- paste(sub(" \\([^()]*\\)$", "", qual),
+               .province_key(sub("^.*\\(([^()]*)\\)$", "\\1", qual)), sep = "\r")
+  qual <- qual[!key %in% key[duplicated(key)]]           # a (name, province) pair must be unique
+  key  <- key[!key %in% key[duplicated(key)]]
+  cand <- !is.na(zone) & !(zone %in% spine)
+  hit  <- qual[match(paste(zone[cand], .province_key(province[cand]), sep = "\r"), key)]
+  out[cand] <- ifelse(is.na(hit), zone[cand], hit)
+  out
+}
+
+# The per-record key of the onset-imputation draw (.uniform_from_ids(), below): the record's
+# alert_id, which the draw is designed to depend on. A record WITHOUT an alert_id would hash to
+# the same uniform as every other id-less record, so in any donor week all of them would take
+# the same interval; each is keyed instead on a hash of its own fields AS EXTRACTED (call this
+# before any column is coerced or replaced, so the key does not move with SAMPLE_DATE_SOURCE
+# or CASE_ZONE_BASIS). The key, like the id, depends neither on row order nor on other records.
+.onset_draw_keys <- function(df) {
+  key <- as.character(df$alert_id)
+  noid <- which(is.na(key))
+  if (length(noid)) {
+    flds <- df[noid, setdiff(names(df), ".onset_draw_key"), drop = FALSE]
+    key[noid] <- paste0("NOID-", vapply(do.call(paste, c(unname(as.list(flds)), sep = "\x1f")),
+                                        rlang::hash, character(1), USE.NAMES = FALSE))
+  }
+  key
+}
+
 # NOTE: .load_dhis2_delay_params() and .draw_dhis2_delay() MOVED to 00_config.R (sourced
 # above), alongside delay_cdf() and effective_onset_sample_delay(). They lived here, but
 # 04_nowcasting.R and 02_epi_params.R need the same delay and could not reach a definition
 # private to the data-prep module — so they silently kept using the fixed lab Exp reference
 # while this file used the fitted DHIS2 delay. One shared definition removes that whole class
-# of drift: the imputation draw (.draw_dhis2_delay), the nowcast weights (delay_cdf) and the
-# R(t) truncation model now all read ONE resolver, effective_onset_sample_delay().
+# of drift: the nowcast weights' fallback (delay_cdf) and the R(t) truncation's legacy mode read
+# ONE resolver, effective_onset_sample_delay(). (The missing-onset imputation no longer uses a
+# fitted delay: it draws from donor intervals, .impute_onset_delays() below.)
 
 
-# Build sitrep-confirmed TOP-UP line-list rows that reconcile the DHIS2 line list
-# to the INSP sitrep's cumulative confirmed counts, WITHOUT double-counting.
-#
-# WHY: invasion status and case counts in this suite are defined purely from the
-# line list's confirmed cases, but the line list lags the official INSP sitrep for
-# some zones (e.g. a zone the sitrep confirms while the line list still holds only
-# suspects). This appends the SHORTFALL — for each zone, max(0, sitrep_cumulative -
-# linelist_confirmed) confirmed rows — so every zone reaches AT LEAST its sitrep
-# confirmed count. Zones where the line list already meets/exceeds the sitrep get
-# nothing (no cases are ever removed; the sitrep is a floor, never a ceiling).
-#
-# SOURCE: the CUMULATIVE confirmed file is authoritative for magnitude — the daily
-# `new_confirmed_cases` extraction grossly undercounts (e.g. Bunia 66 vs 507), so it
-# is NOT used here. Per canonical zone we merge spelling variants by MAX-per-date,
-# take the running maximum over dates (absorbing the sitrep's occasional cumulative
-# dips/revisions), and diff it into dated positive increments — one confirmed case
-# per unit increment, dated at the sitrep report date on which it appeared.
-#
-# PLACEMENT & DATING: the shortfall is filled with the MOST RECENT sitrep confirmed
-# dates (reporting lag ⇒ the line list already holds the earlier cases). Each appended
-# row's `date_of_sample_collection` is set to that sitrep report date and its onset is
-# LEFT BLANK, so the caller's onset-imputation block imputes onset = sample − a delay
-# DRAWN from the fitted onset→sample distribution — exactly as it treats the ~15% of
-# real records lacking an onset (same convention as build_conditional_linelist.R).
-#
-# IDEMPOTENT vs the conditional pre-append: build_conditional_linelist.R already
-# injects some sitrep zones into the conditional CSV; those raise `n_ll` so their
-# shortfall is 0 here — they are not re-appended. Toggle with APPEND_SITREP_CONFIRMED.
-#
-# Args:  ll          — current line list (outbreak-filtered, unmatched-excluded,
-#                       health_zone alias-corrected), with final_mve_case_classification.
-#        aliases_all — full aliases tibble (observed_name, canonical_nom) or NULL;
-#                       used to canonicalise sitrep `nom` to the modelling spine.
-# Returns a tibble (0 rows if nothing to append) whose columns are a subset of `ll`'s,
-#   safe to dplyr::bind_rows() onto `ll`.
 #' The INSP sitrep's CUMULATIVE CONFIRMED series, canonicalised onto the modelling spine.
 #'
 #' ONE reader, used by the line-list reconciliation below AND by the surveillance-stream
@@ -196,6 +195,41 @@ sitrep_cumulative_confirmed <- function(aliases_all = NULL) {
     dplyr::ungroup()
 }
 
+# Build sitrep-confirmed TOP-UP line-list rows that reconcile the DHIS2 line list
+# to the INSP sitrep's cumulative confirmed counts, WITHOUT double-counting.
+#
+# WHY: invasion status and case counts in this suite are defined purely from the
+# line list's confirmed cases, but the line list lags the official INSP sitrep for
+# some zones (e.g. a zone the sitrep confirms while the line list still holds only
+# suspects). This appends the SHORTFALL — for each zone, max(0, sitrep_cumulative -
+# linelist_confirmed) confirmed rows — so every zone reaches AT LEAST its sitrep
+# confirmed count. Zones where the line list already meets/exceeds the sitrep get
+# nothing (no cases are ever removed; the sitrep is a floor, never a ceiling).
+#
+# SOURCE: sitrep_cumulative_confirmed() above — the CUMULATIVE confirmed file, spelling
+# variants merged by MAX-per-date, a running maximum over dates, diffed into dated positive
+# increments: one confirmed case per unit increment, dated at the sitrep report date on
+# which it appeared.
+#
+# PLACEMENT & DATING: the shortfall is filled with the MOST RECENT sitrep confirmed
+# dates (reporting lag ⇒ the line list already holds the earlier cases). Each appended
+# row's `date_of_sample_collection` is set to that sitrep report date (SITREP_APPEND_SHIFT_DAYS
+# earlier under that sensitivity) and its onset is LEFT BLANK, so load_linelist() imputes
+# onset = sample − an interval drawn from the recorded intervals of same-class records sampled
+# in the same week (.impute_onset_delays()) — exactly as it treats real records lacking a
+# usable onset (same convention as build_conditional_linelist.R).
+#
+# IDEMPOTENT vs the conditional pre-append: build_conditional_linelist.R already
+# injects some sitrep zones into the conditional CSV; those raise `n_ll` so their
+# shortfall is 0 here — they are not re-appended. Toggle with APPEND_SITREP_CONFIRMED.
+#
+# Args:  ll          — current line list (outbreak-filtered, unmatched-excluded, health_zone
+#                       canonicalised by province and aliases), with final_mve_case_classification.
+#        aliases_all — full aliases tibble (observed_name, canonical_nom) or NULL;
+#                       used to canonicalise sitrep `nom` to the modelling spine.
+# Returns a tibble (0 rows if nothing to append), safe to dplyr::bind_rows() onto `ll`. A
+#   column it carries that `ll` lacks (e.g. genexpert_result, or date_known, added only when
+#   SITREP_APPEND_SHIFT_DAYS > 0) is NA on the line-list rows after the bind.
 .build_sitrep_confirmed_appends <- function(ll, aliases_all) {
 
   if (!isTRUE(get0("APPEND_SITREP_CONFIRMED", ifnotfound = TRUE))) return(tibble::tibble())
@@ -203,10 +237,7 @@ sitrep_cumulative_confirmed <- function(aliases_all = NULL) {
   # Canonical modelling spine (WorldPop 519 zones): a sitrep zone absent from it cannot
   # enter the zone-week grid, so we skip (and warn about) it rather than fabricate an
   # unmatched row that aggregate_to_zone_week would silently drop.
-  spine <- tryCatch(
-    readr::read_csv(file.path(WORLDPOP_DIR, "worldpop__pop_count__static.csv"),
-      col_types = readr::cols(nom = "c", pop_count = "d"), show_col_types = FALSE)$nom,
-    error = function(e) NULL)
+  spine <- .zone_spine_names()
 
   incs <- sitrep_cumulative_confirmed(aliases_all)
   if (!nrow(incs)) return(tibble::tibble())
@@ -273,16 +304,21 @@ sitrep_cumulative_confirmed <- function(aliases_all = NULL) {
               "group with any line-list rows: ", paste(.still, collapse = ", "), call. = FALSE)
   }
 
+  # SITREP_APPEND_SHIFT_DAYS (00_config.R): the report date follows the specimen, so the
+  # sensitivity dates the specimen `.shift` days earlier while the row still becomes KNOWN only on
+  # the report date (date_known, read first by linelist_observation_date()). The column is added
+  # only when the shift is on, so the default line list is unchanged.
+  .shift <- as.integer(get0("SITREP_APPEND_SHIFT_DAYS", ifnotfound = 0L))
   mk <- function(z, short) {
     d <- pick_dates(z, short)
-    tibble::tibble(
+    out <- tibble::tibble(
       country                       = "Democratic Republic of the Congo",
       province                      = unname(.prov_lookup[z]),
       health_zone                   = z,
       health_zone_unmatched         = FALSE,
       health_area_unmatched         = FALSE,
-      date_of_sample_collection     = as.Date(d),
-      date_of_symptom_onset         = as.Date(NA),   # imputed downstream from the delay dist
+      date_of_sample_collection     = as.Date(d) - .shift,
+      date_of_symptom_onset         = as.Date(NA),   # imputed downstream from donor intervals
       final_mve_case_classification = CONFIRMED_STATUS,
       genexpert_result              = "positive",
       # samples_received / samples_analyzed are deliberately NA, NOT 1. These rows are a
@@ -296,9 +332,15 @@ sitrep_cumulative_confirmed <- function(aliases_all = NULL) {
       samples_analyzed              = NA_real_,
       alert_id = sprintf("SITREP-CONF-%s-%02d", gsub("[^A-Za-z0-9]", "", z), seq_along(d))
     )
+    if (.shift > 0L) out$date_known <- as.Date(d)
+    out
   }
   appended <- purrr::map2_dfr(recon$nom, recon$shortfall, mk)
 
+  if (.shift > 0L)
+    message(sprintf(paste0("[load_linelist] SITREP_APPEND_SHIFT_DAYS = %d: the %d appended row(s) are ",
+                           "dated %d day(s) before their sitrep report date (known on the report date)."),
+                    .shift, nrow(appended), .shift))
   message(sprintf(
     "[load_linelist] Sitrep reconciliation: appended %d confirmed case(s) across %d zone(s) (top-up to sitrep cumulative): %s",
     nrow(appended), nrow(recon),
@@ -312,30 +354,49 @@ sitrep_cumulative_confirmed <- function(aliases_all = NULL) {
 # =============================================================================
 #
 # Reads the DHIS2 processed linelist identified by LINELIST_JSON (latest.json),
-# filters to the current BDBV 2026 outbreak (>= OUTBREAK_START), handles
-# zone-name aliasing, and excludes records with unmatched health zones.
+# filters to the current BDBV 2026 outbreak (>= OUTBREAK_START), resolves zone names
+# (by province for same-named zones, then aliases), and excludes records with unmatched
+# health zones.
 #
 # Returns a tibble with:
 #   - All original columns (dates coerced to Date class)
-#   - `date_index`    : date_of_symptom_onset if available, else date_of_sample_collection
+#   - `date_index`    : the usable recorded onset (censored at the sample date), else the
+#                       sample date minus an interval drawn from same-class, same-week donors,
+#                       floored at OUTBREAK_START; NA when neither exists, when no donor exists,
+#                       when it falls after ANALYSIS_DATE, or (ONSET_MODE = "complete_case")
+#                       when the onset is not usable
+#   - `onset_usable`, `onset_imputed`, `onset_censored` : logical flags for the above
 #   - `confirmed`     : logical — final_mve_case_classification == CONFIRMED_STATUS
 #   - `suspected`     : logical — final_mve_case_classification == SUSPECTED_STATUS
-#   - `health_zone`   : alias-corrected zone name
+#   - `health_zone`   : canonical zone name (province-resolved, alias-corrected)
 
-load_linelist <- function() {
+# .read_linelist_records(): the record-level half of load_linelist() — read, type coercion,
+# unmatched-zone exclusion and zone-name resolution, with NO date filter. Split out (2026-10-03)
+# so that load_unplaced_alerts() sees the SAME zone matching and aliasing as the case data. The
+# outbreak filter used to run before the exclusion and the aliasing; all three are row-wise
+# and order-preserving, so moving it after them leaves load_linelist()'s output identical
+# (verified with identical() on the LINELIST_23092026 snapshot) and only shifts the counts
+# its log lines report. It also carries `.onset_draw_key` (.onset_draw_keys()), which
+# load_linelist() consumes and drops.
+.read_linelist_records <- function(folder = NULL) {
 
-  # ---- resolve path via latest.json ----------------------------------------
-  if (!file.exists(LINELIST_JSON)) {
-    stop("[load_linelist] latest.json not found: ", LINELIST_JSON, call. = FALSE)
+  # ---- resolve path: an explicit snapshot folder, else latest.json -----------
+  # `folder` lets the back-test read an ARCHIVED snapshot (LFO_TRAINING_SOURCE = "vintage",
+  # load_linelist_vintage(), below); the default is the live snapshot.
+  if (is.null(folder)) {
+    if (!file.exists(LINELIST_JSON)) {
+      stop("[load_linelist] latest.json not found: ", LINELIST_JSON, call. = FALSE)
+    }
+    meta <- tryCatch(
+      jsonlite::fromJSON(LINELIST_JSON, simplifyVector = TRUE),
+      error = function(e) stop("[load_linelist] Cannot parse latest.json: ", e$message, call. = FALSE)
+    )
+    if (!"folder" %in% names(meta)) {
+      stop("[load_linelist] latest.json has no 'folder' key.", call. = FALSE)
+    }
+    folder <- meta$folder
   }
-  meta <- tryCatch(
-    jsonlite::fromJSON(LINELIST_JSON, simplifyVector = TRUE),
-    error = function(e) stop("[load_linelist] Cannot parse latest.json: ", e$message, call. = FALSE)
-  )
-  if (!"folder" %in% names(meta)) {
-    stop("[load_linelist] latest.json has no 'folder' key.", call. = FALSE)
-  }
-  ll_csv <- file.path(LINELIST_DIR, meta$folder, "dhis2_processed_linelist.csv")
+  ll_csv <- file.path(LINELIST_DIR, folder, "dhis2_processed_linelist.csv")
   if (!file.exists(ll_csv)) {
     stop("[load_linelist] Linelist CSV not found: ", ll_csv, call. = FALSE)
   }
@@ -353,12 +414,16 @@ load_linelist <- function() {
   message("[load_linelist] Rows loaded: ", nrow(ll))
 
   # ---- check minimum required columns ---------------------------------------
+  # alert_id is required: the onset-imputation draw, the earliest-sample lookup and the sitrep
+  # top-up's identification all key on it.
   required_cols <- c(
-    "health_zone", "health_zone_unmatched",
+    "alert_id", "health_zone", "health_zone_unmatched",
     "date_of_sample_collection", "date_of_symptom_onset",
     "final_mve_case_classification"
   )
   .check_cols(ll, required_cols, "load_linelist")
+  # Before any column is coerced or replaced (see .onset_draw_keys()).
+  ll$.onset_draw_key <- .onset_draw_keys(ll)
 
   # ---- coerce types ----------------------------------------------------------
   # Logical columns
@@ -388,6 +453,10 @@ load_linelist <- function() {
     ll[[dc]] <- .parse_date(ll[[dc]])
   }
 
+  # DIAGNOSTIC SAMPLE DATE (SAMPLE_DATE_SOURCE, 00_config.R): the earliest sample date recorded
+  # for each alert across the snapshot archive, not the extract's (possibly repeat-test) date.
+  ll <- apply_earliest_sample_dates(ll, label = "load_linelist")
+
   # Numeric columns
   if ("samples_analyzed" %in% names(ll)) {
     ll$samples_analyzed <- suppressWarnings(as.numeric(ll$samples_analyzed))
@@ -395,21 +464,6 @@ load_linelist <- function() {
   if ("samples_received" %in% names(ll)) {
     ll$samples_received <- suppressWarnings(as.numeric(ll$samples_received))
   }
-
-  # ---- filter to outbreak start date ----------------------------------------
-  # Keep a record if EITHER its symptom onset OR its sample-collection date is on/after
-  # OUTBREAK_START. The forecast target is onset-defined, so requiring a NON-NA sample
-  # date silently dropped onset-only confirmed cases (e.g. epicentre cases with a blank
-  # sample date). Records with both dates pre-outbreak, or neither present, are dropped.
-  n_before <- nrow(ll)
-  ll <- ll %>%
-    dplyr::filter(
-      (!is.na(date_of_symptom_onset)     & date_of_symptom_onset     >= OUTBREAK_START) |
-      (!is.na(date_of_sample_collection) & date_of_sample_collection >= OUTBREAK_START))
-  message(
-    "[load_linelist] After OUTBREAK_START filter (",
-    OUTBREAK_START, "): ", nrow(ll), " rows (dropped ", n_before - nrow(ll), ")"
-  )
 
   # ---- exclude unmatched health zones ----------------------------------------
   n_unmatched <- sum(ll$health_zone_unmatched %in% TRUE, na.rm = TRUE)
@@ -420,6 +474,21 @@ load_linelist <- function() {
       call. = FALSE
     )
     ll <- ll %>% dplyr::filter(!(health_zone_unmatched %in% TRUE))
+  }
+
+  # ---- same-named zones: resolve the bare name by province --------------------
+  # BEFORE the aliases, because an alias is province-blind (aliases.csv maps a bare
+  # "Lubunga" to "Lubunga (Tshopo)"), while the record's own province tells the two apart.
+  .spine <- .zone_spine_names()
+  if ("province" %in% names(ll) && !is.null(.spine)) {
+    old <- ll$health_zone
+    ll$health_zone <- .resolve_zone_by_province(ll$health_zone, ll$province, .spine)
+    ch <- !is.na(old) & old != ll$health_zone
+    if (any(ch)) {
+      tb <- table(paste0(old[ch], " -> ", ll$health_zone[ch]))
+      message("[load_linelist] Same-named zones resolved by province: ", sum(ch), " records (",
+              paste(sprintf("%s: %d", names(tb), as.integer(tb)), collapse = "; "), ").")
+    }
   }
 
   # ---- apply zone name aliases -----------------------------------------------
@@ -469,357 +538,255 @@ load_linelist <- function() {
       }
     }
   }
+  # A bare same-named zone name that neither its province nor an alias resolved is outside the
+  # spine: every zone count would drop its records, at most with a generic off-spine warning.
+  if (!is.null(.spine)) {
+    .bare <- setdiff(unique(sub(" \\([^()]*\\)$", "", .spine[grepl(" \\([^()]*\\)$", .spine)])), .spine)
+    .left <- ll$health_zone %in% .bare
+    if (any(.left))
+      warning(sprintf(paste0("[load_linelist] %d record(s) carry the bare name of a same-named zone (%s) ",
+                             "that neither their province nor an alias resolves to one of its spine entries; ",
+                             "they fall outside the zone spine and are dropped from every zone count."),
+                      sum(.left), paste(unique(ll$health_zone[.left]), collapse = ", ")), call. = FALSE)
+  }
+
+  # The alias table travels with the records: load_linelist() needs it again for the sitrep
+  # reconciliation below. NULL when aliases.csv is absent, exactly as before the split.
+  attr(ll, "aliases") <- if (exists("aliases", inherits = FALSE)) aliases else NULL
+  ll
+}
+
+#' CASE_ZONE_BASIS = "residence" (00_config.R): count each CONFIRMED record in the zone of its
+#' recorded residence health area, where that resolves.
+#'
+#' The lookup is the MRT construction (mrt_affected_zones/R/02_cases.R::residence_lookup): every
+#' record's REPORTING (health_area, health_zone) pair with a matched health area and an in-spine
+#' zone, keeping only health areas that map to exactly one zone. A residence that is missing,
+#' unrecognised or ambiguous leaves the record in its reporting zone; so do alerts that are not
+#' confirmed (they describe where the system detects, not where cases live) and the sitrep top-up
+#' rows (they carry no residence, and the sitrep counts them by reporting zone). The reporting
+#' zone is kept in `health_zone_reporting`. A snapshot without the residence column (the archive
+#' before 2026-07-17) keeps every reporting zone rather than borrowing residences from a later one.
+#' So in this arm a back-test round trained on such a snapshot (LFO_TRAINING_SOURCE = "vintage")
+#' sees REPORTING-zone counts, while its outcomes are scored on the final, residence-basis line list.
+#' A confirmed record with no reporting zone but a resolved residence is placed in that residence.
+#' @param lookup_records every record of the extract (before the outbreak filter).
+.apply_residence_zone <- function(ll, lookup_records) {
+  ll$health_zone_reporting <- ll$health_zone
+  need <- c("health_area", "health_area_unmatched", "health_zone")
+  if (!"permanent_residence_health_area" %in% names(ll) || !all(need %in% names(lookup_records))) {
+    warning("[load_linelist] CASE_ZONE_BASIS = 'residence' but this extract has no residence (or ",
+            "health-area) column; every case keeps its reporting zone.", call. = FALSE)
+    return(ll)
+  }
+  spine <- .zone_spine_names()
+  if (is.null(spine)) {
+    warning("[load_linelist] CASE_ZONE_BASIS = 'residence' but the zone spine is unreadable; every ",
+            "case keeps its reporting zone.", call. = FALSE)
+    return(ll)
+  }
+  lk <- lookup_records[!is.na(lookup_records$health_area) &
+                         lookup_records$health_area_unmatched %in% FALSE &
+                         lookup_records$health_zone %in% spine, c("health_area", "health_zone")]
+  lk$health_area <- trimws(lk$health_area)
+  lk <- unique(lk)
+  n_z <- table(lk$health_area)
+  lk <- lk[lk$health_area %in% names(n_z)[n_z == 1L], , drop = FALSE]
+  res  <- lk$health_zone[match(trimws(ll$permanent_residence_health_area), lk$health_area)]
+  conf <- (ll$final_mve_case_classification == CONFIRMED_STATUS) %in% TRUE
+  # NA-safe: `res != NA` is NA, and one NA in `move` breaks the any() and the assignment below.
+  move <- conf & !is.na(res) & (is.na(ll$health_zone) | res != ll$health_zone)
+  before <- unique(ll$health_zone[conf & !is.na(ll$health_zone)])
+  # Province follows the zone (the commonest province among the zone's records), so nothing that
+  # groups by (health_zone, province) splits a zone in two.
+  if ("province" %in% names(ll) && any(move)) {
+    pz <- stats::aggregate(n ~ health_zone + province,
+                           data = transform(ll[!is.na(ll$province), c("health_zone", "province")], n = 1L),
+                           FUN = sum)
+    pz <- pz[order(-pz$n), ]; pz <- pz[!duplicated(pz$health_zone), ]
+    newp <- pz$province[match(res[move], pz$health_zone)]
+    ll$province[move] <- ifelse(is.na(newp), ll$province[move], newp)
+  }
+  ll$health_zone[move] <- res[move]
+  after <- unique(ll$health_zone[conf & !is.na(ll$health_zone)])
+  message(sprintf(paste0("[load_linelist] CASE_ZONE_BASIS = 'residence': %d of %d confirmed record(s) ",
+                         "resolve a residence zone (lookup: %d unambiguous health areas, %d ambiguous ",
+                         "dropped); %d live outside their reporting zone (or have none) and are MOVED. Zones with a ",
+                         "confirmed case: %d gained, %d lost."),
+                  sum(conf & !is.na(res)), sum(conf), nrow(lk), sum(n_z > 1L), sum(move),
+                  length(setdiff(after, before)), length(setdiff(before, after))))
+  ll
+}
+
+#' Uniform(0, 1) per record, a deterministic function of (id, seed). The imputation draw of a
+#' record therefore does not depend on row order or on which other records are present, and
+#' changing the seed (ONSET_IMPUTE_SEED, default RANDOM_SEED) gives an independent completion
+#' (the multiple-imputation sweeps). Refuses a missing id: every NA would hash to ONE value, so
+#' all id-less records would share a single draw (load_linelist() keys them by .onset_draw_keys()).
+.uniform_from_ids <- function(ids, seed) {
+  if (anyNA(ids))
+    stop("[load_linelist] .uniform_from_ids(): ", sum(is.na(ids)), " missing id(s); each record ",
+         "needs its own key (.onset_draw_keys()).", call. = FALSE)
+  h <- vapply(as.character(ids), function(x) rlang::hash(c(x, as.character(seed))),
+              character(1), USE.NAMES = FALSE)
+  # The first 7 hex digits of the hash: an integer in [0, 16^7), always within strtoi()'s range.
+  (strtoi(substr(h, 1L, 7L), base = 16L) + 0.5) / 16^7
+}
+
+#' Missing-onset imputation: the interval to subtract from a record's sample date.
+#'
+#' What is needed for a record SAMPLED on date s is the distribution of (sample - onset) AMONG
+#' RECORDS SAMPLED AT s. That is the backward interval, and it is not the forward onset->sample
+#' delay: while incidence grows, recently sampled cases have disproportionately short intervals.
+#' It is observed directly. The donors are the records of the SAME CLASS (`group`: confirmed or
+#' not) sampled in the SAME WEEK (the WEEK_ANCHOR grid) whose onset is recorded and usable; the
+#' interval is drawn from theirs. Conditioning on the sample date, a donor's interval is fully
+#' observed, so no delay family, growth-rate model or truncation correction enters.
+#'
+#' ASSUMPTION, stated: within a sample week and class, whether a record's onset was recorded does
+#' not depend on its interval (missing at random given sample week and class).
+#'
+#' A sample week with fewer than `min_donors` donors borrows the adjacent weeks on both sides,
+#' one week at a time, until it has enough (on the 2026-10-09 frame: the first two outbreak weeks
+#' in both classes, and for the non-confirmed also two sample weeks dated before the outbreak).
+#'
+#' The draw for record i is the empirical quantile of its donor intervals at u_i =
+#' .uniform_from_ids(id_i, seed): equivalent to picking a donor uniformly at random, but
+#' reproducible record by record.
+#'
+#' @param anchor sample dates; @param recorded the usable recorded onsets (NA otherwise);
+#' @param usable logical, recorded onset usable; @param group donor class of each record;
+#' @param need logical, the records to impute; @param ids record keys, one per record and
+#'   non-missing where `need` (alert_id, or .onset_draw_keys());
+#' @param asof records sampled after it are not donors.
+#' @return integer vector of intervals (days); NA where none is needed or no donor exists.
+.impute_onset_delays <- function(anchor, recorded, usable, group, need, ids, seed, asof = NA,
+                                 week_start = get0("WEEK_ANCHOR", ifnotfound = 1L),
+                                 min_donors = get0("ONSET_DONOR_MIN", ifnotfound = 20L)) {
+  anchor <- as.Date(anchor); recorded <- as.Date(recorded)
+  if (length(ids) != length(anchor))
+    stop("[load_linelist] .impute_onset_delays(): `ids` must have one entry per record.", call. = FALSE)
+  out <- rep(NA_integer_, length(anchor))
+  todo <- which(need %in% TRUE & !is.na(anchor))
+  if (!length(todo)) return(out)
+  wk <- as.numeric(lubridate::floor_date(anchor, "week", week_start = week_start))
+  donor <- usable %in% TRUE & !is.na(anchor) & !is.na(recorded) &
+           (is.na(asof) | anchor <= as.Date(asof))
+  # >= 0 by construction (the recorded onset is censored at the sample date); pmax guards a
+  # sample dated before the outbreak floor, where the floored onset would follow it.
+  ivl <- pmax(as.integer(anchor - recorded), 0L)
+  u <- .uniform_from_ids(ids[todo], seed)
+  for (g in unique(group[todo])) {
+    dg <- which(donor & group == g)
+    if (!length(dg)) next
+    tg <- todo[group[todo] == g]
+    for (w in unique(wk[tg])) {
+      k <- 0L
+      repeat {
+        sel <- abs(wk[dg] - w) <= 7 * k
+        if (sum(sel) >= min_donors || all(sel)) break
+        k <- k + 1L
+      }
+      pool <- sort(ivl[dg[sel]])
+      ii <- tg[wk[tg] == w]
+      out[ii] <- pool[floor(u[match(ii, todo)] * length(pool)) + 1L]
+    }
+  }
+  out
+}
+
+load_linelist <- function(folder = NULL) {
+  # `folder` = an archived snapshot; every as-of rule below reads the global ANALYSIS_DATE, which
+  # load_linelist_vintage() (this file) sets to the snapshot's date for the duration.
+  ll <- .read_linelist_records(folder)
+  aliases <- attr(ll, "aliases"); attr(ll, "aliases") <- NULL
+  # ---- alert_id: the key of the onset draw and of the earliest-sample lookup ----------
+  # A missing id is NOT refused and NOT dropped: the archived snapshots of 2026-06-18 to
+  # 2026-09-17 carry id-less records, confirmed cases among them, and dropping them would drop
+  # cases. They are keyed for the draw by .onset_draw_keys() instead.
+  .n_noid <- sum(is.na(ll$alert_id))
+  if (.n_noid > 0L)
+    warning(sprintf(paste0("[load_linelist] %d record(s) have no alert_id: they keep the extract's sample ",
+                           "date (the earliest-sample lookup is by alert_id), and their onset-imputation ",
+                           "draw is keyed on a hash of the record's own fields."), .n_noid), call. = FALSE)
+  .dup <- !is.na(ll$alert_id) & ll$alert_id %in% ll$alert_id[duplicated(ll$alert_id)]
+  if (any(.dup))
+    warning(sprintf(paste0("[load_linelist] %d alert_id value(s) are shared by %d records: records sharing ",
+                           "an id share one earliest-sample lookup and, if imputed, one onset-imputation ",
+                           "uniform."), length(unique(ll$alert_id[.dup])), sum(.dup)), call. = FALSE)
+  .residence_basis <- identical(get0("CASE_ZONE_BASIS", ifnotfound = "reporting"), "residence")
+  .lookup_records <- if (.residence_basis)
+    ll[, intersect(c("health_area", "health_area_unmatched", "health_zone"), names(ll)), drop = FALSE]
+
+  # ---- filter to outbreak start date ----------------------------------------
+  # Keep a record if EITHER its symptom onset OR its sample-collection date is on/after
+  # OUTBREAK_START. The forecast target is onset-defined, so requiring a NON-NA sample
+  # date silently dropped onset-only confirmed cases (e.g. epicentre cases with a blank
+  # sample date). Records with both dates pre-outbreak, or neither present, are dropped.
+  n_before <- nrow(ll)
+  # .record_in_outbreak() (Section 3b) is the ONE statement of this rule, so the records it
+  # rejects here and the ones load_unplaced_alerts() returns are complements by construction.
+  ll <- ll[.record_in_outbreak(ll$date_of_symptom_onset, ll$date_of_sample_collection), , drop = FALSE]
+  message(
+    "[load_linelist] After OUTBREAK_START filter (",
+    OUTBREAK_START, "): ", nrow(ll), " rows (dropped ", n_before - nrow(ll), ")"
+  )
 
   # ---- append sitrep-confirmed top-up rows (reconcile line list to sitrep) ----
   # Injected AFTER the outbreak filter, unmatched exclusion, and aliasing (so the
   # appends carry canonical, in-spine, in-outbreak, matched zones) and BEFORE the
-  # onset-imputation block below (so their blank onset is imputed from the fitted
-  # onset->sample delay, like any real onset-less record). The appends carry no
-  # complete onset+sample pair, so they do NOT perturb the delay estimation; and
-  # binding them at the END preserves the positional RNG draws of the existing rows.
-  # `aliases` is assigned only inside the alias block above (when aliases.csv exists); guard
-  # with exists() so a missing aliases.csv degrades to NULL (the helper then skips sitrep-name
-  # canonicalisation) instead of raising "object 'aliases' not found".
-  .sitrep_appends <- .build_sitrep_confirmed_appends(
-    ll, if (exists("aliases", inherits = FALSE)) aliases else NULL)
+  # onset-imputation block below (so their blank onset is imputed from their report date, which
+  # stands in for a sample date, like any real onset-less record). They carry no recorded onset,
+  # so they are never donors; and each record's imputation draw depends only on its own key and
+  # the seed, so appending them moves no other record's draw.
+  # `aliases` is the table .read_linelist_records() attached: NULL when aliases.csv is absent or
+  # unreadable, and the helper then skips sitrep-name canonicalisation.
+  .sitrep_appends <- .build_sitrep_confirmed_appends(ll, aliases)
   if (nrow(.sitrep_appends) > 0) ll <- dplyr::bind_rows(ll, .sitrep_appends)
+  # The appended rows' draw key is their (unique, generated) alert_id.
+  ll$.onset_draw_key <- dplyr::coalesce(ll$.onset_draw_key, as.character(ll$alert_id))
+  # RESIDENCE BASIS (sensitivity) AFTER the sitrep top-up: the sitrep counts by reporting zone, so
+  # reconciling against residence-basis totals would top up the zones that lose residents with
+  # cases the line list already holds elsewhere.
+  if (.residence_basis) ll <- .apply_residence_zone(ll, .lookup_records)
 
   # ---- construct date_index and classification flags -------------------------
-  # The forecast target is onset-dated (P of first symptom ONSET). Records missing an onset
-  # date are imputed to onset = sample_date - delay, where the delay is DRAWN from the fitted
-  # onset->sample distribution (see below) rather than fixed at its mean — so imputed onsets
-  # contribute a true onset week spread by the delay's variance. Records with neither date are
-  # dropped downstream (date_index = NA).
-  # Onset->sample reporting delay used for the single (stochastic, per-record draw) imputation of
-  # missing onsets. Default: the fixed lab-linelist Exp(rate) from config. Set
-  # ONSET_SAMPLE_DELAY_SOURCE = "data" (or
-  # IMPUTE_DELAY_FROM_DATA = TRUE) to instead ESTIMATE the mean delay from the CURRENT
-  # linelist's complete onset+sample pairs (MLE of an Exponential = 1/mean-delay) — the right
-  # choice when processing DHIS2 data whose reporting delay differs from the lab linelist.
-  .delay_src <- get0("ONSET_SAMPLE_DELAY_SOURCE",
-                     ifnotfound = if (isTRUE(get0("IMPUTE_DELAY_FROM_DATA", ifnotfound = FALSE))) "data" else "lab")
-  .fixed_rate <- get0("DELAY_ONSET_SAMPLE_RATE", ifnotfound = NA_real_)
+  # The forecast target is onset-dated (P of first symptom ONSET). date_index is the recorded
+  # onset where it is usable; a record with a sample date but no usable onset gets an onset
+  # IMPUTED as sample date minus an interval drawn from DONORS (.impute_onset_delays() below:
+  # records of the same class sampled in the same week whose onset IS recorded). Records with
+  # neither date get date_index = NA and are dropped downstream.
   # OUTBREAK_START itself, NOT its WEEK_ANCHOR-floored week. WEEK_ANCHOR is derived from the
   # weekday ANALYSIS_DATE falls on (00_config.R), so flooring here made the onset-plausibility
   # floor slide with the day of the week the pipeline was run: on the same frozen snapshot a
   # Monday run floored to 2026-04-28 and a Thursday run to 2026-04-24, flipping onsets in that
-  # band between "usable" and "imputed". The grid re-anchoring is deliberate and documented; this
-  # side effect on record-level usability was not. A plausibility floor is a property of the
-  # outbreak, not of the run.
+  # band between "usable" and "imputed". A plausibility floor is a property of the outbreak, not
+  # of the run.
   .ob_floor <- OUTBREAK_START
-  # WINDOWED complete onset+sample pairs for the empirical delay bootstrap: onset in
-  # [outbreak-week floor, max(sample) - TEST_DAYS]. Windowing (mirroring the delay estimator
-  # 04c_dhis2_delay_windows.R) drops the right-truncated final days — where recent onsets that
-  # WILL be sampled at long delays are not yet observed, biasing the raw complete-pair delay
-  # SHORT — and any pre-outbreak onset typos, so the bootstrap sample is the clean,
-  # representative onset->sample delay. If the window is too thin (<30 pairs) it falls back to
-  # ALL complete pairs, so a short line list is never left with no delay data.
-  .test_days <- get0("DELAY_TRUNC_BUFFER_DAYS", ifnotfound = 5L)
-  # Shared onset->sample plausibility ceiling (00_config.R) — the SAME bound the delay estimator
-  # fits under (04c MAX_DELAY), so the bootstrap pairs, the imputed-delay clamp and the fit all
-  # share one support instead of the previous 90-vs-60 split.
+  # Shared onset->sample plausibility ceiling (00_config.R), the same bound the delay fit uses.
   .max_plausible <- get0("DELAY_MAX_PLAUSIBLE_DAYS", ifnotfound = 60L)
-  # Clerical tolerance for an onset recorded AFTER its own specimen (00_config.R). Named
-  # rather than written inline at its single use site: its value and its meaning have to be
-  # read together, and an inline "+ 2L" invited being read as a biological claim.
+  # Clerical tolerance for an onset recorded AFTER its own specimen (00_config.R).
   .neg_tol <- get0("ONSET_SAMPLE_NEG_TOL_DAYS", ifnotfound = 2L)
-  .max_samp  <- suppressWarnings(max(ll$date_of_sample_collection, na.rm = TRUE))
-  # As-of consistency (mirror 04c): never let a sample collected AFTER the analysis date define
-  # the window edge — a no-op when the line list is snapshotted to the as-of date, but on a
-  # back-dated re-run (or a future-dated sample-date typo) it stops future data leaking in.
   .asof_date <- suppressWarnings(as.Date(get0("ANALYSIS_DATE", ifnotfound = NA)))
-  if (length(.asof_date) == 1L && !is.na(.asof_date) && is.finite(.max_samp))
-    .max_samp <- min(.max_samp, .asof_date)
-  .trunc_d   <- if (is.finite(.max_samp)) .max_samp - .test_days else as.Date(NA)
-  .dd_raw    <- as.numeric(ll$date_of_sample_collection - ll$date_of_symptom_onset)
-  .complete  <- !is.na(ll$date_of_symptom_onset) & !is.na(ll$date_of_sample_collection) &
-                is.finite(.dd_raw) & .dd_raw >= 0 & .dd_raw <= .max_plausible &   # plausible complete pairs
-                (is.na(.asof_date) | ll$date_of_sample_collection <= .asof_date)  # as-of observable only
-  .in_win    <- .complete & ll$date_of_symptom_onset >= .ob_floor &
-                (is.na(.trunc_d) | ll$date_of_symptom_onset <= .trunc_d)
-  .windowed  <- sum(.in_win) >= 30L
-  .dd        <- if (.windowed) .dd_raw[.in_win] else .dd_raw[.complete]     # windowed if enough, else all
-  # (The companion `.dd_onset` vector was REMOVED. It existed for a Lynden-Bell right-truncation
-  # reweighting of the empirical pool, and its comment still described those weights as being
-  # applied "below" — but that machinery was deleted when the imputation moved to drawing from
-  # the EpiDist resolver, which corrects truncation in the fit itself. The variable was computed
-  # and never read, and it pointed an auditor at code that no longer exists.)
-  # Rigorous DHIS2 delay params (windowed interval-censored MLE) from
-  # 04c_dhis2_delay_windows.R, when it has been run and the source is "data": its AIC-best
-  # family + Exponential-rate summary supersede the crude 1/mean for the reported rate and the
-  # parametric-fallback draw (a gamma/weibull/lnorm fit rather than an Exponential).
-  .dhis2_delay <- if (identical(.delay_src, "data")) .load_dhis2_delay_params() else NULL
-  # The REPORTED rate follows the same resolver the imputation draws from, so the logged rate and
-  # the realised draw cannot describe different distributions. 1/mean(.dd) is the right-truncated
-  # empirical rate and is used only when no fitted delay exists at all — the same condition under
-  # which the draw itself falls back, and it warns then.
-  .est_rate <- local({
-    # THE CONFIRMED-ONLY DELAY. This block imputes onsets for CONFIRMED records, so it must
-    # draw from the confirmed-case delay. Until 2026-09-22 it drew from a fit pooled over
-    # every classification, and on this line list that pool is majority TEST-NEGATIVE --
-    # 6,823 not_a_case windowed pairs and 2,038 with NO final classification, against 4,981
-    # confirmed and 145 suspected. Both of those groups are swabbed faster (raw means 6.40 d
-    # and 3.56 d against 8.80 d), so the pooled EpiDist marginal returns 7.67 d
-    # where the CONFIRMED stratum gives 10.14 d -- a 2.47 d (32%) gap, and imputed onsets
-    # landed that much LATE for the ~23% of confirmed records that carry one. (Both numbers
-    # are the truncation-corrected EpiDist marginal, which is what the resolver returns; the
-    # windowed interval-censored MLE puts the same contrast at 7.67 vs 9.11 d, so quote the
-    # estimator with the number.) Because the invasion outcome is the FIRST
-    # onset in a zone, a shift of that size can move a zone's invasion week -- this touches
-    # the outcome, not merely a covariate.
-    # A missing stratum warns inside the resolver and falls back to the pooled fit.
-    r <- tryCatch(effective_onset_sample_delay(stratum = "confirmed"), error = function(e) NULL)
-    if (!is.null(r) && identical(r$source, "data") && is.finite(r$rate) && r$rate > 0) r$rate
-    else if (!is.null(.dhis2_delay) && is.finite(.dhis2_delay$rate)) .dhis2_delay$rate
-    else if (length(.dd) >= 30 && mean(.dd) > 0) 1 / mean(.dd) else NA_real_
-  })
-  .rate_used <- if (identical(.delay_src, "data") && is.finite(.est_rate)) .est_rate else .fixed_rate
-  # --- Onset-handling MODE (review §1.1/§1.3) --------------------------------------------------
-  # ONSET_MODE selects how confirmed cases lacking a usable onset are handled (see 00_config.R):
-  # impute (default) / growth_impute (growth-tilted backward draw) / complete_case (drop) /
-  # sample_verbatim (date at sample). Unset -> derived from IMPUTE_ONSET_FROM_SAMPLE.
-  .onset_mode <- get0("ONSET_MODE", ifnotfound = NA_character_)
-  if (length(.onset_mode) != 1L || is.na(.onset_mode))
-    .onset_mode <- if (isTRUE(get0("IMPUTE_ONSET_FROM_SAMPLE", ifnotfound = TRUE))) "impute" else "sample_verbatim"
-  if (!.onset_mode %in% c("impute", "growth_impute", "complete_case", "sample_verbatim")) {
-    warning("[load_linelist] unknown ONSET_MODE '", .onset_mode, "'; using 'impute'"); .onset_mode <- "impute" }
-  # .imp_active is resolved HERE, after .onset_mode, and from .onset_mode alone.
-  #   (a) 00_config.R states ONSET_MODE "supersedes IMPUTE_ONSET_FROM_SAMPLE". It did not: this
-  #       gated on IMPUTE_ONSET_FROM_SAMPLE as well, so ONSET_MODE="impute" with
-  #       IMPUTE_ONSET_FROM_SAMPLE=FALSE silently degraded to .imp_mode="none" (onset = sample
-  #       verbatim) — the documented override was inoperative. The legacy flag still selects the
-  #       DEFAULT mode above when ONSET_MODE is unset, which is the compatibility that matters.
-  #   (b) The finite-rate precondition was a PARAMETRIC-branch requirement applied to all
-  #       branches. The empirical bootstrap needs no rate at all (13,984 windowed pairs are available on
-  #       the current snapshot), so a missing rate needlessly disabled the better estimator.
-  #       The rate is now required only where it is actually used.
-  # complete_case is included so .imp_mode resolves to "complete_case" rather than falling
-  # through to "none" (which emitted a false "no delay available" warning and made the
-  # complete_case switch arm unreachable). It needs no delay, hence the || TRUE arm.
-  .imp_active <- (.onset_mode == "complete_case") ||
-                 (.onset_mode %in% c("impute", "growth_impute") &&
-                  (length(.dd) >= 30L || (is.finite(.rate_used) && .rate_used > 0)))
-  # National per-day epidemic growth rate r: log-linear slope of recent weekly confirmed counts
-  # (by sample date). Used ONLY to growth-tilt the backward delay draw under "growth_impute":
-  # weighting Delta by exp(-r*Delta) down-weights long delays while the epidemic grows, so imputed
-  # onsets are not pushed systematically too early (epidemic processes are not time-reversible).
-  .estimate_growth_rate <- function(dates, asof,
-                                    window_weeks = get0("ONSET_GROWTH_WINDOW_WEEKS", ifnotfound = 8L),
-                                    trunc_buffer = get0("ONSET_GROWTH_TRUNC_BUFFER_DAYS", ifnotfound = 14L)) {
-    d <- dates[!is.na(dates) & (is.na(asof) | dates <= asof)]
-    if (length(d) < 20L) return(NA_real_)
-
-    # END OF THE FITTING WINDOW. These are SAMPLE-collection dates and the most recent are
-    # right-truncated: a case sampled three days ago may not be in the extract yet. Fitting
-    # through that tail reads the reporting lag as an epidemiological decline.
-    end <- if (!is.na(asof)) asof else max(d)
-    if (is.finite(trunc_buffer) && trunc_buffer > 0) end <- end - trunc_buffer
-    d <- d[d <= end]
-    if (length(d) < 20L) return(NA_real_)
-
-    # BIN BACKWARD FROM `end`, SO EVERY BIN IS A FULL 7 DAYS. Binning forward from min(d) —
-    # floor((d - min(d)) / 7) — leaves the FINAL bin partial: it holds only the days between
-    # the last 7-day boundary and the cutoff. That bin is undercounted by construction, and a
-    # log-linear fit reads it as a collapse. Measured on the 2026-09-07 frame the final forward
-    # bin held 23 cases against ~1,800 in the preceding full week, and the fitted rate came out
-    # at -0.033/day — a halving time of three weeks — for an epidemic that is in fact GROWING
-    # at about +0.006/day. The artefact survived every truncation buffer, because shifting the
-    # cutoff just moves where the partial bin falls.
-    #
-    # THE SIGN IS WHAT MATTERS. This rate tilts the backward onset draw by exp(-r*Delta). With
-    # the true r > 0 the tilt shortens imputed delays (onsets later); a spuriously negative r
-    # LENGTHENS them, actively worsening the early-shift bias the tilt exists to remove. An
-    # estimator that can flip the sign of the correction is worse than no correction.
-    back <- as.integer(floor(as.numeric(end - d) / 7))   # 0 = the most recent COMPLETE week
-    # Keep only bins wholly inside the observed span (the oldest bin can otherwise be partial
-    # for the opposite reason) and inside the requested window.
-    oldest_ok <- as.integer(floor(as.numeric(end - min(d)) / 7))
-    keep_bins <- back < window_weeks & back < oldest_ok
-    back <- back[keep_bins]
-    if (!length(back)) return(NA_real_)
-    tab <- table(back)
-    bk  <- as.integer(names(tab)); cnt <- as.numeric(tab)
-    if (length(bk) < 3L || sum(cnt) < 10) return(NA_real_)
-    fit <- tryCatch(stats::lm(log(cnt + 0.5) ~ bk), error = function(e) NULL)
-    if (is.null(fit)) return(NA_real_)
-    # `bk` counts WEEKS INTO THE PAST, so a growing epidemic has a NEGATIVE slope against it.
-    # Forward per-day growth rate is therefore -slope / 7.
-    r <- -unname(coef(fit)[2]) / 7
-    if (!is.finite(r)) return(NA_real_)
-
-    # PLAUSIBILITY BOUND. The tilt weight is exp(-r*Delta) over Delta up to
-    # DELAY_MAX_PLAUSIBLE_DAYS; a wild |r| makes it collapse onto one end of the delay support
-    # and the importance resample degenerates to a handful of distinct values. |r| <= 0.1/day
-    # is a weekly growth factor of ~2 — far outside anything this outbreak shows.
-    .rmax <- get0("ONSET_GROWTH_RATE_MAX", ifnotfound = 0.1)
-    if (abs(r) > .rmax) {
-      warning(sprintf(paste0("[load_linelist] estimated growth rate %+0.4f/day exceeds the ",
-                             "plausibility bound %.2f/day; the growth tilt is DISABLED for this ",
-                             "run and imputation falls back to the untilted draw."), r, .rmax),
-              call. = FALSE)
-      return(NA_real_)
-    }
-    r
-  }
-
-  .r_growth <- if (identical(.onset_mode, "growth_impute"))
-    .estimate_growth_rate(ll$date_of_sample_collection, .asof_date) else NA_real_
-  .dd_wts <- if (identical(.onset_mode, "growth_impute") && is.finite(.r_growth) && length(.dd))
-    exp(-.r_growth * .dd) else NULL
-  if (identical(.onset_mode, "growth_impute"))
-    message(sprintf("[load_linelist] growth_impute: national growth rate r=%.4f/day; backward delay draw tilted by exp(-r*Delta)",
-                    ifelse(is.finite(.r_growth), .r_growth, NA_real_)))
-  # STOCHASTIC single imputation: draw EACH missing onset's delay from the onset->sample delay
-  # distribution and subtract it from the sample date, rather than subtracting the single MEAN
-  # (which piled every imputed case on one week — an artificial spike). We draw from the
-  # EMPIRICAL delay distribution (bootstrap the WINDOWED complete onset+sample pairs) when >=30
-  # exist: the most faithful "correct delay distribution" and, unlike a mean-matched Exponential
-  # (whose mode is 0), it reproduces the true delay SHAPE. Falls back to the parametric fit
-  # otherwise — the rigorous DHIS2 best-family fit (04c_dhis2_delay_windows.R) if present, else
-  # Exp(rate_used). Delays clamped to [0, DELAY_MAX_PLAUSIBLE_DAYS] d (60, not 90 — the
-  # ceiling is the shared constant, and it is the same bound the delay fit treats as an
-  # outlier). Seeded for reproducibility.
-  # CAVEATS (documented, not hidden): a single stochastic imputation does not fully propagate
-  # imputation uncertainty (full multiple imputation would loop the pipeline and pool), so
-  # imputation-dependent intervals are conditionally slightly narrow. Windowing to onset <=
-  # max(sample) - TEST_DAYS mitigates (but does not fully remove) the right-truncation of the
-  # empirical delay; the EpiDist marginal model in 04c_dhis2_delay_windows.R corrects it fully.
-  # Reproducible draw WITHOUT clobbering the caller's global RNG stream: snapshot .Random.seed,
-  # seed locally, draw, then restore. (Draws are positional — draw i -> row i — so reproducibility
-  # also assumes a stable linelist row order, which the JSON read + dplyr preserve.)
-  .rng_state <- if (exists(".Random.seed", envir = .GlobalEnv)) get(".Random.seed", envir = .GlobalEnv) else NULL
-  on.exit(if (!is.null(.rng_state)) assign(".Random.seed", .rng_state, envir = .GlobalEnv), add = TRUE)
-  set.seed(get0("RANDOM_SEED", ifnotfound = 20260704L))
-  # ONSET IMPUTATION DRAWS FROM THE SHARED DELAY RESOLVER (2026-09-17, revised).
-  #
-  # 00_config.R states that four consumers read ONE delay resolver so the estimator "can never
-  # drift apart between consumers again", and names this imputation as consumer 1. It was not:
-  # whenever >=30 complete pairs existed the draw bootstrapped the RAW windowed pairs, whose
-  # mean is 6.81 d, while the nowcast and the EpiNow2 right-truncation model were simultaneously
-  # using effective_onset_sample_delay() at 7.67 d. ~3,600 imputed onsets sat ~0.85 d too late.
-  #
-  # The resolver IS the truncation-corrected estimator: on this snapshot it is the EpiDist
-  # MARGINAL fit, gamma(shape 0.812, rate 0.106), mean 7.667 d, SD 8.507 d, corrected for BOTH
-  # right truncation and double interval censoring (04c_dhis2_delay_windows.R). Drawing from it
-  # removes the bias exactly rather than approximately, and makes the single-resolver invariant
-  # true instead of aspirational.
-  #
-  # An earlier revision kept the empirical bootstrap and applied Lynden-Bell style weights
-  # 1/G(T-d). That is the right form for right-truncated data, but G must be estimated from the
-  # observed onsets, which are themselves truncated — so the plug-in under-corrects (it reached
-  # 7.48 d against 7.67 d, ~81% of the gap). The exact fix is the joint NPMLE; the resolver
-  # already IS a truncation-corrected fit, so the bootstrap is no longer the better estimator.
-  # The empirical bootstrap is retained only as the fallback when no fitted delay exists.
-  .resolver <- tryCatch(effective_onset_sample_delay(), error = function(e) NULL)
-  .resolver_ok <- !is.null(.resolver) && identical(.resolver$source, "data") &&
-                  is.finite(.resolver$mean) && .resolver$mean > 0
-  # ONSET_SAMPLE_DELAY_SOURCE = "lab" is a DELIBERATE choice, documented in 00_config.R as
-  # "deliberately imputing DHIS2 onsets with the (faster) lab delay". It did not do that: the
-  # resolver returns source = "lab", .resolver_ok was FALSE, and the cascade below fell through
-  # to the EMPIRICAL bootstrap of the DHIS2 pairs (mean ~6.8 d) — so a sensitivity run under
-  # "lab" measured the DHIS2 delay, not the lab delay (mean 4.39 d) it asked for, and the
-  # warning below told the user there was "no fitted delay on disk", which was untrue.
-  # Honour the explicit request; an ACCIDENTAL lab fallback (no params file) still is not
-  # treated as a resolver, because that case must warn rather than silently substitute.
-  .lab_requested <- !identical(get0("ONSET_SAMPLE_DELAY_SOURCE", ifnotfound = "data"), "data")
-  .resolver_lab_ok <- .lab_requested && !is.null(.resolver) &&
-                      identical(.resolver$source, "lab") &&
-                      is.finite(.resolver$mean) && .resolver$mean > 0
-
-  .imp_mode <- if (.onset_mode == "sample_verbatim" || !.imp_active) "none"
-               else if (.onset_mode == "complete_case") "complete_case"
-               else if ((.resolver_ok || .resolver_lab_ok) && .onset_mode == "growth_impute")
-                 "resolver_growth"
-               else if (.resolver_ok || .resolver_lab_ok) "resolver"
-               else if (.onset_mode == "growth_impute" && length(.dd) >= 30L) "growth"
-               else if (length(.dd) >= 30L) "empirical"
-               else "parametric"
-
-  # Parametric fallback draw (no resolver AND <30 complete pairs): Exp(rate_used).
-  .param_draw <- function(n) stats::rexp(n, rate = .rate_used)
-
-  # growth_impute tilts the BACKWARD draw by exp(-r*Delta): while incidence grows, a case
-  # observed now is likelier to have a short delay, so long delays must be down-weighted.
-  # With a parametric resolver there is no pool to reweight, so draw a large pool FROM the
-  # resolver and importance-resample it with those weights — the tilt is applied to the
-  # corrected distribution rather than to the truncated empirical one.
-  .resolver_draw <- function(n, tilt = FALSE) {
-    if (!tilt || !is.finite(.r_growth)) return(.draw_dhis2_delay(.resolver, n))
-    pool <- .draw_dhis2_delay(.resolver, max(20000L, 10L * n))
-    pool <- pool[is.finite(pool) & pool >= 0]
-    if (!length(pool)) return(.draw_dhis2_delay(.resolver, n))
-    w <- exp(-.r_growth * pool)
-    if (!any(is.finite(w)) || sum(w[is.finite(w)]) <= 0) return(pool[sample.int(length(pool), n, TRUE)])
-    w[!is.finite(w)] <- 0
-    pool[sample.int(length(pool), n, replace = TRUE, prob = w)]
-  }
-
-  ll$.imp_delay <- switch(.imp_mode,
-    resolver        = as.integer(pmin(pmax(round(.resolver_draw(nrow(ll))), 0L), .max_plausible)),
-    resolver_growth = as.integer(pmin(pmax(round(.resolver_draw(nrow(ll), tilt = TRUE)), 0L), .max_plausible)),
-    # FALLBACKS ONLY (no fitted delay on disk). These remain right-truncated; the message below
-    # says so rather than letting a degraded estimator pass as the corrected one.
-    empirical  = as.integer(pmin(pmax(round(sample(.dd, nrow(ll), replace = TRUE)), 0L), .max_plausible)),
-    growth     = as.integer(pmin(pmax(round(sample(.dd, nrow(ll), replace = TRUE,
-                                              prob = .dd_wts)), 0L), .max_plausible)),
-    parametric = as.integer(pmin(pmax(round(.param_draw(nrow(ll))), 0L), .max_plausible)),
-    # complete_case: onset-less confirmed records are DROPPED in the mutate below (delay unused).
-    complete_case = rep(0L, nrow(ll)),
-    none       = rep(0L, nrow(ll)))   # no delay info at all: degenerate (onset=sample); warned below
-  if (.imp_mode %in% c("empirical", "growth"))
-    warning(sprintf(paste0("[load_linelist] no usable fitted onset->sample delay was resolved%s; imputation ",
-                           "fell back to the RIGHT-TRUNCATED empirical pool (mean %.2f d). It is NOT consistent ",
-                           "with the nowcast or the R(t) truncation model. Run 04c_dhis2_delay_windows.R."),
-                   # Do not assert "no fit on disk" without checking: the fit may exist and the
-                   # resolver may simply have been overridden, which is a different problem with
-                   # a different fix, and the old wording sent the user to the wrong one.
-                   if (file.exists(get0("DELAY_PARAMS_PATH", ifnotfound = "")))
-                     " (a params file EXISTS on disk - check ONSET_SAMPLE_DELAY_SOURCE)" else
-                     " (no params file on disk)",
-                   mean(.dd)),
-            call. = FALSE)
-  if (identical(.imp_mode, "none"))
-    warning("[load_linelist] Onset imputation requested but no onset->sample delay is available ",
-            "(no fixed rate and <30 complete pairs); imputed onsets fall back to the sample date.")
+  .onset_mode <- get0("ONSET_MODE", ifnotfound = "impute")
+  if (!.onset_mode %in% c("impute", "complete_case"))
+    stop("[load_linelist] ONSET_MODE must be 'impute' or 'complete_case', got '", .onset_mode, "'.",
+         call. = FALSE)
   ll <- ll %>%
     dplyr::mutate(
-      # A recorded onset is USABLE only if it is epidemiologically plausible: not before
-      # the outbreak week (data-entry YEAR TYPOS put onsets years early — onset 2020/2023
-      # with a 2026 sample), not more than 2 DAYS after its own sample, and not implausibly
-      # long before it (> the shared DELAY_MAX_PLAUSIBLE_DAYS ceiling — the same bound the
-      # delay fit treats as an outlier). An unusable onset is treated as MISSING and imputed
-      # from the sample date, so a typo can neither leak a spurious pre-outbreak week into the
-      # zone-week grid (the CRITICAL corruption) nor drop the real case.
+      # A recorded onset is USABLE only if it is epidemiologically plausible: not before the
+      # outbreak start (data-entry YEAR TYPOS put onsets years early), not more than
+      # ONSET_SAMPLE_NEG_TOL_DAYS after its own sample, and not more than
+      # DELAY_MAX_PLAUSIBLE_DAYS before it. An unusable onset is treated as MISSING and imputed
+      # from the sample date, so a typo can neither put a case in a spurious pre-outbreak week
+      # nor drop it.
       #
-      # ONSET RECORDED AFTER ITS OWN SPECIMEN: KEPT, BUT CENSORED AT THE SPECIMEN DATE.
-      # `.neg_tol` (ONSET_SAMPLE_NEG_TOL_DAYS) is how far past the specimen an onset may fall
-      # and still be treated as recording noise rather than a lost field. Three decisions are
-      # bundled here and each has a different reason.
-      #
-      # WHY THE RECORD IS NOT REJECTED. An unusable onset is not dropped, it is imputed from
-      # the specimen date at a mean delay of ~7-8 d. Rejecting a -1 d record therefore moves
-      # it about 8 d EARLIER — a larger error, and in the wrong direction, than the 1-2 d of
-      # noise it removes. This was the previous rationale for the tolerance and it still holds.
-      #
-      # WHY THE ONSET IS NOT CARRIED FORWARD EITHER (this is the change). These are not
-      # presymptomatic detections of traced contacts, which is the only reading under which a
-      # post-specimen onset is real. On the 2026-09-07 snapshot 39.5% of the -2/-1 d records
-      # were deceased at swab against 22.4% of the positive-delay records, and half of the
-      # affected CONFIRMED rows are death alerts — a person cannot develop symptoms after
-      # being swabbed post mortem. The bin also matches the delay-0 bin on that split (41.4%),
-      # i.e. it is the same-day population displaced by a day or two of transcription noise.
-      # Carrying the onset forward left `date_index` after the specimen date, which is why
-      # these rows had to be held out of the delay-fitting pools (.complete requires a
-      # non-negative delay) and the two rules disagreed by design.
-      #
-      # WHY THE WINDOW IS SMALL. The empirical delay distribution decays steeply out of zero
-      # (1756 at 0 d, 92 at -1, 22 at -2, 7 at -3) and then runs flat and sparse to -177.
-      # Inside the window censoring costs a median of 1 day; outside it the onset field is
-      # not recoverable by censoring and imputation is the honest default.
-      #
-      # MEASURED WHEN THIS WAS INTRODUCED: no zone's FIRST confirmed onset is contributed by
-      # a negative-delay record (the nearest is 4 days after its zone's first case), so no
-      # invasion label moves under any choice of window.
+      # ONSET RECORDED AFTER ITS OWN SPECIMEN (within the tolerance): KEPT, CENSORED AT THE
+      # SPECIMEN DATE. Such a record is the same-day population displaced by a day or two of
+      # transcription noise (on the 2026-09-07 snapshot 39.5% of the -2/-1 d records were
+      # deceased at swab, against 22.4% of positive-delay records, so a post-swab symptom onset
+      # is not a real reading for them). Rejecting it would impute it ~6 d earlier -- a larger
+      # error than the 1-2 d censoring moves it.
       onset_usable = !is.na(date_of_symptom_onset) &
                      date_of_symptom_onset >= .ob_floor &
                      (is.na(date_of_sample_collection) |
@@ -828,30 +795,43 @@ load_linelist <- function() {
       onset_imputed = !onset_usable & !is.na(date_of_sample_collection),
       onset_censored = onset_usable & !is.na(date_of_sample_collection) &
                        date_of_symptom_onset > date_of_sample_collection,
-      date_index = dplyr::if_else(
-        onset_usable,
-        # Censored at the specimen date where the two disagree in the impossible direction.
-        # coalesce() covers a usable onset with NO specimen (pmin would return NA there), and
-        # pmax holds the invariant the zone-week grid depends on: date_index never precedes
-        # the outbreak floor, which a specimen dated before the floor could otherwise break.
+      # The recorded onset, censored at the specimen date; coalesce() covers a usable onset with
+      # no specimen, and pmax holds the invariant the zone-week grid depends on (date_index never
+      # precedes the outbreak floor).
+      .rec_onset = dplyr::if_else(onset_usable,
         pmax(dplyr::coalesce(pmin(date_of_symptom_onset, date_of_sample_collection),
                              date_of_symptom_onset), .ob_floor),
-        # For onset-less records: complete_case DROPS them (NA date_index -> dropped downstream,
-        # review §1.3); otherwise the imputed onset = sample - a delay DRAWN from the (optionally
-        # growth-tilted) fitted distribution, clamped to not precede the outbreak week
-        # (sample_verbatim uses delay 0, i.e. onset = sample).
-        if (identical(.onset_mode, "complete_case")) as.Date(NA)
-        else pmax(date_of_sample_collection - .imp_delay, .ob_floor)
-      ),
+        as.Date(NA)),
       confirmed = (final_mve_case_classification == CONFIRMED_STATUS) %in% TRUE,
       suspected = (final_mve_case_classification == SUSPECTED_STATUS) %in% TRUE
     )
-  # AS-OF UPPER BOUND. Everything else in this loader guards the as-of date (the sitrep helper,
-  # the delay window, the complete-pair mask), but date_index did not: it was bounded below by
-  # OUTBREAK_START and above by nothing. A record with onset AND sample both mistyped into the
-  # future passes onset_usable and lands in a future week. Censor rather than drop, so the record
-  # is still counted if it is merely future-DATED but otherwise valid; NA date_index is dropped
-  # downstream exactly as it is for records with no usable date at all.
+  .imp_delay <- if (identical(.onset_mode, "impute"))
+    .impute_onset_delays(anchor = ll$date_of_sample_collection, recorded = ll$.rec_onset,
+                         usable = ll$onset_usable, group = ll$confirmed,
+                         need = ll$onset_imputed, ids = ll$.onset_draw_key,
+                         seed = get0("ONSET_IMPUTE_SEED",
+                                     ifnotfound = get0("RANDOM_SEED", ifnotfound = 20260704L)),
+                         asof = .asof_date)
+    else rep(NA_integer_, nrow(ll))
+  .no_donor <- identical(.onset_mode, "impute") & ll$onset_imputed %in% TRUE & is.na(.imp_delay)
+  if (any(.no_donor))
+    warning(sprintf(paste0("[load_linelist] %d record(s) needing an imputed onset have no donor of their ",
+                           "class (no record of that class with a recorded onset); their date_index is NA ",
+                           "and they are dropped downstream."), sum(.no_donor)), call. = FALSE)
+  ll$date_index <- dplyr::if_else(
+    ll$onset_usable, ll$.rec_onset,
+    # complete_case: onset-less records are DROPPED (NA date_index).
+    pmax(as.Date(ll$date_of_sample_collection) - .imp_delay, .ob_floor))
+  ll$.imp_delay_used <- .imp_delay
+  ll$.rec_onset <- NULL
+  ll$.onset_draw_key <- NULL
+  # AS-OF UPPER BOUND. The rest of this loader guards the as-of date (the sitrep top-up, the
+  # donor as-of cut, the earliest-sample lookup), and date_index must too: bounded below by
+  # OUTBREAK_START, a record with onset AND sample both mistyped into the future still passes
+  # onset_usable and would land in a future week. Such a record is DROPPED, not censored onto
+  # the as-of week (a date it cannot have had by then would invent a case in the terminal week):
+  # its date_index is set to NA, which is dropped downstream exactly as it is for records with
+  # no usable date at all.
   .asof_idx <- suppressWarnings(as.Date(get0("ANALYSIS_DATE", ifnotfound = NA)))
   if (length(.asof_idx) == 1L && !is.na(.asof_idx)) {
     .n_future <- sum(!is.na(ll$date_index) & ll$date_index > .asof_idx, na.rm = TRUE)
@@ -861,35 +841,14 @@ load_linelist <- function() {
       ll$date_index[!is.na(ll$date_index) & ll$date_index > .asof_idx] <- as.Date(NA)
     }
   }
-  .imp_draws <- ll$.imp_delay[ll$onset_imputed %in% TRUE]
-  ll <- ll %>% dplyr::select(-dplyr::any_of(".imp_delay"))
+  .got_draw  <- ll$onset_imputed %in% TRUE & !is.na(ll$.imp_delay_used)
+  .imp_draws <- ll$.imp_delay_used[.got_draw]
+  ll$.imp_delay_used <- NULL
   if (identical(.onset_mode, "complete_case")) {
     .n_cc <- sum(is.na(ll$date_index) & !is.na(ll$date_of_sample_collection) &
                  (ll$confirmed %in% TRUE), na.rm = TRUE)
-    message(sprintf("[load_linelist] complete-case (§1.3): dropped %d confirmed records lacking a usable onset (non-imputed analysis)", .n_cc))
+    message(sprintf("[load_linelist] complete-case: dropped %d confirmed records lacking a usable onset (non-imputed analysis)", .n_cc))
   }
-  # Name the estimator actually in force. This said "interval-censored" unconditionally, but
-  # .dhis2_delay may be the EpiDist MARGINAL fit (estimator == "epidist_marginal"), which is
-  # what the current params CSV carries — so the log and any methods text copied from it
-  # mislabelled the estimator.
-  # No %||% here. 01_data_prep.R runs at run_all.R step 1, BEFORE 03_mobility_matrices.R
-  # defines the suite's copy, and 00_config.R deliberately does not rely on base R's (4.4+).
-  # A local scalar-or-default is also stricter than %||%, which passes NA and length-0 through
-  # — and switch() on NA_character_ is an error, not a fallthrough.
-  .chr1 <- function(x, default) {
-    if (is.null(x) || length(x) != 1L || is.na(x) || !nzchar(as.character(x))) default
-    else as.character(x)
-  }
-  .param_desc <- if (!is.null(.dhis2_delay)) {
-    .est <- .chr1(.dhis2_delay$estimator, "censored_mle")
-    sprintf("the DHIS2 %s %s fit (rate %.3f/d, window %s)",
-            switch(.est,
-                   epidist_marginal = "EpiDist marginal (truncation-corrected)",
-                   censored_mle     = "interval-censored MLE",
-                   .est),
-            .chr1(.dhis2_delay$family, "unknown-family"), .rate_used,
-            .chr1(.dhis2_delay$window, "n/a"))
-  } else sprintf("Exp(rate %.3f/d, source %s)", .rate_used, .delay_src)
   # Publish the realised imputed share so downstream prose derives it instead of hard-coding a
   # literal (17_invasion_viz.R's Weaknesses list said "~15%" where the truth is ~24%).
   .pct_imp <- 100 * sum(ll$onset_imputed %in% TRUE & ll$confirmed %in% TRUE, na.rm = TRUE) /
@@ -908,19 +867,13 @@ load_linelist <- function() {
          100 * sum(.conf & .imp & !.is_sitrep, na.rm = TRUE) /
            max(sum(.conf & !.is_sitrep, na.rm = TRUE), 1L), envir = .GlobalEnv)
   assign(".N_SITREP_APPENDED", sum(.conf & .is_sitrep, na.rm = TRUE), envir = .GlobalEnv)
-  # Publish the MECHANISM too, so report prose describes what the code actually did rather
-  # than a hand-written sentence that silently outlives the implementation it describes.
-  assign(".ONSET_IMPUTE_MODE", .imp_mode, envir = .GlobalEnv)
+  # Publish the MECHANISM too, so report prose describes what the code actually did.
+  assign(".ONSET_IMPUTE_MODE", .onset_mode, envir = .GlobalEnv)
   assign(".ONSET_IMPUTE_DESC",
-         switch(.imp_mode,
-                resolver        = "the shared truncation- and interval-censoring-corrected DHIS2 onset-to-sample delay fit",
-                resolver_growth = "the shared truncation- and interval-censoring-corrected DHIS2 onset-to-sample delay fit, growth-tilted",
-                empirical       = "a fallback empirical bootstrap of the right-truncated pool of complete onset-sample pairs",
-                growth          = "a growth-tilted fallback empirical bootstrap of the right-truncated pool of complete onset-sample pairs",
-                parametric      = "a parametric exponential fallback",
-                complete_case   = "no imputation (complete-case: onset-less records dropped)",
-                none            = "no imputation (the sample date is used verbatim)",
-                sprintf("an unrecognised imputation mode (%s)", .imp_mode)),
+         if (identical(.onset_mode, "impute"))
+           paste0("the sample date minus a sample-to-onset interval drawn from records of the same ",
+                  "class sampled in the same week whose onset is recorded")
+         else "no imputation (complete-case: onset-less records dropped)",
          envir = .GlobalEnv)
   # Report the censoring alongside the imputation, so a run's log states how many recorded
   # onsets were moved and by how much rather than leaving it to be rediscovered.
@@ -933,28 +886,18 @@ load_linelist <- function() {
                     length(.cz), sum(ll$confirmed[.cz] %in% TRUE),
                     max(.shift), .neg_tol, min(.shift), max(.shift), stats::median(.shift)))
   }
-  message("[load_linelist] Onset imputed for ", sum(ll$onset_imputed, na.rm = TRUE),
-          " records via ",
-          # Every reachable .imp_mode needs an arm. "growth" and "complete_case" are both
-          # reachable (see the .imp_mode assignment above) and had none, so switch() returned
-          # NULL and the log read "...Onset imputed for N records via ; drawn delay mean...".
-          switch(.imp_mode,
-                 resolver   = sprintf("a draw from the SHARED delay resolver: %s", describe_delay(.resolver)),
-                 resolver_growth = sprintf("a growth-tilted (r=%.4f/d) draw from the SHARED delay resolver: %s",
-                                           .r_growth, describe_delay(.resolver)),
-                 empirical  = sprintf("a FALLBACK draw from the right-truncated EMPIRICAL pool (%d %s pairs, source %s)",
-                                      length(.dd), if (.windowed) "windowed" else "all-complete", .delay_src),
-                 growth     = sprintf("a growth-tilted FALLBACK draw from the right-truncated EMPIRICAL pool (%d %s pairs, r=%.4f/d)",
-                                      length(.dd), if (.windowed) "windowed" else "all-complete", .r_growth),
-                 parametric = sprintf("a parametric draw from %s", .param_desc),
-                 complete_case = "n/a (complete-case: onset-less records dropped)",
-                 none       = "the sample date (no delay available)",
-                 sprintf("an unrecognised imputation mode (%s)", .imp_mode)),
-          if (length(.imp_draws))
-            sprintf("; drawn delay mean %.1f d, range %d-%d d", mean(.imp_draws),
-                    as.integer(min(.imp_draws)), as.integer(max(.imp_draws)))
-          else "",
-          "; onset-dated target.")
+  # Counts the records that RECEIVED an interval (the no-donor ones are warned about above), split
+  # so the confirmed count and its sitrep top-up part are not read as DHIS2 records. Under
+  # complete_case nothing is imputed and the complete-case message above says what was dropped.
+  if (identical(.onset_mode, "impute"))
+    message(sprintf(paste0("[load_linelist] Onset imputed for %d record(s) (%d confirmed, %d of them ",
+                           "sitrep top-up rows) via %s%s; onset-dated target."),
+                    sum(.got_draw), sum(.got_draw & .conf), sum(.got_draw & .conf & .is_sitrep),
+                    get(".ONSET_IMPUTE_DESC", envir = .GlobalEnv),
+                    if (length(.imp_draws))
+                      sprintf("; drawn interval mean %.1f d, range %d-%d d", mean(.imp_draws),
+                              as.integer(min(.imp_draws)), as.integer(max(.imp_draws)))
+                    else ""))
 
   message(
     "[load_linelist] Confirmed: ", sum(ll$confirmed, na.rm = TRUE),
@@ -966,13 +909,103 @@ load_linelist <- function() {
 }
 
 
+# -----------------------------------------------------------------------------
+# Archived snapshots: the line list AS IT STOOD on an earlier date
+# -----------------------------------------------------------------------------
+# Two consumers replay archive vintages through the full loader: the extract-regime truncation
+# fit (02_epi_params.R, .trunc_frame_vintage()), which needs each vintage's date_index series,
+# and the back-test's real-snapshot information state (LFO_TRAINING_SOURCE = "vintage",
+# 22_daily_reissue.R). Defined here, next to load_linelist(), because the truncation fit runs
+# before 22_daily_reissue.R is sourced (run_all.R) and in entry points that never source it.
+
+# Session memo: the snapshot listing and every loaded snapshot. parent = emptyenv() so a typo'd
+# key cannot resolve up the search path. Filled in the parent process BEFORE the LFO forks its
+# workers (prefetch_vintages()), so the workers inherit it instead of each re-reading the CSVs.
+.vintage_memo <- new.env(parent = emptyenv())
+
+#' The archived line-list snapshots, oldest first.
+#' @return data.frame(folder, date); zero rows when the archive is absent.
+list_linelist_snapshots <- function(dir = get0("LINELIST_DIR", ifnotfound = NULL)) {
+  empty <- data.frame(folder = character(0), date = as.Date(character(0)),
+                      stringsAsFactors = FALSE)
+  if (is.null(dir) || !dir.exists(dir)) return(empty)
+  f <- list.files(dir, pattern = "^LINELIST_[0-9]{8}$")
+  d <- as.Date(sub("^LINELIST_", "", f), format = "%d%m%Y")
+  ok <- !is.na(d) & file.exists(file.path(dir, f, "dhis2_processed_linelist.csv"))
+  out <- data.frame(folder = f[ok], date = d[ok], stringsAsFactors = FALSE)
+  out[order(out$date), , drop = FALSE]
+}
+
+#' The settings a replayed snapshot depends on beyond its folder and date: the seed of the onset
+#' draw, the onset mode, the onset-plausibility bounds, the donor rule and the week grid it bins
+#' donors on (WEEK_ANCHOR), the sample-date rule, and the data-definition switches (case-zone
+#' basis, sitrep top-up on/off and its date shift). Part of every session-memo key built from
+#' snapshots (here, vintage_truncation() in 22_daily_reissue.R and .asof_counts_wide() in
+#' 20_forecast_detail.R).
+.vintage_settings_key <- function() {
+  substr(rlang::hash(list(
+    get0("RANDOM_SEED", ifnotfound = NA), get0("ONSET_IMPUTE_SEED", ifnotfound = NA),
+    get0("ONSET_MODE", ifnotfound = NULL),
+    get0("ONSET_SAMPLE_NEG_TOL_DAYS", ifnotfound = NULL), get0("DELAY_MAX_PLAUSIBLE_DAYS", ifnotfound = NULL),
+    get0("ONSET_DONOR_MIN", ifnotfound = NULL), get0("WEEK_ANCHOR", ifnotfound = NULL),
+    get0("SAMPLE_DATE_SOURCE", ifnotfound = NULL),
+    get0("CASE_ZONE_BASIS", ifnotfound = NULL), get0("APPEND_SITREP_CONFIRMED", ifnotfound = NULL),
+    get0("SITREP_APPEND_SHIFT_DAYS", ifnotfound = NULL))),
+    1L, 12L)
+}
+
+#' Load one archived snapshot through the FULL load_linelist() pipeline, as of its own date.
+#'
+#' Every as-of rule inside load_linelist() -- the sitrep top-up, the donor as-of cut of the onset
+#' imputation, the date_index ceiling and the earliest-sample-date lookup -- reads the global
+#' ANALYSIS_DATE. It is set to the snapshot's date for the duration and restored on exit, so the
+#' snapshot is processed as a run on that day would have processed it, with today's code, today's
+#' reference files (aliases, zone spine, the sitrep series cut at the date) and today's shared
+#' nuisance fits -- and ONE further difference: WEEK_ANCHOR, derived once from the live
+#' ANALYSIS_DATE (00_config.R), is not re-derived, so the donor weeks are binned on the live run's
+#' weekday grid, the grid the back-test aggregates the snapshot's counts on. load_linelist() uses
+#' no RNG stream.
+#'
+#' Memoised on the folder, the date and .vintage_settings_key(), so a snapshot loaded under one
+#' setting is never served under another.
+load_linelist_vintage <- function(folder, vdate) {
+  key <- paste0("ll_", folder, "_", format(as.Date(vdate)), "_", .vintage_settings_key())
+  hit <- .vintage_memo[[key]]
+  if (!is.null(hit)) return(hit)
+  # load_linelist() publishes the RUN's onset-imputation summary as globals (read by
+  # write_run_info.R and the report). A replayed snapshot must not overwrite them, so they are
+  # saved and restored with ANALYSIS_DATE.
+  .globals <- c("ANALYSIS_DATE", ".PCT_ONSET_IMPUTED", ".PCT_ONSET_IMPUTED_LINELIST",
+                ".N_SITREP_APPENDED", ".ONSET_IMPUTE_MODE", ".ONSET_IMPUTE_DESC")
+  .saved <- lapply(stats::setNames(.globals, .globals), function(g)
+    if (exists(g, envir = .GlobalEnv, inherits = FALSE)) list(get(g, envir = .GlobalEnv)) else NULL)
+  on.exit(for (g in .globals) {
+    if (is.null(.saved[[g]])) { if (exists(g, envir = .GlobalEnv, inherits = FALSE))
+                                  rm(list = g, envir = .GlobalEnv) }
+    else assign(g, .saved[[g]][[1]], envir = .GlobalEnv)
+  }, add = TRUE)
+  assign("ANALYSIS_DATE", as.Date(vdate), envir = .GlobalEnv)
+  warns <- character(0)
+  ll <- withCallingHandlers(suppressMessages(load_linelist(folder)),
+          warning = function(w) { warns <<- c(warns, conditionMessage(w))
+                                  invokeRestart("muffleWarning") })
+  if (length(warns))
+    message(sprintf("[vintage] %s: %d warning(s) while loading, first: %s", folder,
+                    length(warns), warns[1]))
+  attr(ll, "vintage_date")   <- as.Date(vdate)
+  attr(ll, "vintage_folder") <- folder
+  assign(key, ll, envir = .vintage_memo)
+  ll
+}
+
+
 # =============================================================================
 # SECTION 3: aggregate_to_zone_week()
 # =============================================================================
 #
-# Aggregates the linelist to a zone × week matrix (7-day buckets, WEEK_ANCHOR-anchored) and zero-fills all
-# 519 zone-week cells that have no observations, so downstream models see
-# a complete rectangular data frame.
+# Aggregates the linelist to a zone × week matrix (7-day buckets, WEEK_ANCHOR-anchored) and zero-fills
+# every cell of (all `zones`) × (the contiguous week grid up to the as-of week) that has no
+# observations, so downstream models see a complete rectangular data frame.
 #
 # Arguments:
 #   ll    — output of load_linelist()
@@ -1047,14 +1080,14 @@ aggregate_to_zone_week <- function(ll, zones,
   # weeks by POSITION on a contiguous 7-day grid — an interior gap would misweight the GT lag and
   # desync the truth windows. Observed week_starts are already 7-day-anchored, so this only inserts
   # (zero-filled, in tidyr::complete below) any interior gaps; it is a no-op when weeks are dense.
-  # TERMINAL WEEK ANCHORED TO THE ANALYSIS DATE, not to whatever the data happen to contain.
-  # Two silent failure modes otherwise, both one bad row away (verified clean on the current
-  # snapshot, where max(date_index) == ANALYSIS_DATE):
-  #   (a) OVER-EXTENSION. load_linelist() bounds date_index below (>= OUTBREAK_START) but not
-  #       above, and onset_usable only requires onset <= sample + 2. A single record with onset
-  #       AND sample both mistyped into the future is therefore "usable", and the grid runs past
-  #       ANALYSIS_DATE — adding thousands of structurally-zero cells and, worse, moving the
-  #       grid's terminal week off the as-of week the LFO cutoff and the nowcast both assume.
+  # TERMINAL WEEK ANCHORED TO THE AS-OF DATE, not to whatever the data happen to contain.
+  # Two silent failure modes otherwise, both one bad row away:
+  #   (a) OVER-EXTENSION. load_linelist() sets a date_index after ANALYSIS_DATE to NA, but this
+  #       function takes any line list (reaggregate_asof() passes one censored to a fold cutoff,
+  #       with its own `asof`), and onset_usable only requires onset <= sample + 2: one record
+  #       with onset AND sample both after the as-of date would run the grid past it — adding
+  #       structurally-zero cells and, worse, moving the grid's terminal week off the as-of
+  #       week the LFO cutoff and the nowcast both assume.
   #   (b) MISSING TERMINAL WEEK. If no record anywhere has a date_index inside the final 7-day
   #       window, that week vanishes and every POSITIONAL week index shifts by one — which
   #       matters because compute_foi() indexes weeks by position, as the note above says.
@@ -1071,13 +1104,15 @@ aggregate_to_zone_week <- function(ll, zones,
       stop("[aggregate_to_zone_week] No observed weeks at or before the as-of week.", call. = FALSE)
   }
   all_weeks <- seq(min(.obs_weeks), max(.last_wk, max(.obs_weeks)), by = 7L)
+  .n_tail <- sum(all_weeks > max(.obs_weeks))                 # padded up to the as-of week
+  .n_gap  <- length(all_weeks) - length(.obs_weeks) - .n_tail  # interior gaps
 
   message(
     "[aggregate_to_zone_week] Observed weeks: ",
     min(.obs_weeks), " to ", max(.obs_weeks),
     " (", length(.obs_weeks), " observed",
-    if (length(all_weeks) > length(.obs_weeks))
-      paste0("; +", length(all_weeks) - length(.obs_weeks), " zero-filled interior week(s) for contiguity")
+    if (.n_gap > 0L) paste0("; +", .n_gap, " zero-filled interior week(s) for contiguity") else "",
+    if (.n_tail > 0L) paste0("; +", .n_tail, " zero-filled week(s) after the last observed one, up to the as-of week")
     else "",
     ", ", length(all_weeks), " total)"
   )
@@ -1117,6 +1152,110 @@ aggregate_to_zone_week <- function(ll, zones,
   )
 
   zone_week
+}
+
+
+# =============================================================================
+# SECTION 3b: .record_in_outbreak(), load_unplaced_alerts(), zone_alert_counts()
+# =============================================================================
+#
+# Per-zone ALERT and LABORATORY-OUTCOME counts. ONE definition, shared by the ascertainment
+# appendix (45_ascertainment_figures.R -> zone_ascertainment.csv) and the manuscript
+# watch-list figure (make_manuscript_figures.R -> Figure3_rank_surveillance, panel D), so
+# the two cannot publish different counts for the same zone.
+#
+#   alerts_total     alert records in the window (records, not de-duplicated people)
+#   n_confirmed      final classification == CONFIRMED_STATUS
+#   n_not_a_case     final classification == NOT_A_CASE_STATUS (laboratory-discarded)
+#   alerts_resolved  n_confirmed + n_not_a_case: alerts with a laboratory OUTCOME. Suspected,
+#                    probable and never-classified alerts are in neither term, including
+#                    alerts that were sampled but have no recorded outcome.
+#
+# WHICH RECORDS ARE IN THE WINDOW. An alert is a line-list record, and it is in [from, to]
+# when EITHER of its two kinds of date puts it there:
+#   * its CASE date — date_index, the onset (recorded, censored at the specimen, or imputed
+#     from it) that every case count uses; only records load_linelist() keeps have one;
+#   * its NOTIFICATION date — when the alert was raised.
+# Either, because each field carries errors the other does not. On LINELIST_23092026 (as of its
+# own date, earliest-sample rule; measured 2026-10-17) 66 of the records load_linelist() keeps,
+# ten of them confirmed cases, have a notification date outside [OUTBREAK_START, the extract
+# date] — 40 of them 2026 dates before the outbreak start or after the extract date, 26 in
+# another year (2006, 2020-2025, 2027) — and a notification-only window would drop them. And
+# load_linelist() keeps only records with an onset or specimen date on or after OUTBREAK_START,
+# because a CASE needs one: on the same snapshot it leaves out 2,828 records — 2,725 with
+# neither date and 103 whose only dates precede the outbreak (several impossible: years 0202,
+# 1997, 2006) — of which 2,819 were notified inside the window. All 2,828 are unclassified.
+# They are still alerts raised during the outbreak; a case-date-only count missed them and so
+# overstated the share resolved. They are read by load_unplaced_alerts() and placed by
+# notification.
+#
+# The sitrep top-up rows (alert_id "SITREP-CONF-*", .build_sitrep_confirmed_appends) are
+# EXCLUDED: they reconcile a confirmed COUNT to the official cumulative and carry no alert,
+# no test and no laboratory date, so counting them would invent laboratory activity in
+# exactly the zones that received a top-up. Records with no zone are dropped.
+#
+# A zone with no alert in the window has NO ROW. Callers left-join and coalesce to 0,
+# because a zone absent here is a zone with zero alerts, not a zone with missing data.
+#
+# `unplaced`, `from` and `to` are required, not read from globals: 45 and the manuscript
+# figure must be seen at the call site to count the same records on the same window.
+
+#' TRUE for a record load_linelist() keeps as part of the outbreak: an onset OR a specimen
+#' date on or after OUTBREAK_START. NA-safe; vectorised over the two date vectors.
+.record_in_outbreak <- function(onset, sample) {
+  (!is.na(onset)  & onset  >= OUTBREAK_START) |
+  (!is.na(sample) & sample >= OUTBREAK_START)
+}
+
+#' The alert records load_linelist() leaves out — no onset or specimen date on or after
+#' OUTBREAK_START — after the same unmatched-zone exclusion and aliasing as the case data.
+load_unplaced_alerts <- function() {
+  r <- .read_linelist_records()
+  attr(r, "aliases") <- NULL
+  r$.onset_draw_key <- NULL
+  r[!.record_in_outbreak(r$date_of_symptom_onset, r$date_of_sample_collection), , drop = FALSE]
+}
+
+#' @param ll       load_linelist() output.
+#' @param unplaced load_unplaced_alerts() output.
+#' @param from,to  the window, inclusive at both ends.
+#' @return one row per zone with an alert; attributes `n_line_list` and `n_unplaced` count the
+#'   records of each source inside the window.
+zone_alert_counts <- function(ll, unplaced, from, to) {
+  cls <- "final_mve_case_classification"
+  .check_cols(ll, c("health_zone", "date_index", "date_of_notification", "alert_id", cls),
+              "zone_alert_counts")
+  .check_cols(unplaced, c("health_zone", "date_of_notification", "date_of_symptom_onset",
+                          "date_of_sample_collection", "alert_id", cls), "zone_alert_counts")
+  from <- suppressWarnings(as.Date(from)); to <- suppressWarnings(as.Date(to))
+  if (length(from) != 1L || is.na(from) || length(to) != 1L || is.na(to) || to < from)
+    stop("[zone_alert_counts] `from` and `to` must be single dates with from <= to.",
+         call. = FALSE)
+  # The two inputs must be the two halves the definition names, or records are double-counted:
+  # a record load_linelist() keeps must not also arrive as "unplaced".
+  if (any(.record_in_outbreak(unplaced$date_of_symptom_onset, unplaced$date_of_sample_collection)))
+    stop("[zone_alert_counts] `unplaced` holds records load_linelist() keeps; pass ",
+         "load_unplaced_alerts().", call. = FALSE)
+  .in <- function(d) !is.na(d) & d >= from & d <= to
+  not_sitrep <- function(id) is.na(id) | !grepl("^SITREP-CONF-", id)
+  a <- ll %>%
+    dplyr::filter(not_sitrep(alert_id), !is.na(health_zone),
+                  .in(date_index) | .in(date_of_notification)) %>%
+    dplyr::select(health_zone, dplyr::all_of(cls))
+  u <- unplaced %>%
+    dplyr::filter(not_sitrep(alert_id), !is.na(health_zone), .in(date_of_notification)) %>%
+    dplyr::select(health_zone, dplyr::all_of(cls))
+  out <- dplyr::bind_rows(a, u) %>%
+    dplyr::group_by(health_zone) %>%
+    dplyr::summarise(
+      alerts_total = dplyr::n(),
+      n_confirmed  = sum(.data[[cls]] %in% CONFIRMED_STATUS),
+      n_not_a_case = sum(.data[[cls]] %in% NOT_A_CASE_STATUS),
+      .groups = "drop") %>%
+    dplyr::mutate(alerts_resolved = n_confirmed + n_not_a_case)
+  attr(out, "n_line_list") <- nrow(a)
+  attr(out, "n_unplaced")  <- nrow(u)
+  out
 }
 
 
@@ -1173,20 +1312,20 @@ load_population <- function() {
 # SECTION 5: load_static_covariates()
 # =============================================================================
 #
-# Reads the following static covariate files and joins them on `nom`:
+# Reads the following static covariate files and left-joins them on `nom` onto the WorldPop
+# zone spine:
 #   - CCVI socioeconomic deprivation
-#   - GDP per capita
-#   - GRID3 healthsites count and density
-#   - PCR testing capacity
-#   - Cross-border passenger volumes
+#   - GRID3 healthsite count and density
+# and derives the model-facing columns log_pop and ccvi.
 #
 # Returns a tibble with `nom` as the join key, one row per health zone.
 # Missing data for a given zone is allowed (NA in the relevant column).
 
 load_static_covariates <- function() {
 
-  # Helper: read a two-column (index + nom + value) static covariate CSV.
-  # Returns a tibble with nom + one value column, skipping the row-index column.
+  # Helper: read a static covariate CSV that has a `nom` column and the value column.
+  # Returns a tibble with nom + the value column (numeric); any other column (e.g. a row index)
+  # is dropped.
   read_static <- function(path, value_col, context) {
     if (!file.exists(path)) {
       warning("[load_static_covariates] File not found, skipping: ", path, call. = FALSE)
@@ -1220,12 +1359,6 @@ load_static_covariates <- function() {
     "CCVI"
   )
 
-  gdp <- read_static(
-    file.path(GDP_DIR, "gdp_pc__gdp_pc__static.csv"),
-    "gdp_pc",
-    "GDP"
-  )
-
   healthsites_count <- read_static(
     file.path(HEALTHSITES_DIR, "grid3_healthsites__healthsite_count__static.csv"),
     "healthsite_count",
@@ -1238,50 +1371,11 @@ load_static_covariates <- function() {
     "healthsites_density"
   )
 
-  testing <- read_static(
-    file.path(TESTING_DIR, "testing_capacity__pcr_tests__static.csv"),
-    "pcr_tests",
-    "testing_capacity"
-  )
-
-  cross_border_path <- file.path(
-    DATA_DIR, "cross-border-movements", "processed",
-    "cross_border__poe_passengers__static.csv"
-  )
-  cross_border <- if (file.exists(cross_border_path)) {
-    tryCatch(
-      {
-        cb <- readr::read_csv(
-          cross_border_path,
-          col_types = readr::cols(.default = readr::col_character()),
-          show_col_types = FALSE
-        )
-        if ("nom" %in% names(cb) && "mean_daily_passengers" %in% names(cb)) {
-          cb %>%
-            dplyr::select(nom, mean_daily_passengers) %>%
-            dplyr::mutate(mean_daily_passengers =
-                            suppressWarnings(as.numeric(mean_daily_passengers)))
-        } else if ("nom" %in% names(cb)) {
-          # Pick first numeric-ish column as the passenger volume
-          num_cols <- names(cb)[names(cb) != "nom"]
-          if (length(num_cols) > 0) {
-            cb %>%
-              dplyr::select(nom, dplyr::all_of(num_cols[1])) %>%
-              dplyr::rename(mean_daily_passengers = dplyr::all_of(num_cols[1])) %>%
-              dplyr::mutate(mean_daily_passengers =
-                              suppressWarnings(as.numeric(mean_daily_passengers)))
-          } else NULL
-        } else NULL
-      },
-      error = function(e) {
-        warning("[load_static_covariates] Cross-border read error: ", e$message, call. = FALSE)
-        NULL
-      }
-    )
-  } else {
-    warning("[load_static_covariates] Cross-border file not found: ", cross_border_path, call. = FALSE)
-    NULL
-  }
+  # GDP per capita, PCR testing capacity and cross-border passenger volumes were loaded and
+  # joined here until 2026-09-27 and consumed by NOTHING — no covariate set, no vulnerability
+  # pillar, no figure. Each also warned when its file was absent, so a clean run printed
+  # warnings about data it did not use. Removed; the loaders are one read_static() call away
+  # if a model ever wants them.
 
   # ---- Build full zone spine from WorldPop (519 zones) ----------------------
   pop_path <- file.path(WORLDPOP_DIR, "worldpop__pop_count__static.csv")
@@ -1322,25 +1416,22 @@ load_static_covariates <- function() {
   }
 
   cov <- join_one(cov, ccvi,              "CCVI socioeconomic_deprivation")
-  cov <- join_one(cov, gdp,               "GDP gdp_pc")
   cov <- join_one(cov, healthsites_count, "healthsite_count")
   cov <- join_one(cov, healthsites_density, "healthsite_density")
-  cov <- join_one(cov, testing,           "pcr_tests")
-  cov <- join_one(cov, cross_border,      "cross_border mean_daily_passengers")
 
   # ---- Derived, model-facing covariate columns ------------------------------
-  # Downstream models (hhh4 C1d, INLA C4, ZINB C5) reference these canonical
-  # names. Deriving them here keeps a single source of truth and avoids each
-  # model silently falling back to constant covariates (rank-deficiency risk).
-  # Guard each derived column: read_static()/join_one() deliberately warn-and-skip
-  # a missing covariate file (so its source column is never created); referencing
-  # it unconditionally here would crash the whole data prep the moment a layer is
-  # absent — exactly the situation the defensive loading anticipates.
+  # The canonical names the covariate sets use (BAYES_GEO_COVARIATES /
+  # BAYES_FULL_COVARIATES, 00_config.R) and the vulnerability index reads
+  # (compute_vulnerability_index, 20_forecast_detail.R). Deriving them here keeps one source
+  # of truth and stops a model silently falling back to a constant covariate.
+  # Each is guarded: read_static()/join_one() deliberately warn-and-skip a missing covariate
+  # file, so the source column may not exist.
+  # `log_healthsite_count` was derived here and read by nothing; removed 2026-09-27.
   cov <- cov %>%
     dplyr::mutate(
-      log_pop              = if ("pop_count" %in% names(cov)) log(pmax(pop_count, 1)) else NA_real_,
-      ccvi                 = if ("socioeconomic_deprivation" %in% names(cov)) socioeconomic_deprivation else NA_real_,
-      log_healthsite_count = if ("healthsite_count" %in% names(cov)) log1p(dplyr::coalesce(healthsite_count, 0)) else NA_real_
+      log_pop = if ("pop_count" %in% names(cov)) log(pmax(pop_count, 1)) else NA_real_,
+      ccvi    = if ("socioeconomic_deprivation" %in% names(cov))
+                  socioeconomic_deprivation else NA_real_
     )
 
   message("[load_static_covariates] Covariate tibble: ",
@@ -1351,101 +1442,18 @@ load_static_covariates <- function() {
 
 
 # =============================================================================
-# SECTION 6: load_sitrep()
+# SECTION 6: prep_all_data() — master loader
 # =============================================================================
+# load_sitrep() lived here and was removed on 2026-09-27. It was called only by
+# prep_all_data(), and its result (dat$sitrep) was assigned in run_all.R and then read by
+# nothing. It also read insp_sitrep__new_confirmed_cases__daily.csv — the DAILY file that
+# .build_sitrep_confirmed_appends() documents as grossly undercounting (Bunia 66 against
+# 507) — so reviving it as-is would be wrong anyway. The sitrep readers that ARE used are
+# sitrep_cumulative_confirmed() above (the reconciliation, and FigureS11).
 #
-# Reads the INSP sitrep daily new confirmed cases file, aggregates to weekly
-# totals (7-day buckets, WEEK_ANCHOR-anchored, ending on ANALYSIS_DATE), and returns a tibble with:
-#   nom, week_start, sitrep_confirmed_weekly
-#
-# This is OPTIONAL: if the file does not exist, returns NULL with a warning.
-
-load_sitrep <- function() {
-
-  sitrep_path <- file.path(SITREP_DIR, "insp_sitrep__new_confirmed_cases__daily.csv")
-
-  if (!file.exists(sitrep_path)) {
-    warning(
-      "[load_sitrep] INSP sitrep file not found — skipping: ", sitrep_path,
-      call. = FALSE
-    )
-    return(NULL)
-  }
-
-  sitrep <- tryCatch(
-    readr::read_csv(
-      sitrep_path,
-      col_types = readr::cols(
-        nom                = readr::col_character(),
-        date               = readr::col_character(),
-        new_confirmed_cases = readr::col_double()
-      ),
-      show_col_types = FALSE
-    ),
-    error = function(e) {
-      warning("[load_sitrep] Read error: ", e$message, call. = FALSE)
-      return(NULL)
-    }
-  )
-
-  if (is.null(sitrep)) return(NULL)
-
-  .check_cols(sitrep, c("nom", "date", "new_confirmed_cases"), "load_sitrep")
-
-  # HARMONISE the zone names. Every other zone-keyed loader canonicalises through aliases.csv;
-  # this one only RENAMED the column, which is not the same thing — so the returned tibble
-  # carried raw sitrep spellings ("Nia-Nia" against the spine's "Nia Nia") that can never join
-  # the 519-zone spine, even though the alias for exactly that case exists. Also apply the as-of
-  # filter that .build_sitrep_confirmed_appends() applies on the same source.
-  .sit_aliases <- if (file.exists(ALIASES_PATH))
-    tryCatch(readr::read_csv(ALIASES_PATH,
-                             col_types = readr::cols(.default = readr::col_character()),
-                             show_col_types = FALSE),
-             error = function(e) {
-               warning("[load_sitrep] Cannot read aliases.csv: ", e$message, call. = FALSE); NULL })
-    else NULL
-  .sit_asof <- suppressWarnings(as.Date(get0("ANALYSIS_DATE", ifnotfound = NA)))
-
-  sitrep <- sitrep %>%
-    dplyr::mutate(
-      date       = .parse_date(date),
-      nom        = if (!is.null(.sit_aliases)) .apply_aliases(nom, .sit_aliases) else nom,
-      week_start = lubridate::floor_date(date, unit = "week",
-                                         week_start = get0("WEEK_ANCHOR", ifnotfound = 1L))
-    ) %>%
-    dplyr::filter(!is.na(date), !is.na(nom), nom != "",
-                  is.na(.sit_asof) | date <= .sit_asof) %>%
-    dplyr::group_by(nom, week_start) %>%
-    dplyr::summarise(
-      sitrep_confirmed_weekly = sum(new_confirmed_cases, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::arrange(nom, week_start) %>%
-    dplyr::rename(health_zone = nom)  # align key name with zone_week
-
-  # min()/max() on an empty tibble return -Inf/Inf with a warning rather than failing cleanly.
-  if (nrow(sitrep) == 0) {
-    message("[load_sitrep] No sitrep rows at or before the analysis date.")
-    return(NULL)
-  }
-
-  message(
-    "[load_sitrep] Sitrep: ", length(unique(sitrep$health_zone)), " zones, ",
-    nrow(sitrep), " zone-week rows, weeks ",
-    min(sitrep$week_start), " to ", max(sitrep$week_start)
-  )
-
-  sitrep
-}
-
-
-# =============================================================================
-# SECTION 8: prep_all_data() — master loader
-# =============================================================================
-#
-# Calls all loaders in order, returns a named list for use by all downstream
-# spatiotemporal scripts. Zone list for zero-filling is derived from WorldPop
-# (519 DRC health zones), ensuring the observation matrix is always complete.
+# Calls all loaders in order and returns a named list for every downstream script. The zone
+# list for zero-filling comes from WorldPop (519 DRC health zones), so the observation matrix
+# is always complete.
 
 prep_all_data <- function() {
 
@@ -1466,24 +1474,11 @@ prep_all_data <- function() {
   # 4. Static covariates
   covariates <- load_static_covariates()
 
-  # 4b. Per-zone test positivity (a model covariate; derived from the zone-week
-  #     aggregation since it is not a static input file). Zones with no testing data
-  #     fall back to the nominal ascertainment rate downstream.
-  #     POOLED ratio (sum confirmed / sum tests), not the unweighted mean of the weekly
-  #     ratios: a week with one test must not carry the same weight as a week with 500.
-  #     Only weeks with a usable denominator contribute.
-  zone_positivity <- zone_week %>%
-    dplyr::filter(is.finite(positivity), tests_analyzed > 0) %>%
-    dplyr::group_by(health_zone) %>%
-    dplyr::summarise(.conf = sum(confirmed, na.rm = TRUE),
-                     .tests = sum(tests_analyzed, na.rm = TRUE), .groups = "drop") %>%
-    dplyr::transmute(health_zone,
-                     positivity = dplyr::if_else(.tests > 0, .conf / .tests, NA_real_))
-  covariates <- covariates %>%
-    dplyr::left_join(zone_positivity, by = c("nom" = "health_zone"))
-
-  # 5. INSP sitrep (optional)
-  sitrep <- load_sitrep()
+  # A per-zone `positivity` covariate was derived here and joined onto `covariates`. DHIS2
+  # carries no test counts for real records, so aggregate_to_zone_week()'s own guard makes
+  # `positivity` NA on every row — the join added an all-NA column. It was also not in any
+  # covariate set: 20_forecast_detail.R removed it from the default on 2026-09-17 as
+  # circular and a full-data static leak. Removed 2026-09-27.
 
   # ---- Summary statistics ---------------------------------------------------
   message("\n", strrep("-", 70))
@@ -1491,6 +1486,8 @@ prep_all_data <- function() {
   message(strrep("-", 70))
 
   confirmed_ll  <- sum(ll$confirmed, na.rm = TRUE)
+  .sitrep_rows  <- grepl("^SITREP-CONF-", as.character(ll$alert_id))
+  confirmed_sit <- sum(ll$confirmed & .sitrep_rows, na.rm = TRUE)
   zones_affected <- ll %>%
     dplyr::filter(confirmed) %>%
     dplyr::pull(health_zone) %>%
@@ -1499,7 +1496,8 @@ prep_all_data <- function() {
   date_range <- range(ll$date_index, na.rm = TRUE)
 
   message(
-    "  Total confirmed cases (linelist): ", confirmed_ll
+    "  Total confirmed cases:            ", confirmed_ll,
+    " (line list ", confirmed_ll - confirmed_sit, " + sitrep top-up ", confirmed_sit, ")"
   )
   message(
     "  Zones with >=1 confirmed case:    ", zones_affected,
@@ -1515,29 +1513,18 @@ prep_all_data <- function() {
     length(unique(zone_week$health_zone)), " zones × ",
     length(unique(zone_week$week_start)), " weeks)"
   )
-  if (!is.null(sitrep)) {
-    message(
-      "  Sitrep weekly rows:               ", nrow(sitrep)
-    )
-  }
   message(strrep("=", 70), "\n")
 
+  # `zones_all` (a duplicate of names(pop)) and `sitrep` (never read) were dropped from this
+  # list on 2026-09-27. Consumers take the canonical zone vector from names(dat$pop).
   list(
     ll         = ll,
     zone_week  = zone_week,
     pop        = pop,
-    zones_all  = zones,          # canonical 519-zone name vector (= names(pop))
-    covariates = covariates,
-    sitrep     = sitrep
+    covariates = covariates
   )
 }
 
-# =============================================================================
-# SECTION 9: Execute
-# =============================================================================
-
-if (interactive() && !exists("dat")) {
-  dat <- prep_all_data()
-  message("[01_data_prep.R] Complete. Object `dat` available with components: ",
-          paste(names(dat), collapse = ", "))
-}
+# This file is a LIBRARY: sourcing it defines loaders and nothing else. It used to call
+# prep_all_data() on source() in an interactive session, which is the same "source() does
+# work" hazard the executable scripts are guarded against. Call prep_all_data() yourself.

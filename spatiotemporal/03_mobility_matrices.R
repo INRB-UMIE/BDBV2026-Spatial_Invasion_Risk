@@ -2,12 +2,21 @@
 # 03_mobility_matrices.R — Mobility Matrix Construction
 # BDBV 2026 DRC · Spatiotemporal Invasion Forecast Suite
 #
-# Purpose: Build the mobility kernels that parameterise between-zone transmission
-#   in the spatiotemporal metapopulation model: M1, M2a, M2b, M3, M4, M4b, M5, M6a,
-#   M6b, M7, M8, M10 always; M9/M15 behind their flags; the Flowminder-cohort
-#   composites M13/M14/M16 and the consensus M17; the source-cell fill variants
-#   (*-fill); and the OSRM road-distance twins (*-dist). M11 (inward FOI) is built
-#   on demand in run_all.R.
+# Purpose: Build the mobility kernels that parameterise between-zone transmission in the
+#   spatiotemporal metapopulation model. ALWAYS built: M1, M3, M4, M5, M6a, M8 and M10.
+#   BEHIND FLAGS that are ON by default: the Flowminder-cohort kernel M_cohort and its
+#   composites M13/M14 (INCLUDE_COHORT_MODELS), the cohort-calibrated gravity M4c and its
+#   composite M13c (INCLUDE_COHORT_GRAVITY_MODELS, inside the cohort family), the OD/consensus
+#   kernels M16/M17 (INCLUDE_FLOWSTATIC_MODELS; M16 also needs the cohort kernel) and the
+#   source-cell fill variants (*-fill; INCLUDE_SOURCEFILL_MODELS). BEHIND FLAGS that are OFF:
+#   the legacy kernels M2a/M2b/M4b/M6b/M7 (INCLUDE_LEGACY_KERNELS — nothing consumes them), M9,
+#   M15 and the origin-split composites (*-split). The road-distance twins (*-dist) need the
+#   road-distance matrix (argument osrm_dist_mat); given it, INCLUDE_OSRM_DIST_MODELS gates the
+#   GENERIC ones (M8/M9/M10-dist and their twins), the cohort -dist kernels build whenever the
+#   cohort kernel exists (M4c-dist/M13c-dist also under INCLUDE_COHORT_GRAVITY_MODELS), M17-dist
+#   whenever the OD/consensus family is on, and their km bases M4-dist/M5-dist whenever any of
+#   those is built. M11 (inward FOI) is built on demand in run_all.R.
+#   The flag defaults are set in 00_config.R; do not infer them from this header.
 #
 #   Zone names in the short-trip and cohort SOURCES are resolved here, against the
 #   519-zone spine, rather than trusting the upstream processed matrices — see
@@ -25,10 +34,10 @@
 #   M5             : Radiation model (Simini et al. 2012 Nature 484:96-100)
 #   M6a / M6b      : OSRM travel-time decay (exponential / power-law)
 #   M7             : IDP-augmented hybrid (M3 relocations + IDP flows)
-#   M8             : Composite — short trips for epicentre, gravity elsewhere (RECOMMENDED)
+#   M8             : Composite — short trips for epicentre, gravity elsewhere
 #   M13/M14/M16    : Flowminder cohort presence rows over gravity / radiation / relocation OD
 #                    (M16's base is M3 with its coverage gaps filled: cover_relocation_od())
-#   M17            : Consensus of M3 (coverage-filled) + M4 + M5 with empirical source rows overlaid
+#   M17            : Equal-weight consensus of M4 + M4c + M5 with empirical source rows overlaid
 #   *-fill         : as above, but cells the source could not observe come from the base
 #                    (the default form; MOBILITY_SOURCE_FILL = "unmeasured")
 #   *-split        : cohort composites whose pooled cohort profile is disaggregated per origin
@@ -50,15 +59,6 @@ suppressPackageStartupMessages({
   library(lubridate)
 })
 
-# ONE canonical definition, identical in every module that declares it, so that source()
-# ORDER CANNOT CHANGE SEMANTICS. This file's version used to be
-#   function(a, b) if (!is.null(a) && !is.na(a)[1]) a else b
-# and was declared UNCONDITIONALLY, so sourcing 06 installed it over every other module's and
-# it governed the whole cascade run. It differs in two ways that silently corrupt results:
-# it falls back whenever the FIRST ELEMENT of a vector is NA (blanking an entire otherwise-good
-# vector, e.g. run_cascade.R's R_zone_conjugate column or 33b's pop_vec), and it ERRORS on a
-# zero-length left-hand side ("missing value where TRUE/FALSE needed") instead of falling back.
-`%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 
 # ---------------------------------------------------------------------------
 # Helper utilities
@@ -289,6 +289,9 @@ load_zone_centroids <- function(path = get0("SHAPEFILE_PATH", ifnotfound = NA_ch
 #' @param kind "travel_time" or "road_distance"; used only in messages.
 #' @return M with the imputable NA cells filled.
 .fill_osrm_gaps <- function(M, kind = "travel_time") {
+  # The centroid-distance matrix below is built from the ROW names for both dimensions and the
+  # diagonal is handled by position, so the columns must be in row order (load_osrm ensures it).
+  stopifnot(identical(rownames(M), colnames(M)))
   na_mask <- is.na(M)
   diag(na_mask) <- FALSE
   n_gap <- sum(na_mask)
@@ -329,7 +332,9 @@ load_zone_centroids <- function(path = get0("SHAPEFILE_PATH", ifnotfound = NA_ch
                   if (left) sprintf("; %d cell(s) had no centroid and stay NA", left) else ""))
   # Name the zones the repair rescued: a zone whose whole column was NA had structurally
   # zero import hazard, which is the failure this exists to remove.
-  rescued <- zn[colSums(na_mask) == length(zn) - 1L]
+  # Both conditions: the column had no routable cell at all AND the repair imputed at least one
+  # cell into it. A zone with no centroid keeps its NA column, so it is not "now reachable".
+  rescued <- zn[colSums(na_mask) == length(zn) - 1L & colSums(need) > 0]
   if (length(rescued))
     message(sprintf("[osrm-gapfill] %s: zones with NO road route at all, now reachable: %s.",
                     kind, paste(rescued, collapse = ", ")))
@@ -357,8 +362,13 @@ load_osrm <- function(kind = c("travel_time", "road_distance")) {
   zones <- df$nom
   M     <- as.matrix(df[, -which(colnames(df) == "nom")])
   rownames(M) <- zones
-  # Ensure square
-  stopifnot(nrow(M) == ncol(M))
+  # Ensure square AND on one zone set, then put the columns in ROW order. Square alone is not
+  # enough: .fill_osrm_gaps() and every positional diag() assume column k is the zone of row k,
+  # and the Flowminder exports show that a source can write its columns in a different order
+  # from its rows. A no-op when the file's two orders already agree.
+  stopifnot(nrow(M) == ncol(M), !anyNA(zones), !anyDuplicated(zones),
+            setequal(zones, colnames(M)))
+  if (!identical(colnames(M), zones)) M <- M[, zones, drop = FALSE]
   message(sprintf("[osrm] Loaded %dx%d %s matrix (%d NA entries).",
                   nrow(M), ncol(M), gsub("_", "-", kind), sum(is.na(M))))
   # Repair the road-network coverage gaps before ANY kernel sees the matrix, so every
@@ -381,10 +391,11 @@ load_osrm <- function(kind = c("travel_time", "road_distance")) {
 #' file (historically called the "provincial PDF extract") — 437 zones, every cell a number,
 #' suppressed counts written as 0 and therefore indistinguishable from measured zeros. The
 #' April 2026 national HDX export ("flowminder__outflow_202604__static.matrix.csv") is a strict
-#' superset at 467 zones. It leaves EMPTY both the pairs Flowminder marks "redacted (count <15)"
-#' (9,416) and the pairs listed with a BLANK value that month (47,945), and writes the pairs absent
-#' from the long table as 0. NA there therefore means "no count released this month", of which only
-#' a minority are documented redactions; the meaning of a blank is not documented. build_M3 carries
+#' superset at 467 zones. It leaves EMPTY 57,339 cells (counted on the processed matrix,
+#' 2026-10-17): the pairs Flowminder marks "redacted (count <15)" (9,416 in its documentation)
+#' and the pairs listed with a BLANK value that month; it writes the pairs absent from the long
+#' table as 0. NA there therefore means "no count released this month", of which only a minority
+#' are documented redactions; the meaning of a blank is not documented. build_M3 carries
 #' NA as a censoring mask, and the gravity fit's three-state likelihood treats every NA as a
 #' redacted 1-14 count — correct for the redactions, an assumption for the blanks. The April file
 #' is a sensitivity arm only.
@@ -402,7 +413,7 @@ load_flowminder_od <- function(file = get0("FLOWMINDER_OD_FILE",
   zones <- df$nom
   M     <- as.matrix(df[, -which(colnames(df) == "nom")])
   rownames(M) <- zones
-  message(sprintf("[flowminder_od] Loaded %dx%d OD matrix from %s (%d redacted cell(s)).",
+  message(sprintf("[flowminder_od] Loaded %dx%d OD matrix from %s (%d cell(s) with no released count).",
                   nrow(M), ncol(M), basename(f), sum(is.na(M))))
   M
 }
@@ -410,8 +421,14 @@ load_flowminder_od <- function(file = get0("FLOWMINDER_OD_FILE",
 #' Load a Flowminder short-trip snapshot.
 #'
 #' Returns a named numeric vector of proportions (converted from %) for
-#' each destination zone.  All three origin rows (Bunia/Mongbalu/Rwampara)
+#' each destination zone.  All three origin rows (Bunia/Mongbwalu/Rwampara)
 #' are identical (pooled cohort); only the first data row is used.
+#' LOSSY — DO NOT USE FOR ANALYSIS. This reads the PROCESSED matrix, canonicalised upstream
+#' against the header of the 437-zone Flowminder OD matrix, so it silently lacks real spine
+#' destinations (Kilo, the annex's rank-4 destination, among them; see the block above
+#' .norm_key()). Analyses must use load_short_trip_profile(), which resolves the raw annex
+#' table; this loader is only that function's fallback (raw table absent or unusable) and the
+#' comparator of the processed-source check (.warn_if_processed_source_stale()).
 #'
 #' @param tag  Date tag string, e.g. "20260524".
 #' @return Named numeric vector: names = destination zone, values = proportions [0,1].
@@ -445,9 +462,12 @@ load_short_trip_snapshot <- function(tag) {
 #' matrices (avg subscriber-days per cohort member in each destination zone), NOT
 #' the short-trip outflow proportions. Values are DAYS (not %), so they are NOT
 #' divided by 100. All origin rows are identical (pooled cohort aggregate); only
-#' the first data row is read. The processed matrix is canonicalised on the 519
-#' WorldPop spine (see data/flowminder_short_trips/process.py), so names align to
-#' zones_all directly. The latest tag for the requested window is used.
+#' the first data row is read. The processed matrix is canonicalised UPSTREAM
+#' (data/flowminder_short_trips/process.py) and is lossy: its column names are spine
+#' names, but real spine zones are missing from it (Kilo from the Ituri and Nord-Kivu
+#' matrices; see the block above .norm_key()). The kernels read the raw release through
+#' load_cohort_profile(), which falls back to this only when the raw table is absent or
+#' unusable. The latest tag on or before analysis_date for the requested window is used.
 #'
 #' @param cohort One of the cohort ids (e.g. "ituri", "nk", "tshopo").
 #' @param window "followup" (during-outbreak; default) or "prior" (look-back).
@@ -573,17 +593,20 @@ load_idp_static <- function(aliases, zones_all) {
 # ---------------------------------------------------------------------------
 # WHY THE PIPELINE READS THE RAW TABLES RATHER THAN THE PROCESSED MATRICES.
 # The processed short-trip and cohort matrices are canonicalised UPSTREAM (in
-# data/flowminder_short_trips/process.py) against the HEADER OF THE 437-ZONE
-# Flowminder OD matrix — not against the 519-zone WorldPop spine this pipeline
-# runs on. Every destination whose name is outside those 437 is dropped, which
-# costs the Ituri cohort 6.97% of its follow-up presence mass and the short-trip
-# annex 7.15% of its D+31 mass — in both cases almost entirely ONE zone, Kilo,
-# the annex's rank-4 destination, itself invaded on 2026-05-12 and reachable
-# with weight exactly zero from Bunia in M1/M8/M13/M14. data/ is synced from the
-# public data repo (see run_spatiotemporal.sh PUBLIC_PATHS) and is NOT versioned
-# here, so patching process.py alone would be undone by the next sync. The
-# pipeline therefore resolves the RAW source tables itself, against zones_all.
-# The processed matrices remain the fallback when a raw table is absent.
+# data/flowminder_short_trips/process.py), not against the 519-zone WorldPop spine
+# this pipeline runs on, and they lose real spine zones. On the current processed
+# files (checked 2026-10-17) the short-trip annex and the Ituri and Nord-Kivu cohort
+# matrices carry only names in the HEADER OF THE 437-ZONE Flowminder OD matrix, so
+# every destination outside those 437 is dropped; the Tshopo matrix is not limited
+# to that header (22 of its 454 columns lie outside it). The drop costs the Ituri
+# cohort 6.97% of its follow-up presence mass and the short-trip annex 7.15% of its
+# D+31 mass — in both cases almost entirely ONE zone, Kilo, the annex's rank-4
+# destination and itself an invaded zone, which the kernels built from the processed
+# matrices reached with weight exactly zero from Bunia (M1/M8/M13/M14). data/ is
+# synced from the public data repo (see run_spatiotemporal.sh PUBLIC_PATHS) and is
+# NOT versioned here, so patching process.py alone would be undone by the next sync.
+# The pipeline therefore resolves the RAW source tables itself, against zones_all.
+# The processed matrices remain the fallback when a raw table is absent or unusable.
 
 #' Accent/punctuation-insensitive comparison key (province matching).
 .norm_key <- function(x) {
@@ -600,8 +623,10 @@ load_idp_static <- function(aliases, zones_all) {
 #   Lukonga        -> Kasai-Central   (Flowminder province "Kasai")
 #   Kalambayi Kabanga -> Lomami       (truncated source label)
 #   Makiso Kisangani  -> Tshopo       (truncated source label)
-# None of these targets appears as a separate row in the source tables, so no
-# destination is double-counted by adding them.
+# Several targets are also rows in their own right (Massa, Lukonga and Kisantu in the
+# cohort tables; Makiso Kisangani in the annex and the Tshopo table), but no raw table
+# carries BOTH an alias label and its target (checked 2026-10-17 on the four current raw
+# tables), so resolving the aliases never merges two rows of one table onto one zone.
 SHORT_TRIP_LABEL_ALIASES <- c(
   "Central Massa"   = "Massa",
   "Central Lukonga" = "Lukonga",
@@ -692,7 +717,8 @@ SHORT_TRIP_LABEL_ALIASES <- c(
 #' whenever the data are refreshed. The model layer is insulated (it reads the raw
 #' tables), but the processed matrices ship to other consumers, so a divergence is
 #' worth reporting. Diagnostic only: never alters a kernel.
-.warn_if_processed_source_stale <- function(zones_all, aliases, tag) {
+.warn_if_processed_source_stale <- function(zones_all, aliases, tag,
+                                            analysis_date = get0("ANALYSIS_DATE", ifnotfound = NA)) {
   cmp <- function(raw_names, proc_names, what) {
     proc_can <- harmonise_names(proc_names, aliases, zones_all)
     missing  <- setdiff(raw_names, proc_can)
@@ -714,11 +740,13 @@ SHORT_TRIP_LABEL_ALIASES <- c(
   }, error = function(e) invisible(NULL))
   for (ch in names(get0("COHORT_SOURCES", ifnotfound = list()))) {
     tryCatch({
+      # The same as-of release / snapshot the build uses, not the ones as of the global date.
       pr <- suppressWarnings(load_cohort_profile(ch, get0("COHORT_WINDOW", ifnotfound = "followup"),
-                                                 zones_all, aliases))
+                                                 zones_all, aliases, analysis_date = analysis_date))
       if (identical(pr$source, "raw"))
         cmp(pr$measured,
-            names(suppressMessages(load_cohort_snapshot(ch, get0("COHORT_WINDOW", ifnotfound = "followup")))),
+            names(suppressMessages(load_cohort_snapshot(ch, get0("COHORT_WINDOW", ifnotfound = "followup"),
+                                                        analysis_date = analysis_date))),
             sprintf("cohort %s", ch))
     }, error = function(e) invisible(NULL))
   }
@@ -847,7 +875,9 @@ load_cohort_profile <- function(cohort, window = "followup", zones_all,
                     cohort), call. = FALSE)
   }
   # ---- fallback: the processed matrix ----
-  v   <- load_cohort_snapshot(cohort, window)
+  # analysis_date is threaded here too: without it the fallback took the snapshot as of the
+  # GLOBAL ANALYSIS_DATE, undoing the as-of selection for a back-dated build.
+  v   <- load_cohort_snapshot(cohort, window, analysis_date = analysis_date)
   can <- harmonise_names(names(v), aliases, zones_all)
   can[!can %in% zones_all] <- NA_character_
   values <- .sum_by_zone(v, can)
@@ -856,12 +886,28 @@ load_cohort_profile <- function(cohort, window = "followup", zones_all,
 }
 
 # ---------------------------------------------------------------------------
-# M1: Flowminder short trips — static (D+31, tag 20260524)
+# M1: Flowminder short trips — static (latest snapshot on or before the analysis date)
 # ---------------------------------------------------------------------------
 
-#' Build M1: epicentre short-trip matrix using the most recent (D+31) snapshot.
+#' The short-trip snapshot tag in force at `analysis_date`: the LATEST snapshot on or before it.
 #'
-#' For epicentre zone rows (Bunia, Mongbalu, Rwampara): fill from the pooled
+#' Snapshots are discovered dynamically in config (FLOWMINDER_ST_TAGS/DATES), so a newer one is
+#' picked up automatically as it comes online — no hard-coded tag. When every snapshot post-dates
+#' the analysis date (a back-dated run) the EARLIEST is used, which leaks least; never which.max
+#' over all dates, which would pick the most future-dated snapshot of all. ONE definition, shared
+#' by build_M1(), the processed-source diagnostic and the manifest fingerprint, so all three name
+#' the same snapshot.
+#' @return a single tag string, or NA_character_ when no snapshot is configured.
+.short_trip_tag_asof <- function(analysis_date) {
+  if (!length(FLOWMINDER_ST_TAGS)) return(NA_character_)
+  .elig <- which(FLOWMINDER_ST_DATES <= analysis_date)
+  if (length(.elig)) FLOWMINDER_ST_TAGS[.elig[which.max(FLOWMINDER_ST_DATES[.elig])]]
+  else FLOWMINDER_ST_TAGS[which.min(FLOWMINDER_ST_DATES)]
+}
+
+#' Build M1: epicentre short-trip matrix using the latest snapshot on or before analysis_date.
+#'
+#' For epicentre zone rows (Bunia, Mongbwalu, Rwampara): fill from the pooled
 #' short-trip proportions.  For all other origin zones: use fallback_M3 row
 #' (if provided) or leave as zero.
 #'
@@ -873,18 +919,9 @@ load_cohort_profile <- function(cohort, window = "followup", zones_all,
 #' @return Row-stochastic 519×519 matrix.
 build_M1 <- function(zones_all, epicentre_zones, aliases, fallback_M3 = NULL,
                      analysis_date = get0("ANALYSIS_DATE", ifnotfound = Sys.Date())) {
-  # Use the LATEST short-trip snapshot on or before the analysis date. Snapshots are discovered
-  # dynamically in config (FLOWMINDER_ST_TAGS/DATES), so a newer snapshot is picked up
-  # automatically as it comes online — no hard-coded tag.
-  .elig <- which(FLOWMINDER_ST_DATES <= analysis_date)
-  tag <- if (length(.elig)) {
-    FLOWMINDER_ST_TAGS[.elig[which.max(FLOWMINDER_ST_DATES[.elig])]]
-  } else {
-    # Every snapshot post-dates the analysis date (a back-dated run). Use the EARLIEST,
-    # which leaks least; never which.max over all dates, which would pick the most
-    # future-dated snapshot of all.
-    FLOWMINDER_ST_TAGS[which.min(FLOWMINDER_ST_DATES)]
-  }
+  # The LATEST short-trip snapshot on or before the analysis date (EARLIEST when all post-date
+  # it); see .short_trip_tag_asof().
+  tag <- .short_trip_tag_asof(analysis_date)
   message(sprintf("[M1] Building Flowminder short-trip matrix (latest snapshot <= %s: %s)...",
                   format(analysis_date), tag))
   # Resolve the RAW annex table against zones_all (see load_short_trip_profile:
@@ -1072,10 +1109,10 @@ build_M3 <- function(zones_all, aliases) {
 
   M_raw <- load_flowminder_od()   # 437x437 (March) or 467x467 (April national)
 
-  # Redacted cells (NA) are counts SUPPRESSED below the privacy threshold, not
-  # zero flow. Keep them as an explicit mask and zero the flows, so nothing
-  # downstream has to reason about NA, and the gravity fit can still tell a
-  # suppressed cell from a measured zero.
+  # NA cells carry NO RELEASED COUNT — the documented redactions (count < 15) and, in the April
+  # export, the undocumented blanks (load_flowminder_od()) — not zero flow. Keep them as an
+  # explicit mask and zero the flows, so nothing downstream has to reason about NA, and the
+  # gravity fit can still tell an unreleased cell from a measured zero.
   cens_raw <- is.na(M_raw)
   M_raw[cens_raw] <- 0
 
@@ -1153,7 +1190,7 @@ build_M3 <- function(zones_all, aliases) {
   attr(W_norm, "od_origins")  <- shared_orig    # origins the relocation table covers
   attr(W_norm, "od_dests")    <- shared_dest    # destinations the relocation table covers
   if (any(C_full))
-    message(sprintf("[M3] %d cell(s) carry an explicit redaction flag (suppressed count).",
+    message(sprintf("[M3] %d cell(s) carry no released count (NA in the source: redactions and blanks).",
                     sum(C_full)))
   W_norm
 }
@@ -1322,7 +1359,8 @@ build_M15 <- function(zones_all, aliases) {
 # with glm.nb()/glm(poisson) is a mis-specified likelihood. Because censoring hits SMALL
 # flows, and small flows are disproportionately LONG-RANGE pairs, the uncensored fit's
 # deterrence coefficient is biased steeper; row-normalisation cancels a constant scale error
-# but NOT that shape error, and M4 feeds M8 = MOBILITY_PRIMARY.
+# but NOT that shape error, and M4 propagates into every kernel built on it: the gravity
+# composites (M8, M13 and their twins), the M17 consensus, and M4c through its mass exponent.
 #
 # The correct likelihood keeps the observed (y >= k) rows as NB densities and replaces each
 # censored row's contribution with the interval probability P(Y <= k-1):
@@ -1330,8 +1368,9 @@ build_M15 <- function(zones_all, aliases) {
 # with log mu = X beta (the SAME gravity mean structure), maximised by optim() from the
 # uncensored fit's coefficients. Falls back to the uncensored fit, loudly, if it fails.
 #' @param cens_vec optional logical vector marking the CENSORED training rows. When
-#'   supplied (the April national export flags suppressed cells explicitly), the
-#'   censored set is exactly those rows and every other zero is an OBSERVED zero.
+#'   supplied (the April national export leaves the cells with no released count EMPTY,
+#'   so they are flagged explicitly), the censored set is exactly those rows and every
+#'   other zero is an OBSERVED zero.
 #'   When NULL, censoring is implicit and every recorded zero is treated as
 #'   censored — the only option for the March file, where the two are written the
 #'   same way.
@@ -1465,9 +1504,10 @@ predict.censored_gravity <- function(object, newdata, type = "response", ...) {
 #'
 #' Fits an unconstrained gravity GLM (negative-binomial, falling back to Poisson
 #' if the NB theta iteration diverges) with log(pop_i), log(pop_j) and
-#' log(dist_ij + 1).  Predicts for all 519×519 pairs and row-normalises.  A
-#' per-origin intercept would cancel under row-normalisation, so origin size is
-#' captured by the single log(pop_i) covariate rather than fixed effects.
+#' log(dist_ij + 1).  Predicts for all 519×519 pairs and row-normalises.  Origin size is
+#' captured by the single log(pop_i) covariate rather than origin fixed effects (see the note
+#' at the fit: the fixed-effect VALUES would cancel under row-normalisation, but fitting them
+#' would change the jointly estimated mass and deterrence coefficients).
 #'
 #' When the flows are censored (see the diagnostic below), the NB/Poisson fit is used only
 #' as a starting point and the kernel comes from a REFIT under the censored likelihood
@@ -1477,14 +1517,18 @@ predict.censored_gravity <- function(object, newdata, type = "response", ...) {
 #' @param pop_vec  Named population vector (length 519).
 #' @param osrm_mat OSRM cost matrix (zones_all × zones_all; minutes, or km for -dist).
 #' @param zones_all Canonical zone vector.
-#' @param censor_mask Optional logical 519×519 mask of SUPPRESSED cells (April export).
+#' @param censor_mask Optional logical 519×519 mask of the cells with NO RELEASED COUNT
+#'   (April export: documented redactions and undocumented blanks).
 #' @param od_dests Optional character vector of destinations the source OD table covers
 #'   (attr(M3, "od_dests")). Training is restricted to them; prediction is not.
+#' @param od_origins Optional character vector of origins the source OD table covers
+#'   (attr(M3, "od_origins")). Training is restricted to them; prediction is not. When NULL,
+#'   the origins with any non-zero recorded outflow are used instead.
 #' @return Row-stochastic 519×519 matrix.  Attribute "model_summary" holds the fit used:
 #'         the NB/Poisson GLM summary, or the "censored_gravity" object after a refit.
 build_M4 <- function(M3_raw, pop_vec, osrm_mat, zones_all,
                      deterrence = c("power", "exp"), label = "M4",
-                     censor_mask = NULL, od_dests = NULL) {
+                     censor_mask = NULL, od_dests = NULL, od_origins = NULL) {
   deterrence <- match.arg(deterrence)
   message(sprintf("[%s] Building gravity model (calibrated on M3, %s deterrence)...",
                   label, deterrence))
@@ -1514,11 +1558,19 @@ build_M4 <- function(M3_raw, pop_vec, osrm_mat, zones_all,
   #   - both zones have pop > 0
   #   - OSRM distance > 0 and not NA
   #   - M3_raw[i,j] is the response (including zeros)
-  # Restrict to zones that appear as origins in M3 (rows with any non-zero outflow)
-  has_outflow <- rowSums(M3_raw, na.rm = TRUE) > 0
-  train_zones <- zones_all[has_outflow & pop_aligned > 0]
-  message(sprintf("[%s] Training data: %d origin zones with outflow and pop > 0.",
-                  label, length(train_zones)))
+  # ORIGIN COVERAGE. Restrict to the origins the source OD table COVERS (od_origins), INCLUDING
+  # a covered origin whose every recorded cell is zero. Under the censored likelihood below each
+  # of its cells is an observation (a suppressed count in 0..k-1, or a measured zero), so
+  # dropping the origin for having no positive flow would be selection on the outcome. An origin
+  # ABSENT from the table has an all-zero row only because the source never reported it, so it
+  # stays out, exactly as the uncovered destinations do below. Without od_origins (a direct
+  # call) the origins with any non-zero recorded outflow are the stand-in.
+  covered_o <- if (!is.null(od_origins)) zones_all %in% od_origins
+               else rowSums(M3_raw, na.rm = TRUE) > 0
+  train_zones <- zones_all[covered_o & pop_aligned > 0]
+  message(sprintf("[%s] Training data: %d origin zones %s and pop > 0.",
+                  label, length(train_zones),
+                  if (!is.null(od_origins)) "covered by the OD table" else "with recorded outflow"))
 
   # DESTINATION COVERAGE. Zones outside the source OD table have an all-zero column in
   # M3_raw because the source never reported them, not because no one travels there. Left
@@ -1565,54 +1617,71 @@ build_M4 <- function(M3_raw, pop_vec, osrm_mat, zones_all,
                   label, nrow(train_df), 100 * mean(train_df$flow == 0)))
 
   # ---- LEFT-CENSORING DIAGNOSTIC (do not silence) ----------------------------------
-  # Flowminder suppresses OD counts below a privacy threshold and the processed matrix
-  # encodes suppression as 0. Detect it from the data itself: if there is a positive
-  # minimum k > 1 and NO observed value in 1..k-1, the zeros are not observations of
-  # "no travel" but LEFT-CENSORED observations of "somewhere in 0..k-1". Fitting
-  # glm.nb()/glm(poisson) to them is then a mis-specified likelihood — every true flow
-  # of 1..k-1 enters the fit as an exact 0. Because censoring hits SMALL flows, and
-  # small flows are disproportionately LONG-RANGE pairs, the deterrence coefficient is
-  # biased steeper and the mass coefficients with it. Row-normalisation cancels a constant
-  # scale error but NOT this shape error, and M4 feeds M8 (MOBILITY_PRIMARY), so it reaches
-  # the featured model. The statistically correct treatment is a censored likelihood
-  # (flow = 0 contributes P(Y <= k-1) rather than P(Y = 0)) — a deliberate modelling change,
-  # so it is surfaced here rather than made silently.
+  # Flowminder suppresses OD counts below a privacy threshold (its documentation: "redacted
+  # (count <15)") and the March processed matrix encodes suppression as 0. The inference made
+  # here rests on ONE number, the smallest positive training flow k: when k > 1, counts below
+  # k are taken to have been suppressed, so the zeros are not observations of "no travel" but
+  # LEFT-CENSORED observations of "somewhere in 0..k-1". (No observed value can lie in 1..k-1,
+  # by the definition of k, so that is not a second test.) Because the inference cannot tell a
+  # suppressed source from one of genuine counts whose smallest count happens to exceed 1, k is
+  # checked against the documented threshold and any disagreement is reported loudly. Fitting
+  # glm.nb()/glm(poisson) to censored zeros is a mis-specified likelihood — every true flow of
+  # 1..k-1 enters the fit as an exact 0. Because censoring hits SMALL flows, and small flows are
+  # disproportionately LONG-RANGE pairs, the deterrence coefficient is biased steeper and the
+  # mass coefficients with it. Row-normalisation cancels a constant scale error but NOT this
+  # shape error, and M4 propagates into every kernel built on it. The statistically correct
+  # treatment is a censored likelihood (flow = 0 contributes P(Y <= k-1) rather than P(Y = 0))
+  # — a deliberate modelling change, so it is surfaced here rather than made silently.
+  .k_doc <- 15L   # Flowminder's documented redaction threshold for these OD exports
   .pos <- train_df$flow[train_df$flow > 0]
   .k_cens <- NA_integer_
   .cens_explicit <- FALSE
   if (length(.pos)) {
     .k <- min(.pos)
-    # EXPLICIT censoring: the source marks suppressed cells (April national export),
-    # so a recorded 0 is a MEASURED zero and only the flagged cells are intervals,
-    # known to lie in [1, k-1]. Needs k > 1 for that interval to be non-empty.
+    if (.k != .k_doc)
+      warning(sprintf(paste0("[%s] the smallest positive OD training flow is %d, not Flowminder's ",
+                             "documented redaction threshold of %d. %s Check the source's redaction rule."),
+                      label, .k, .k_doc,
+                      if (.k > 1) sprintf("The censoring threshold is taken from the data: counts below %d are treated as suppressed.", .k)
+                      else "No censoring is inferred: every recorded zero is treated as an observed zero."),
+              call. = FALSE)
+    # EXPLICIT censoring: the source leaves the cells with no released count EMPTY (April
+    # national export), so a recorded 0 is a MEASURED zero and only the flagged cells are
+    # intervals, taken to lie in [1, k-1] — exact for the documented redactions, an assumption
+    # for the undocumented blanks. Needs k > 1 for that interval to be non-empty.
     .cens_explicit <- any(train_df$cens) && .k > 1
     if (.cens_explicit) {
       .k_cens <- as.integer(.k)
-      message(sprintf(paste0("[%s] OD training data carry EXPLICIT redaction flags: %d of %d ",
-                             "pairs (%.1f%%) are suppressed counts in 1..%d; the remaining ",
-                             "%.1f%% of zeros are measured zeros."),
+      message(sprintf(paste0("[%s] OD training data flag their cells with NO RELEASED COUNT explicitly ",
+                             "(NA in the source: documented redactions and undocumented blanks): %d of %d ",
+                             "pairs (%.1f%%) are treated as counts in 1..%d; the other %.1f%% of the ",
+                             "recorded zeros are measured zeros."),
                       label, sum(train_df$cens), nrow(train_df),
                       100 * mean(train_df$cens), .k - 1L,
-                      100 * mean(train_df$flow == 0 & !train_df$cens)))
-    } else if (.k > 1 && !any(train_df$flow > 0 & train_df$flow < .k)) {
+                      100 * sum(train_df$flow == 0 & !train_df$cens) /
+                        max(1L, sum(train_df$flow == 0))))
+    } else if (.k > 1) {
       .k_cens <- as.integer(.k)
-      message(sprintf(paste0("[%s] OD training data are LEFT-CENSORED: smallest observed ",
-                             "positive flow is %d, no value occurs in 1..%d, so the %.1f%% of ",
-                             "cells recorded as 0 are suppressed counts in 0..%d."),
-                      label, .k, .k - 1L, 100 * mean(train_df$flow == 0), .k - 1L))
+      message(sprintf(paste0("[%s] OD training data are LEFT-CENSORED: the smallest observed ",
+                             "positive flow is %d, so the %.1f%% of cells recorded as 0 are taken ",
+                             "to be suppressed counts in 0..%d."),
+                      label, .k, 100 * mean(train_df$flow == 0), .k - 1L))
     }
   }
 
   # ---- Fit gravity GLM ----
   # Unconstrained gravity model: flow ~ pop_i^b1 * pop_j^b2 * (dist+1)^b3.
-  # The origin-size term (pop_i) enters as a single covariate rather than 519
-  # origin fixed effects: a per-origin intercept is an origin-constant
-  # multiplier that cancels exactly under row-normalisation, so fixed effects
-  # add ~500 dense design columns and numerical instability for no effect on
-  # the final row-stochastic matrix.  Negative-binomial is attempted first
-  # (overdispersion), but its theta iteration can diverge on these heavy-tailed,
-  # ~97%-zero flows; we fall back to Poisson, whose mean structure is identical
-  # in form and fully sufficient for a normalised mobility kernel.
+  # The origin-size term (pop_i) enters as a single covariate rather than one
+  # fixed effect per training origin. That is a modelling choice, not a free
+  # simplification: the fixed-effect VALUES are origin-constant multipliers that
+  # cancel under row-normalisation, but fitting them changes the jointly
+  # estimated mass and deterrence coefficients (they would no longer have to
+  # explain the origin-level variation log(pop_i) leaves), and so changes the
+  # row-stochastic matrix; it would also add a dense design column per training
+  # origin to the censored fit. Negative-binomial is attempted first (overdispersion), but its
+  # theta iteration can diverge on these heavy-tailed, overwhelmingly zero flows
+  # (the share is logged above); we fall back to Poisson, whose mean structure
+  # is identical in form and fully sufficient for a normalised mobility kernel.
   # Deterrence function: "power" → flow ∝ (dist+1)^b3 (log-distance term, the
   # classic gravity form); "exp" → flow ∝ exp(b3·dist) (linear-distance term, an
   # exponential deterrence kernel; Truscott & Ferguson 2012 PLoS Comput Biol
@@ -1698,10 +1767,10 @@ build_M4 <- function(M3_raw, pop_vec, osrm_mat, zones_all,
         # make_row_stochastic() radiating UNIFORMLY to all ~517 populated zones. That is exactly
         # the pathology build_M6() documents and guards against ("an OSRM-missing infected origin
         # would radiate invasion force everywhere"), it passed every assertion because a uniform
-        # row is a valid distribution, and it printed nothing. M4 feeds M8 = MOBILITY_PRIMARY,
-        # so a silent uniform row there propagates into the featured kernel. A ZERO row is the
-        # honest answer and is the case make_row_stochastic() already handles, exactly as M4/M5/M6
-        # do for unroutable origins.
+        # row is a valid distribution, and it printed nothing. M4 is a base of the gravity
+        # composites and a member of the M17 consensus, so a silent uniform row there propagates
+        # into each of them. A ZERO row is the honest answer and is the case make_row_stochastic()
+        # already handles, exactly as M4/M5/M6 do for unroutable origins.
         warning(sprintf("[mobility] %s: gravity prediction failed for origin '%s' (%s); row left at ZERO rather than uniform.",
                         label, oz, conditionMessage(e)), call. = FALSE)
         rep(0, length(dests))
@@ -1744,10 +1813,12 @@ build_M4 <- function(M3_raw, pop_vec, osrm_mat, zones_all,
 # ---------------------------------------------------------------------------
 # WHY THIS KERNEL EXISTS. M4's deterrence is fitted to M3, Flowminder's national RELOCATION
 # table -- monthly changes of home location. People who move house move far, so that source is
-# rich in LONG-range signal and gives a shallow decay (log(d+1) coefficient -1.44 on the
-# shipped fit). The cohort tables measure something else: average presence-DAYS per subscriber.
-# Time is overwhelmingly spent at or near home, so those data are rich in SHORT-range signal
-# and give a much steeper decay (-2.69). Neither is wrong; each is the best available view of
+# rich in LONG-range signal and gives a shallow decay (log(d+1) coefficient -1.44). The cohort
+# tables measure something else: average presence-DAYS per subscriber. Time is overwhelmingly
+# spent at or near home, so those data are rich in SHORT-range signal and give a much steeper
+# decay (-2.69). (These and the figures below were measured on 2026-10-17 on the current OD
+# table and cohort releases, follow-up window, with M4 trained on every covered origin; the
+# build log prints them for any rebuild.) Neither is wrong; each is the best available view of
 # its own slice of the mobility spectrum, and neither can see the other's. Averaging them is
 # the honest response to not knowing which slice governs importation.
 #
@@ -1760,17 +1831,19 @@ build_M4 <- function(M3_raw, pop_vec, osrm_mat, zones_all,
 # rows carry cohort information at equal weight.
 #
 # WHAT IS FITTED AND WHAT IS BORROWED. Only the deterrence is fitted. The destination-mass
-# exponent is taken from M4 (fitted on ~400 origins nationally), because three pooled cohort
+# exponent is taken from M4 (fitted on every origin of the national table), because three pooled cohort
 # profiles cannot identify it -- per-cohort estimates are -0.03 (Ituri), +1.83 (NK), +0.15
 # (Tshopo), and the two regressors are NOT collinear (within-cohort corr 0.03), so that spread
 # is genuine between-cohort heterogeneity with n = 3, not an estimation artefact. Fixing it
-# costs 0.016 on the deterrence, a third of a standard error.
+# costs 0.017 on the deterrence (-2.690 against -2.673 with the mass fitted), a third of a
+# standard error.
 #
-# HONEST UNCERTAINTY. The regression SE (~0.055) is a WITHIN-cohort standard error over ~1,350
+# HONEST UNCERTAINTY. The regression SE (0.054) is a WITHIN-cohort standard error over 1,353
 # destinations that are not independent -- they are three profiles. The BETWEEN-cohort spread,
-# about -2.1 (NK) to -3.1 (Tshopo), is the honest measure; fit_cohort_gravity() reports it and
-# it is what should be quoted. The follow-up and look-back windows agree (-2.69 vs -2.66), so
-# the steep decay is NOT an artefact of outbreak response or movement restriction.
+# about -2.05 (NK) to -3.26 (Ituri) with the mass held at M4's, is the honest measure;
+# fit_cohort_gravity() reports it and it is what should be quoted. The follow-up and look-back
+# windows agree (-2.69 vs -2.67), so the steep decay is NOT an artefact of outbreak response
+# or movement restriction.
 
 #' A zones_all x zones_all cost matrix from an OSRM matrix that may cover only a subset.
 #' Unrepresented pairs stay NA; the diagonal is 0. Mirrors build_M4/build_M5's alignment.
@@ -1931,11 +2004,12 @@ build_M4c <- function(pop_vec, osrm_mat, zones_all, b_pop, b_dist, label = "M4c"
 #'   A universal model for mobility and migration patterns. Nature, 484(7392):96-100.
 #'
 #' @param pop_vec   Named population vector.
-#' @param osrm_mat  OSRM travel-time matrix (named).
+#' @param osrm_mat  OSRM cost matrix (named; travel time, or road km for the -dist twin).
 #' @param zones_all Canonical zone vector.
+#' @param label     Matrix id for messages/assertions ("M5", or "M5-dist" for the km twin).
 #' @return Row-stochastic 519×519 matrix.
-build_M5 <- function(pop_vec, osrm_mat, zones_all) {
-  message("[M5] Building radiation model (Simini et al. 2012)...")
+build_M5 <- function(pop_vec, osrm_mat, zones_all, label = "M5") {
+  message(sprintf("[%s] Building radiation model (Simini et al. 2012)...", label))
 
   n <- length(zones_all)
 
@@ -1953,7 +2027,7 @@ build_M5 <- function(pop_vec, osrm_mat, zones_all) {
   dist_mat[is.na(dist_mat)] <- Inf
 
   # Radiation model flux matrix (unnormalised)
-  message("[M5] Computing radiation fluxes (this may take a moment for 519 zones)...")
+  message(sprintf("[%s] Computing radiation fluxes (this may take a moment for 519 zones)...", label))
   T_mat <- matrix(0, nrow = n, ncol = n, dimnames = list(zones_all, zones_all))
 
   for (i in seq_len(n)) {
@@ -1982,8 +2056,8 @@ build_M5 <- function(pop_vec, osrm_mat, zones_all) {
 
   diag(T_mat) <- 0
   W_norm <- make_row_stochastic(T_mat)
-  assert_mobility_matrix(W_norm, zones_all, "M5")
-  message(sprintf("[M5] Built: sparsity=%.1f%%", 100 * mean(W_norm == 0)))
+  assert_mobility_matrix(W_norm, zones_all, label)
+  message(sprintf("[%s] Built: sparsity=%.1f%%", label, 100 * mean(W_norm == 0)))
   W_norm
 }
 
@@ -2139,8 +2213,8 @@ build_M7 <- function(M3_raw, pop_vec, osrm_mat, zones_all, aliases, theta = 1.0)
 #' Build M8: composite matrix — short trips for epicentre, gravity elsewhere.
 #'
 #' For epicentre-origin rows: use M1 (Flowminder short trips).
-#' For all other origins: use M4 (calibrated gravity model).
-#' This is the recommended primary mobility matrix for the BDBV 2026 analysis.
+#' For all other origins: use M4 (calibrated gravity model), or its road-km twin for M8-dist.
+#' (The primary kernel is MOBILITY_PRIMARY in 00_config.R, not necessarily this one.)
 #'
 #' @param M1            Row-stochastic 519×519 M1 matrix.
 #' @param M4            Row-stochastic 519×519 M4 matrix.
@@ -2149,8 +2223,9 @@ build_M7 <- function(M3_raw, pop_vec, osrm_mat, zones_all, aliases, theta = 1.0)
 #' @return Row-stochastic 519×519 matrix.
 build_M8 <- function(M1, M4, epicentre_zones, zones_all, fill = "none",
                      label = "M8") {
-  message(sprintf("[%s] Building composite matrix (epicentre=M1, elsewhere=M4%s)...",
-                  label, if (identical(fill, "none")) "" else sprintf(", fill='%s'", fill)))
+  message(sprintf("[%s] Building composite matrix (epicentre=M1, elsewhere=M4%s%s)...",
+                  label, if (grepl("-dist", label, fixed = TRUE)) "-dist" else "",
+                  if (identical(fill, "none")) "" else sprintf(", fill='%s'", fill)))
   # Delegates to compose_epicentre so every composite shares one code path. With
   # fill = "none" this is exactly the previous construction: replace the epicentre
   # rows, zero the diagonal, renormalise, assert.
@@ -2238,6 +2313,14 @@ compose_epicentre <- function(base, epi_mat, epicentre_zones, zones_all, label,
       if (is.null(measured[[ez]]) && is.null(source_origins[[ez]]))
         warning(sprintf("[%s] '%s': no observed-support metadata on the source kernel; fill='%s' had no effect.",
                         label, ez, fill), call. = FALSE)
+      # Nothing to refill, so the source row replaces the base row outright — exactly the
+      # fill = "none" path, and it needs that path's zero-mass guard: an all-zero source row
+      # must not replace a good base row with "no outflow at all".
+      if (!is.finite(sum(src, na.rm = TRUE)) || sum(src, na.rm = TRUE) <= 0) {
+        warning(sprintf("[%s] '%s': the source row carries no mass; keeping the base row.",
+                        label, ez), call. = FALSE)
+        next
+      }
       W[ez, ] <- src; ez_use <- c(ez_use, ez); next
     }
     A  <- setdiff(zones_all, c(U, ez))
@@ -2270,7 +2353,7 @@ compose_epicentre <- function(base, epi_mat, epicentre_zones, zones_all, label,
     W[ez, ] <- row
     # RECORD THE ROW. ez_use is what attr(W, "source_rows") reports and what
     # 27_mobility_comparison.R panel D scores over; omitting it here left source_rows EMPTY for
-    # every -fill kernel (including MOBILITY_PRIMARY = M8-fill) while n_filled counted correctly.
+    # every -fill kernel (including M8-fill, then MOBILITY_PRIMARY) while n_filled counted correctly.
     ez_use <- c(ez_use, ez)
     n_filled <- n_filled + 1L
   }
@@ -2370,9 +2453,9 @@ build_M_cohort <- function(zones_all, cohort_sources, aliases, window = "followu
 #' Weighted element-wise mean of base kernels (the M17 consensus base).
 #' Shared by build_M17() and the M17 origin-split so both use the identical base.
 .consensus_base <- function(bases, weights = NULL) {
-  # weights[seq_along(bases)] takes the FIRST k weights positionally. When build_M17() drops a
-  # malformed member, the survivors would then inherit weights belonging to other kernels. Inert
-  # while every call site passes equal weights, wrong the first time anyone does not.
+  # One weight per base, or an error. (This used to take weights[seq_along(bases)], the FIRST k
+  # weights positionally, so when build_M17() dropped a malformed member the survivors inherited
+  # weights belonging to other kernels; the caller now subsets weights alongside bases.)
   if (is.null(weights)) weights <- rep(1, length(bases))
   if (length(weights) != length(bases))
     stop(sprintf("[consensus] %d weight(s) for %d base kernel(s); the caller must subset weights alongside bases.",
@@ -2395,7 +2478,7 @@ build_M_cohort <- function(zones_all, cohort_sources, aliases, window = "followu
 #'     compose_epicentre()'s "unmeasured" fill: W[o, A] = (1 - q) p[A], W[o, U] = fill_base[o, U],
 #'     with q = fill_base's mass on U, capped at MOBILITY_FILL_QMAX.
 #' Suppressed cells INSIDE the table stay 0: they are known to be small (< 15 relocations).
-#' Internal only: a base for M16/M17, not a grid kernel.
+#' Internal only: the base of the M1/M2 fallback rows and of M16, not a grid kernel.
 #'
 #' @param M3 build_M3() output (carries "raw" and "od_dests").
 #' @param fill_base row-stochastic 519x519 kernel supplying the missing rows and cells.
@@ -2565,14 +2648,16 @@ split_shorttrip_rows <- function(M1, base, epi_origins, pop_vec, zones_all, alia
 #' rows use Flowminder short trips (M1), exactly as in M8.
 #'
 #' @param M1,M4,M5,M6a Row-stochastic 519×519 kernels.
-#' @param weights   Named/positional weights for c(M4, M5, M6a); default equal.
+#' @param weights   Positional weights for c(M4, M5, M6a); default equal.
+#' @param label     Matrix id for messages/assertions ("M9", or "M9-dist" for the km twin).
 #' @return Row-stochastic 519×519 matrix.
 build_M9 <- function(M1, M4, M5, M6a, epicentre_zones, zones_all,
-                     weights = c(1, 1, 1)) {
-  message("[M9] Building multi-kernel mobility ensemble (mean of M4/M5/M6a; epicentre=M1)...")
+                     weights = c(1, 1, 1), label = "M9") {
+  message(sprintf("[%s] Building multi-kernel mobility ensemble (mean of M4/M5/M6a%s; epicentre=M1)...",
+                  label, if (grepl("-dist", label, fixed = TRUE)) " road-km twins" else ""))
   w <- weights / sum(weights)
   base <- w[1] * M4 + w[2] * M5 + w[3] * M6a     # convex combo → row-stochastic
-  compose_epicentre(base, M1, epicentre_zones, zones_all, "M9")
+  compose_epicentre(base, M1, epicentre_zones, zones_all, label)
 }
 
 # ---------------------------------------------------------------------------
@@ -2588,8 +2673,9 @@ build_M9 <- function(M1, M4, M5, M6a, epicentre_zones, zones_all,
 #' @return Row-stochastic 519×519 matrix.
 build_M10 <- function(M1, M5, epicentre_zones, zones_all, fill = "none",
                       label = "M10") {
-  message(sprintf("[%s] Building radiation composite (epicentre=M1, elsewhere=M5%s)...",
-                  label, if (identical(fill, "none")) "" else sprintf(", fill='%s'", fill)))
+  message(sprintf("[%s] Building radiation composite (epicentre=M1, elsewhere=M5%s%s)...",
+                  label, if (grepl("-dist", label, fixed = TRUE)) "-dist" else "",
+                  if (identical(fill, "none")) "" else sprintf(", fill='%s'", fill)))
   compose_epicentre(M5, M1, epicentre_zones, zones_all, label, fill = fill)
 }
 
@@ -2673,12 +2759,12 @@ summarise_matrix <- function(W, matrix_id, zones_all, epicentre_zones) {
   # origin direction (an unroutable origin must not radiate everywhere) but has an unexamined
   # consequence in the destination direction: a zone absent from the routing network gets an
   # all-zero COLUMN, so its import hazard is structurally zero forever and it can never be
-  # invaded. Measured 2026-09-21 on the saved kernels: Bokoro and Idjwi are zero-inflow under
-  # the whole M4/M8/M10 family (10 of the 24 on-disk grid kernels), while the Flowminder
-  # relocation table says 21 zones send Bokoro relocations. The cohort/consensus families
-  # (M13/M14/M16/M17) have NO zero-inflow zones, and neither does MOBILITY_PRIMARY = M14-fill —
-  # the retired comment here named MOBILITY_PRIMARY as the example, which stopped being true
-  # when the primary moved off M8-fill. Count and name them so the exclusion is visible.
+  # invaded. That is what happened to Bokoro and Idjwi under the whole M4/M8/M10 family before
+  # the OSRM gap fill (measured 2026-09-21 on the saved kernels), while the Flowminder relocation
+  # table says 21 zones send Bokoro relocations. With OSRM_GAP_FILL on (the default) load_osrm()
+  # imputes those costs and the road-network kernels have no such zone; with it OFF the two
+  # zones return to zero inflow. M3 and M_cohort have zero columns by construction (zones their
+  # tables do not cover). Count and name them so any exclusion is visible.
   .cs <- colSums(W)
   .zero_in <- names(.cs)[.cs <= 0]
   if (length(.zero_in))
@@ -2737,12 +2823,90 @@ top_destinations_long <- function(W, matrix_id, origins, zones_all, n_top = 5L) 
 }
 
 # ---------------------------------------------------------------------------
+# Manifest fingerprint helpers (also called by 46_bayes_posterior_draws.R)
+# ---------------------------------------------------------------------------
+
+#' The OSRM road-distance matrix build_all_mobility_matrices() is handed, by run_all.R's rule.
+#'
+#' Loaded when any family that uses it is on (the generic -dist kernels, the cohort family, the
+#' OD/consensus family); NULL otherwise, or when the file cannot be read. run_all.R applies the
+#' same rule inline; this file's MAIN block and 46_bayes_posterior_draws.R's fingerprint check
+#' call this, so a standalone build and the check see the input run_all.R passes.
+load_osrm_dist_for_mobility <- function() {
+  want <- isTRUE(get0("INCLUDE_OSRM_DIST_MODELS",  ifnotfound = FALSE)) ||
+          isTRUE(get0("INCLUDE_COHORT_MODELS",     ifnotfound = TRUE))  ||
+          isTRUE(get0("INCLUDE_FLOWSTATIC_MODELS", ifnotfound = TRUE))
+  if (!want) return(NULL)
+  tryCatch(load_osrm("road_distance"), error = function(e) {
+    message("[mobility] OSRM road-distance matrix unavailable (", conditionMessage(e),
+            "); road-distance (-dist) variants will be skipped.")
+    NULL
+  })
+}
+
+#' Identity of the mobility build's INPUTS, for the manifest's config fingerprint.
+#'
+#' Content hashes (rlang::hash) of what the kernels are built from: the population vector over
+#' zones_all (values and zone order), the OSRM matrices handed to the build, the relocation OD
+#' table (FLOWMINDER_OD_FILE), and the short-trip and cohort profiles resolved at
+#' `analysis_date` through the builders' own loaders and as-of selection (so the hash follows a
+#' raw-to-processed fallback too); plus the cohort origin lists and the epicentre zones as text.
+#' Named profile vectors are put in C-locale name order first, so a hash never depends on the
+#' session's collation. Deterministic for identical inputs on one machine, and computed by THIS
+#' function both in the build and in 46_bayes_posterior_draws.R's check. An input that cannot be
+#' read is recorded as "unavailable" rather than stopping the build. Not hashed directly: the
+#' alias table and the zone shapefile (they enter only through the resolved profiles and the
+#' OSRM gap fill, which are hashed) and the legacy IDP table (M7 only, off by default).
+#' @return named list of single strings.
+mobility_input_fingerprint <- function(zones_all, pop_vec, analysis_date, osrm_mat,
+                                       osrm_dist_mat = NULL, aliases = NULL) {
+  .h  <- function(x) tryCatch(rlang::hash(x), error = function(e) "unavailable")
+  .q  <- function(expr) tryCatch(suppressWarnings(suppressMessages(expr)), error = function(e) NULL)
+  .by_name <- function(v) v[order(names(v), method = "radix")]
+  if (is.null(aliases)) aliases <- .q(load_aliases())
+  cs  <- get0("COHORT_SOURCES", ifnotfound = NULL)
+  win <- get0("COHORT_WINDOW",  ifnotfound = "followup")
+  tag <- .q(.short_trip_tag_asof(analysis_date))
+  if (!length(tag) || is.na(tag[1])) tag <- "none"
+  st  <- if (identical(tag, "none")) NULL else .q(load_short_trip_profile(tag, zones_all, aliases))
+  od  <- .q(load_flowminder_od())
+  coh <- vapply(names(cs), function(ch) {
+    pr <- .q(load_cohort_profile(ch, win, zones_all, aliases, analysis_date = analysis_date))
+    if (is.null(pr)) "unavailable" else
+      paste0(pr$source, ":", .h(list(.by_name(pr$values), sort(pr$origins, method = "radix"),
+                                     sort(pr$nodata, method = "radix"))))
+  }, character(1))
+  list(
+    population         = .h(pop_vec[zones_all]),
+    osrm_travel_time   = .h(osrm_mat),
+    osrm_road_distance = if (is.null(osrm_dist_mat)) "none" else .h(osrm_dist_mat),
+    flowminder_od      = if (is.null(od)) "unavailable" else .h(od),
+    short_trip         = paste0(tag, ":", if (is.null(st)) "unavailable"
+                                          else paste0(st$source, ":", .h(.by_name(st$props)))),
+    cohort_profiles    = if (length(coh)) paste(names(coh), coh, sep = ":", collapse = ",") else "none",
+    cohort_sources     = if (length(cs)) paste(names(cs), vapply(cs, paste, character(1), collapse = "+"),
+                                               sep = ":", collapse = ",") else "none",
+    epicentre_zones    = paste(get0("EPICENTRE_ZONES", ifnotfound = character(0)), collapse = "+"))
+}
+
+#' The manifest's human-readable `config` string, "name=value; ...", in list order; each value
+#' is collapsed to ONE string. Shared with 46_bayes_posterior_draws.R so both sides format alike.
+mobility_fingerprint_string <- function(cfg) {
+  vals <- vapply(cfg, function(v) paste(as.character(v), collapse = ","), character(1))
+  paste(names(cfg), vals, sep = "=", collapse = "; ")
+}
+
+# ---------------------------------------------------------------------------
 # Master function
 # ---------------------------------------------------------------------------
 
-#' Build all mobility matrix variants (M1, M2a, M2b, M3, M4, M4b, M5, M6a, M6b, M7,
-#' M8, M9, M10; Flowminder-cohort composites M13/M14; combined-Flowminder-static M15,
-#' cohort+directed-OD M16, all-kernel consensus M17; and the road-distance -dist twins).
+#' Build every mobility-matrix variant the 00_config.R flags ask for.
+#'
+#' Which kernels are built depends on INCLUDE_LEGACY_KERNELS, INCLUDE_M9_MODELS,
+#' INCLUDE_M15_MODELS, INCLUDE_COHORT_MODELS, INCLUDE_COHORT_GRAVITY_MODELS,
+#' INCLUDE_FLOWSTATIC_MODELS, INCLUDE_SOURCEFILL_MODELS, INCLUDE_COHORT_SPLIT_MODELS and
+#' INCLUDE_OSRM_DIST_MODELS. The realised set is written to mobility_manifest.csv and named
+#' in the closing message, so it is never inferred from a docstring.
 #'
 #' Saves each matrix to outputs/mobility/mobility_{ID}.rds and writes a
 #' summary CSV to outputs/mobility/mobility_summary.csv.
@@ -2751,31 +2915,34 @@ top_destinations_long <- function(W, matrix_id, origins, zones_all, n_top = 5L) 
 #' @param pop_vec       Named population vector.
 #' @param osrm_mat      OSRM travel-time matrix (named, minutes).
 #' @param analysis_date Reference date for time-evolving matrices.
-#' @return Named list of row-stochastic matrices, including M8 (composite gravity,
-#'   primary), M9 (short-trip kernel ensemble), M10 (radiation composite), M13/M14
-#'   (cohort composites), M15 (combined-Flowminder static), M16 (cohort + relocation OD),
-#'   M17 (all-kernel consensus ensemble), and their -dist road-distance twins.
+#' @param osrm_dist_mat Optional OSRM road-distance (km) matrix; see the note in the body.
+#' @return Named list of every kernel built, keyed by matrix id — the same set the manifest
+#'   records. Which ids appear depends on the flags above (see the file header): e.g. M9 and
+#'   M15 only when their flags are on, the -dist twins only when osrm_dist_mat is supplied
+#'   (M16 has no -dist twin). It also carries M_cohort when the cohort family is built: a base
+#'   kernel and baseline source, not a grid candidate.
 build_all_mobility_matrices <- function(zones_all,
                                         pop_vec,
                                         osrm_mat,
                                         analysis_date = ANALYSIS_DATE,
                                         osrm_dist_mat = NULL) {
-  # osrm_dist_mat (optional): the OSRM ROAD-DISTANCE (km) matrix. When supplied, the
-  # gravity/radiation/decay/composite kernels are ALSO built keyed on road distance rather
-  # than travel time, exposed as M4-dist / M8-dist / M9-dist / M10-dist (a mobility-deterrence
-  # sensitivity axis; the epicentre short-trip rows are distance-agnostic and reused).
+  # osrm_dist_mat (optional): the OSRM ROAD-DISTANCE (km) matrix. When supplied, the km bases
+  # M4-dist (gravity re-fitted on km) and M5-dist (radiation re-ordered by km) are built and
+  # saved, and from them: the generic short-trip composites M8/M9/M10-dist and their twins ONLY
+  # under INCLUDE_OSRM_DIST_MODELS (M9-dist also needs INCLUDE_M9_MODELS); the cohort -dist
+  # kernels (M4c/M13/M13c/M14-dist and twins) whenever the cohort kernel exists; and the
+  # consensus M17-dist family whenever INCLUDE_FLOWSTATIC_MODELS is on. The source rows are
+  # distance-agnostic and reused. A mobility-deterrence sensitivity axis.
   message("\n=== Building all mobility matrices ===\n")
 
   aliases       <- load_aliases()
   epicentre_can <- harmonise_names(EPICENTRE_ZONES, aliases, zones_all)
   # Diagnostic: does the (synced, unversioned) processed data still drop zones the
-  # raw tables resolve? See .warn_if_processed_source_stale().
-  .st_tag_now <- local({
-    e <- which(FLOWMINDER_ST_DATES <= analysis_date)
-    if (!length(e)) e <- seq_along(FLOWMINDER_ST_DATES)
-    FLOWMINDER_ST_TAGS[e[which.max(FLOWMINDER_ST_DATES[e])]]
-  })
-  suppressMessages(.warn_if_processed_source_stale(zones_all, aliases, .st_tag_now))
+  # raw tables resolve? See .warn_if_processed_source_stale(). The SAME snapshot and as-of
+  # releases build_M1()/build_M_cohort() use (.short_trip_tag_asof(); analysis_date threaded).
+  .st_tag_now <- .short_trip_tag_asof(analysis_date)
+  suppressMessages(.warn_if_processed_source_stale(zones_all, aliases, .st_tag_now,
+                                                   analysis_date = analysis_date))
 
   out_list    <- list()
   summary_rows <- list()
@@ -2807,7 +2974,7 @@ build_all_mobility_matrices <- function(zones_all,
   M5 <- build_M5(pop_vec, osrm_mat, zones_all)
   save_matrix(M5, "M5")
 
-  # ---- M3 with its coverage gaps filled (base for M1/M2 fallback rows and M16/M17; not saved) ----
+  # ---- M3 with its coverage gaps filled (base for the M1/M2 fallback rows and M16; not saved) ----
   # M3 asserts zero flow for every zone the relocation table does not cover; as a BASE that made
   # those zones' invasion impossible (Mangala, Vuhovi under the former M16). Filled from radiation.
   M3c <- cover_relocation_od(M3, M5, zones_all, "M3-cov")
@@ -2840,18 +3007,19 @@ build_all_mobility_matrices <- function(zones_all,
   }
 
   # ---- M4 gravity (power deterrence) ----
-  # od_dests keeps zones the source never covered out of the FIT (they would enter as
-  # measured or censored zeros); prediction still spans every zone.
-  M3_dests <- attr(M3, "od_dests")
+  # od_dests / od_origins keep zones the source never covered out of the FIT (they would enter
+  # as measured or censored zeros); prediction still spans every zone.
+  M3_dests   <- attr(M3, "od_dests")
+  M3_origins <- attr(M3, "od_origins")
   M4 <- build_M4(M3_raw, pop_vec, osrm_mat, zones_all, censor_mask = M3_cens,
-                 od_dests = M3_dests)
+                 od_dests = M3_dests, od_origins = M3_origins)
   save_matrix(M4, "M4")
 
   # ---- M4b gravity, exponential deterrence (LEGACY, off by default: no consumer) ----
   if (isTRUE(get0("INCLUDE_LEGACY_KERNELS", ifnotfound = FALSE))) {
     M4b <- build_M4(M3_raw, pop_vec, osrm_mat, zones_all,
                     deterrence = "exp", label = "M4b", censor_mask = M3_cens,
-                    od_dests = M3_dests)
+                    od_dests = M3_dests, od_origins = M3_origins)
     save_matrix(M4b, "M4b")
   }
 
@@ -2869,7 +3037,7 @@ build_all_mobility_matrices <- function(zones_all,
     save_matrix(M7, "M7")
   }
 
-  # ---- M8 composite (RECOMMENDED) ----
+  # ---- M8 composite (short-trip epicentre rows over the M4 gravity base) ----
   M8 <- build_M8(M1, M4, epicentre_can, zones_all)
   save_matrix(M8, "M8")
 
@@ -2905,7 +3073,7 @@ build_all_mobility_matrices <- function(zones_all,
   want_fill  <- isTRUE(get0("INCLUDE_SOURCEFILL_MODELS", ifnotfound = TRUE))
   fill_level <- get0("MOBILITY_SOURCE_FILL", ifnotfound = "unmeasured")
   split_fill <- if (want_fill) fill_level else "none"
-  want_split <- isTRUE(get0("INCLUDE_COHORT_SPLIT_MODELS", ifnotfound = TRUE))
+  want_split <- isTRUE(get0("INCLUDE_COHORT_SPLIT_MODELS", ifnotfound = FALSE))
 
   # ---- M_cohort + M13/M14: Flowminder-cohort composites (travel-time base) ----------------
   # M13 (cohort + gravity) and M14 (cohort + radiation) fill the Ituri/NK/Tshopo cohort-origin
@@ -2934,8 +3102,8 @@ build_all_mobility_matrices <- function(zones_all,
       cohort_origins <- attr(M_cohort, "cohort_origins")
       # PERSIST THE COHORT KERNEL ITSELF. It was only ever consumed to build M13/M14/M16 and
       # never saved, so the richest observed mobility this study holds — Flowminder cohort
-      # subscriber-day PRESENCE, measured DURING the outbreak, per origin rather than pooled —
-      # could not be read back by anything. Manuscript Figure 2's Flowminder-inflow baseline
+      # subscriber-day PRESENCE, measured DURING the outbreak, one profile per cohort POOLED
+      # over that cohort's origin rows (build_M_cohort()) — could not be read back by anything. Manuscript Figure 2's Flowminder-inflow baseline
       # uses it directly: measured against the pooled short-trip annex (M1) it covers 305
       # destinations from the epicentre instead of 142, while ranking the same zones at the top
       # (Spearman 0.79). It is NOT added to MOBILITY_IDS: it is a base kernel and a baseline
@@ -3065,22 +3233,6 @@ build_all_mobility_matrices <- function(zones_all,
                          label = "M8-fill"), "M8-fill")
     save_matrix(build_M10(M1, M5, epicentre_can, zones_all, fill = fill_level,
                           label = "M10-fill"), "M10-fill")
-    # ---- ORIGIN-SPLIT short-trip composites (M8/M10-split) ---------------------------------
-    # The annex pools its cohort over the three epicentre zones, so M1 gives Bunia, Mongbwalu
-    # and Rwampara a bit-identical destination profile (verified: the measured-cell shape is
-    # equal to 1e-16 in M8-fill/M10-fill; only the fill mass differs, 0.28/0.39/0.38). These
-    # split that pooled profile per origin against each composite's own base, the short-trip
-    # analogue of M13/M14-split.
-    if (want_split) {
-      save_matrix(compose_epicentre(M4, split_shorttrip_rows(M1, M4, epicentre_can, pop_vec,
-                                                             zones_all, aliases, "M8-split"),
-                                    epicentre_can, zones_all, "M8-split",
-                                    fill = split_fill), "M8-split")
-      save_matrix(compose_epicentre(M5, split_shorttrip_rows(M1, M5, epicentre_can, pop_vec,
-                                                             zones_all, aliases, "M10-split"),
-                                    epicentre_can, zones_all, "M10-split",
-                                    fill = split_fill), "M10-split")
-    }
     if (!is.null(M_cohort)) {
       save_matrix(compose_epicentre(M4, M_cohort, cohort_origins, zones_all, "M13-fill",
                                     fill = fill_level), "M13-fill")
@@ -3104,15 +3256,37 @@ build_all_mobility_matrices <- function(zones_all,
     }
   }
 
-  # ---- OSRM ROAD-DISTANCE kernels (generic M4/M8/M9/M10-dist AND cohort M13/M14-dist) -----
-  # Two independent families keyed on OSRM road DISTANCE (km) instead of travel TIME (minutes):
-  #  * generic -dist (M4/M8/M9/M10-dist): the short-trip-composite deterrence axis, gated by
+  # ---- ORIGIN-SPLIT short-trip composites (M8/M10-split) -----------------------------------
+  # The annex pools its cohort over the three epicentre zones, so M1 gives Bunia, Mongbwalu
+  # and Rwampara a bit-identical destination profile (verified: the measured-cell shape is
+  # equal to 1e-16 in M8-fill/M10-fill; only the fill mass differs, 0.28/0.39/0.38). These
+  # split that pooled profile per origin against each composite's own base, the short-trip
+  # analogue of M13/M14-split. Gated on INCLUDE_COHORT_SPLIT_MODELS ALONE, like the cohort and
+  # road-km splits: they carry their own fill level (split_fill), so they must not sit inside
+  # the -fill gate above, which silently dropped them when the fill family was off.
+  if (want_split) {
+    save_matrix(compose_epicentre(M4, split_shorttrip_rows(M1, M4, epicentre_can, pop_vec,
+                                                           zones_all, aliases, "M8-split"),
+                                  epicentre_can, zones_all, "M8-split",
+                                  fill = split_fill), "M8-split")
+    save_matrix(compose_epicentre(M5, split_shorttrip_rows(M1, M5, epicentre_can, pop_vec,
+                                                           zones_all, aliases, "M10-split"),
+                                  epicentre_can, zones_all, "M10-split",
+                                  fill = split_fill), "M10-split")
+  }
+
+  # ---- OSRM ROAD-DISTANCE kernels (generic M8/M9/M10-dist, cohort and consensus -dist) -----
+  # Three independent families keyed on OSRM road DISTANCE (km) instead of travel TIME (minutes):
+  #  * generic -dist (M8/M9/M10-dist and twins): the short-trip-composite deterrence axis, gated by
   #    INCLUDE_OSRM_DIST_MODELS (get0 default TRUE, so an arm without that flag keeps building it).
-  #  * cohort -dist (M13/M14-dist): the geographic-distance analogues of M13/M14, built whenever
-  #    the cohort kernel exists and a road-distance matrix is supplied — INDEPENDENT of the generic
-  #    toggle (so "flowminder + {gravity,radiation} + geographic distance" is available by default).
-  # The km gravity/radiation bases (M4_d/M5_d) are built ONCE and shared by both. The gravity GLM
-  # RE-FITS on the km covariate (not a rescale); radiation re-orders opportunities by km.
+  #  * cohort -dist (M4c/M13/M13c/M14-dist and twins): the geographic-distance analogues of the
+  #    cohort composites, built whenever the cohort kernel exists and a road-distance matrix is
+  #    supplied — INDEPENDENT of the generic toggle.
+  #  * consensus -dist (M17-dist and twins): built whenever INCLUDE_FLOWSTATIC_MODELS is on.
+  # The km gravity/radiation bases M4-dist/M5-dist are built ONCE, shared by all three, and SAVED
+  # whenever they are built, so the base of every saved -dist composite is on disk (and listed in
+  # the manifest) rather than only under the generic toggle. The gravity GLM RE-FITS on the km
+  # covariate (not a rescale); radiation re-orders opportunities by km.
   build_generic_dist  <- !is.null(osrm_dist_mat) &&
                          isTRUE(get0("INCLUDE_OSRM_DIST_MODELS", ifnotfound = TRUE))
   build_cohort_dist   <- !is.null(osrm_dist_mat) && !is.null(M_cohort)
@@ -3121,8 +3295,10 @@ build_all_mobility_matrices <- function(zones_all,
     message(sprintf("[mobility] Building OSRM road-distance kernels (generic-dist=%s, cohort-dist=%s, flowstat-dist=%s)...",
                     build_generic_dist, build_cohort_dist, build_flowstat_dist))
     M4_d <- build_M4(M3_raw, pop_vec, osrm_dist_mat, zones_all, label = "M4-dist",
-                     censor_mask = M3_cens, od_dests = M3_dests)
-    M5_d <- build_M5(pop_vec, osrm_dist_mat, zones_all)
+                     censor_mask = M3_cens, od_dests = M3_dests, od_origins = M3_origins)
+    save_matrix(M4_d, "M4-dist")
+    M5_d <- build_M5(pop_vec, osrm_dist_mat, zones_all, label = "M5-dist")
+    save_matrix(M5_d, "M5-dist")
     # Road-km twin of the cohort-calibrated gravity. Built inside the cohort -dist block below
     # (it needs M_cohort); declared here so M17-dist can filter it out when it is absent.
     M4c_d <- NULL
@@ -3147,12 +3323,12 @@ build_all_mobility_matrices <- function(zones_all,
       M6a_d <- build_M6(osrm_dist_mat, zones_all, variant = "exp", kappa = kappa_km)
     }
     if (build_generic_dist) {
-      save_matrix(M4_d, "M4-dist")
-      save_matrix(build_M8(M1, M4_d, epicentre_can, zones_all), "M8-dist")
+      save_matrix(build_M8(M1, M4_d, epicentre_can, zones_all, label = "M8-dist"), "M8-dist")
       # M9-dist only when M9 is enabled (needs the km decay kernel M6a_d, built under the same guard).
       if (want_m9)
-        save_matrix(build_M9(M1, M4_d, M5_d, M6a_d, epicentre_can, zones_all), "M9-dist")
-      save_matrix(build_M10(M1, M5_d, epicentre_can, zones_all), "M10-dist")
+        save_matrix(build_M9(M1, M4_d, M5_d, M6a_d, epicentre_can, zones_all,
+                             label = "M9-dist"), "M9-dist")
+      save_matrix(build_M10(M1, M5_d, epicentre_can, zones_all, label = "M10-dist"), "M10-dist")
       if (want_fill && !identical(fill_level, "none")) {
         save_matrix(build_M8(M1, M4_d, epicentre_can, zones_all, fill = fill_level,
                              label = "M8-dist-fill"), "M8-dist-fill")
@@ -3220,8 +3396,7 @@ build_all_mobility_matrices <- function(zones_all,
     }
     if (build_flowstat_dist) {
       # M17-dist: all-kernel consensus on ROAD-KM over the bases {M4-dist, M4c-dist, M5-dist}. Gravity and
-      # radiation are re-keyed on km (M4_d/M5_d); the empirical Flowminder relocation OD (M3) carries
-      # no distance axis, so it is reused, with its coverage gaps filled from the km radiation kernel.
+      # radiation are re-keyed on km (M4_d/M5_d, and M4c_d when the cohort gravity is built).
       # The travel-time decay (M6a) and symmetrised static (M15) are excluded, matching the
       # travel-time M17. Empirical source rows from the cohort kernel else M1.
       # M3 is NOT a member here either, for the reasons given at the travel-time M17 above.
@@ -3264,6 +3439,13 @@ build_all_mobility_matrices <- function(zones_all,
   # from a current one, and 30_projection_config.R adopts CASCADE_KERNEL on file EXISTENCE
   # alone — so a stale mobility_*.rds from another branch is indistinguishable from this run's.
   # Recording the governing values lets a consumer check rather than assume.
+  # WHAT IT COVERS: every setting that changes a kernel's CONTENT under an UNCHANGED id (a flag
+  # that only adds or removes kernels is recorded by the matrix_id column instead), and the
+  # identity of the input data (mobility_input_fingerprint()). 46_bayes_posterior_draws.R
+  # mirrors these fields one for one and compares the string, so a field added here must be
+  # added there (until it is, 46 refuses the cached kernels; it never accepts them wrongly).
+  .inp <- mobility_input_fingerprint(zones_all, pop_vec, analysis_date, osrm_mat, osrm_dist_mat,
+                                     aliases)
   .cfg <- list(
     # The ARGUMENT, not the global. analysis_date is the axis that now drives the as-of
     # selection of the short-trip snapshot and the cohort release, so recording the global made
@@ -3274,33 +3456,66 @@ build_all_mobility_matrices <- function(zones_all,
     mobility_source_fill = as.character(get0("MOBILITY_SOURCE_FILL", ifnotfound = NA)),
     mobility_fill_qmax   = as.character(get0("MOBILITY_FILL_QMAX",   ifnotfound = NA)),
     cohort_window        = as.character(get0("COHORT_WINDOW",        ifnotfound = NA)),
-    mobility_home_frac   = as.character(get0("MOBILITY_HOME_FRACTION", ifnotfound = NA)))
-  .cfg_str <- paste(names(.cfg), unlist(.cfg), sep = "=", collapse = "; ")
+    # Switches read with exactly the expressions the builders use. OSRM_GAP_FILL changes every
+    # OSRM-based kernel; M4_CENSORED_FIT changes M4 and everything built on it; the cohort and
+    # cohort-gravity switches change the M17 family's source rows and members; the fill switch
+    # changes the -split kernels' fill level. (MOBILITY_HOME_FRACTION used to be recorded here,
+    # but no kernel reads it.)
+    osrm_gap_fill        = as.character(isTRUE(get0("OSRM_GAP_FILL",                 ifnotfound = TRUE))),
+    m4_censored_fit      = as.character(isTRUE(get0("M4_CENSORED_FIT",               ifnotfound = TRUE))),
+    cohort_models        = as.character(isTRUE(get0("INCLUDE_COHORT_MODELS",         ifnotfound = TRUE))),
+    cohort_gravity       = as.character(isTRUE(get0("INCLUDE_COHORT_GRAVITY_MODELS", ifnotfound = TRUE))),
+    sourcefill_models    = as.character(isTRUE(get0("INCLUDE_SOURCEFILL_MODELS",     ifnotfound = TRUE))),
+    cohort_sources       = .inp$cohort_sources,
+    epicentre_zones      = .inp$epicentre_zones,
+    population           = .inp$population,
+    osrm_travel_time     = .inp$osrm_travel_time,
+    osrm_road_distance   = .inp$osrm_road_distance,
+    flowminder_od        = .inp$flowminder_od,
+    short_trip           = .inp$short_trip,
+    cohort_profiles      = .inp$cohort_profiles)
+  .cfg_str <- mobility_fingerprint_string(.cfg)
   manifest <- tibble::tibble(
     matrix_id = names(out_list),
     file      = sprintf("mobility_%s.rds", names(out_list)),
     built_at  = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
     config    = .cfg_str,
-    config_hash = if (requireNamespace("digest", quietly = TRUE))
-      digest::digest(.cfg, algo = "xxhash64") else substr(
-        paste0(utils::capture.output(str(.cfg)), collapse = ""), 1, 16))
+    # A hash OF THE STRING, so equal configurations always carry equal hashes. (The old fallback
+    # when digest was absent was the first 16 characters of str(.cfg) — the same for any config.)
+    config_hash = rlang::hash(.cfg_str))
   readr::write_csv(manifest, file.path(OUT_MOBILITY, "mobility_manifest.csv"))
   message(sprintf("[manifest] %d kernel(s) recorded in mobility_manifest.csv", nrow(manifest)))
 
   message("\n=== All mobility matrices complete ===")
   message(sprintf("Matrices built: %s", paste(names(out_list), collapse = ", ")))
-  message(sprintf("Primary (M8) zero rows: %d / %d",
-                  sum(rowSums(M8) < 1e-9), length(zones_all)))
+  # Report the kernel ACTUALLY resolved: MOBILITY_PRIMARY, else its unfilled parent, else M8
+  # (always built), and say so when it is not the configured one.
+  .prim    <- get0("MOBILITY_PRIMARY", ifnotfound = "M8")
+  .prim_id <- intersect(c(.prim, sub("-fill$", "", .prim), "M8"), names(out_list))[1]
+  message(sprintf("Primary kernel (%s%s) zero rows: %d / %d", .prim_id,
+                  if (identical(.prim_id, .prim)) ""
+                  else sprintf("; MOBILITY_PRIMARY = %s was not built", .prim),
+                  sum(rowSums(out_list[[.prim_id]]) < 1e-9), length(zones_all)))
 
   out_list
 }
 
 # ---------------------------------------------------------------------------
-# MAIN — Execute only when run standalone (guarded to avoid a costly
-# double-build when sourced from run_all.R, which calls the builder itself).
+# MAIN — build every kernel when this file is RUN AS A SCRIPT.
 # ---------------------------------------------------------------------------
+# Guarded on is_script_run() ALONE — not interactive(), and not script_run_or_forced(): sourcing
+# this file must define the builders and nothing else, or a session that merely wants build_M4()
+# rewrites every mobility_*.rds. The generic FORCE_RUN=1 is how 46/47/48/52 and the figure
+# scripts are forced to run from a source(), and they source this file through
+# load_pipeline_modules(), so honouring FORCE_RUN here rebuilt and overwrote every kernel, the
+# summary and the manifest from inside them (and would inside run_all.R, which builds the kernels
+# itself). MOBILITY_FORCE_RUN=1 is this file's own switch for a deliberate build from a source().
+# The call mirrors run_all.R's, road-distance matrix included, so a standalone build writes the
+# same kernel set and manifest. (load_worldpop() and run_all.R's load_population() return the
+# identical vector on the current WorldPop file.)
 
-if (interactive() && !exists("MOBILITY_MATRICES")) {
+if ((is_script_run("03_mobility_matrices.R") ||
+     identical(Sys.getenv("MOBILITY_FORCE_RUN"), "1")) && !exists("MOBILITY_MATRICES")) {
   message("\n=== 03_mobility_matrices.R: Loading base data and building all matrices ===\n")
 
   # Load canonical zone list from WorldPop (the population spine defines the zone set — do NOT
@@ -3311,7 +3526,7 @@ if (interactive() && !exists("MOBILITY_MATRICES")) {
   if (length(zones_all) != 519L)
     message(sprintf("[mobility] %d zones in the WorldPop spine (reference build had 519).", length(zones_all)))
 
-  # Load OSRM matrix
+  # OSRM travel time (every base kernel) and, by run_all.R's rule, road distance (-dist twins).
   osrm_mat <- load_osrm()
 
   # Build all matrices
@@ -3319,7 +3534,8 @@ if (interactive() && !exists("MOBILITY_MATRICES")) {
     zones_all     = zones_all,
     pop_vec       = pop_raw,
     osrm_mat      = osrm_mat,
-    analysis_date = ANALYSIS_DATE
+    analysis_date = ANALYSIS_DATE,
+    osrm_dist_mat = load_osrm_dist_for_mobility()
   )
 
   message("\n=== 03_mobility_matrices.R complete ===\n")

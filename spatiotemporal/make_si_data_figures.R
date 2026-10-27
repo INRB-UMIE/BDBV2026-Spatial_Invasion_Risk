@@ -6,7 +6,9 @@
 #
 #   FigureS10  Invasion over time, by source   A) the invaded set mapped at four dates, each
 #                                              zone coloured by WHICH stream records it
-#                                              (both / line list only / sitrep only),
+#                                              (both / line list only / sitrep only); an
+#                                              invaded zone outside the map frame is named
+#                                              in the panel,
 #                                              B) cumulative invaded zones per stream.
 #   FigureS11  Line list vs sitrep             A) national cumulative confirmed cases from each
 #                                              stream, with the gap shaded, B) the zone-level
@@ -21,9 +23,9 @@
 # WHY THESE EXIST. The invasion outcome the models are scored against is the UNION of two
 # surveillance streams: the DHIS2 line list, and the INSP sitrep, which is used as a FLOOR
 # (01_data_prep.R tops the line list up to the sitrep's cumulative confirmed count per zone).
-# Four zones on the 2026-09-07 snapshot are invaded on the sitrep alone. That is a modelling
-# decision with consequences for every number in the manuscript, and these two figures are
-# where it is shown rather than described.
+# Some zones are invaded on the sitrep alone (how many, and which, is logged when FigureS10 is
+# built). That is a modelling decision with consequences for every number in the manuscript,
+# and FigureS10 and FigureS11 are where it is shown rather than described.
 #
 # Outputs -> outputs/key_outputs/manuscript_figures/{FigureS10..S12}.{pdf,png} + panels/
 # Run:  Rscript make_si_data_figures.R
@@ -40,18 +42,54 @@ HERE <- file.path(here::here(), "spatiotemporal")
 OUT  <- file.path(HERE, "outputs")
 DATA <- file.path(HERE, "..", "data")
 source(file.path(HERE, "01_data_prep.R"))          # sources 00_config.R
+stop_if_data_definition_sensitivity("make_si_data_figures.R")   # hard-coded published paths
 source(file.path(HERE, "forecast_scale.R"))
 FIG_DIR   <- fs_out_dir(file.path(OUT, "key_outputs", "manuscript_figures"))
 PANEL_DIR <- fs_out_dir(file.path(OUT, "key_outputs", "manuscript_figures", "panels"))
 dir.create(PANEL_DIR, recursive = TRUE, showWarnings = FALSE)
 source(file.path(HERE, "figure_style.R"))
 
+
+# THIS FILE IS A SCRIPT, NOT A LIBRARY: everything below EXECUTES and writes published
+# outputs. It is launched as its own subprocess. Guarded so a source() — a test, an
+# ad-hoc check, a sweep that loads "every module" — defines what it needs and stops,
+# instead of silently rewriting files. FORCE_RUN=1 forces a run from a source().
+if (!script_run_or_forced("make_si_data_figures.R")) {
+  message("[si-data] sourced, not run: nothing is written. Use `Rscript make_si_data_figures.R`",
+          " (or FORCE_RUN=1) to run it.")
+} else {
+
 SHP_PATH <- file.path(DATA, "shapefiles", "DRC_Health_zones.shp")
-key <- function(x) tolower(trimws(x))
 shp <- st_read(SHP_PATH, quiet = TRUE) %>% mutate(.key = key(Nom), .prov = as.character(PROVINCE))
 
+# A FAILED FIGURE MUST NOT LEAVE THE PREVIOUS RUN'S FILE BEHIND, AND MUST FAIL THE SCRIPT
+# (same rule, same reason as make_si_model_figures.R): this used to warn and exit 0, which
+# run_all.R reads as success, while the earlier run's PDF stayed on disk under the same name.
+# Every file a builder writes (listed at the call site) is deleted before it is rebuilt, and the
+# script stops non-zero at the end if any figure failed.
+.clear_figure_files <- function(nm, stems) {
+  gone <- unlist(lapply(c(FIG_DIR, PANEL_DIR), function(d)
+    unlist(lapply(stems, function(st)
+      list.files(d, pattern = sprintf("^%s(_h[0-9]+)?\\.(pdf|png)$", st), full.names = TRUE)))))
+  if (length(gone)) {
+    unlink(gone)
+    message(sprintf("[si] %s: removed %d previous file(s) before rebuilding", nm, length(gone)))
+  }
+  invisible(gone)
+}
+# DATE LABELS IN ENGLISH WHATEVER THE LOCALE. format("%b") and scale_x_date(date_labels = )
+# follow LC_TIME, so the same run printed its month names in the machine's language. month.abb
+# is R's own English constant. Used for every date this script prints on a figure.
+.dlab <- function(d, year = FALSE) {
+  d <- as.Date(d); out <- rep(NA_character_, length(d)); k <- !is.na(d)
+  out[k] <- paste0(format(d[k], "%d"), " ", month.abb[as.integer(format(d[k], "%m"))],
+                   if (year) paste0(" ", format(d[k], "%Y")) else "")
+  out
+}
+
 ok <- list()
-.build <- function(nm, f) {
+.build <- function(nm, f, stems) {
+  .clear_figure_files(nm, stems)
   ok[[nm]] <<- tryCatch({ f(); TRUE },
     error = function(e) { warning(sprintf("[si] %s FAILED: %s", nm, conditionMessage(e)),
                                   call. = FALSE); FALSE })
@@ -77,19 +115,37 @@ ALIASES <- if (file.exists(ALIASES_PATH))
   n_app <- sum(grepl("^SITREP-CONF-", ll$alert_id %||% character(0)))
   ll_raw <- ll %>% filter(!grepl("^SITREP-CONF-", alert_id),
                           (final_mve_case_classification == CONFIRMED_STATUS) %in% TRUE)
-  message(sprintf("[si] line list: %d confirmed rows after removing %d sitrep-appended rows",
-                  nrow(ll_raw), n_app))
   # The line list is dated by SPECIMEN COLLECTION here, not by imputed onset. The sitrep is a
   # REPORTING series — it records when a confirmation was reported — so comparing it against
   # an onset-dated line list would compare two different clocks and manufacture a lag that is
   # an artefact of the dating convention. The specimen date is the closest thing the line list
   # has to the sitrep's own clock, and it is observed rather than imputed.
-  ll_day <- ll_raw %>%
-    transmute(zone = health_zone, date = as.Date(date_of_sample_collection)) %>%
-    filter(!is.na(zone), !is.na(date), date >= OUTBREAK_START) %>%
-    count(zone, date, name = "inc")
+  #
+  # A CONFIRMED RECORD WITHOUT A USABLE SPECIMEN DATE CANNOT BE PLACED IN TIME, so it is not
+  # drawn -- and every line-list series below is labelled as dated by specimen collection. The
+  # reconciliation (01_data_prep.R) counts such records, so the count left out is logged here,
+  # and so is any zone whose top-up decision (sitrep above the line list or not) the omission
+  # would flip, i.e. any zone on which these panels and the reconciliation would disagree.
+  ll_rec <- ll_raw %>% transmute(zone = health_zone, date = as.Date(date_of_sample_collection))
+  drawn  <- !is.na(ll_rec$zone) & !is.na(ll_rec$date) & ll_rec$date >= OUTBREAK_START
+  ll_day <- ll_rec[drawn, ] %>% count(zone, date, name = "inc")
   sit_day <- sitrep_cumulative_confirmed(ALIASES) %>%
     filter(inc > 0L) %>% transmute(zone = nom, date, inc = as.integer(inc))
+  message(sprintf(paste0("[si] line list: %d confirmed rows after removing %d sitrep-appended rows; ",
+                         "%d of them (in %d zone(s)) have no zone or no specimen date on or after ",
+                         "OUTBREAK_START and are not drawn"),
+                  nrow(ll_raw), n_app, sum(!drawn), dplyr::n_distinct(ll_rec$zone[!drawn])))
+  flip <- full_join(count(ll_rec, zone, name = "n_all"),
+                    count(ll_rec[drawn, ], zone, name = "n_dated"), by = "zone") %>%
+    full_join(sit_day %>% group_by(zone) %>% summarise(n_sit = sum(inc), .groups = "drop"),
+              by = "zone") %>%
+    mutate(across(c(n_all, n_dated, n_sit), ~ coalesce(.x, 0L))) %>%
+    filter(!is.na(zone), (n_sit > n_dated) != (n_sit > n_all) | (n_dated == 0L & n_all > 0L))
+  if (nrow(flip))
+    warning(sprintf(paste0("[si] leaving out the undated line-list records changes the line list's ",
+                           "standing against the sitrep in %d zone(s) (%s): the figures show them ",
+                           "differently from how the reconciliation treats them."),
+                    nrow(flip), paste(flip$zone, collapse = ", ")), call. = FALSE)
   list(linelist = ll_day, sitrep = sit_day)
 })
 
@@ -116,10 +172,11 @@ SRC_COL <- c(`Line list` = "#0072B2", `Sitrep` = "#D55E00")
 # -----------------------------------------------------------------------------
 # FIGURE S10 — where and when each stream says a zone was invaded
 # -----------------------------------------------------------------------------
-# "Invaded" here means the same thing it means to the models: the zone has at least one
-# CONFIRMED case by the date shown. The panel is about WHICH STREAM SUPPORTS THAT CLAIM, so a
-# zone is coloured by the pair (line list yes/no, sitrep yes/no) rather than by a single
-# status. The two disagreement classes are the interesting ones and are given the two strong
+# "Invaded" here takes the models' ZONE criterion -- at least one CONFIRMED case by the date
+# shown -- but dates it by specimen collection (line list) and report date (sitrep), not by
+# onset as the models do (panel B's note below). The panel is about WHICH STREAM SUPPORTS THAT
+# CLAIM, so a zone is coloured by the pair (line list yes/no, sitrep yes/no) rather than by a
+# single status. The two disagreement classes are the interesting ones and are given the two strong
 # hues; agreement is the muted one.
 INV_LV  <- c("Both streams", "Line list only", "Sitrep only", "Not invaded")
 INV_COL <- setNames(c("#5B5B7A", "#0072B2", "#D55E00", "grey90"), INV_LV)
@@ -127,31 +184,74 @@ INV_COL <- setNames(c("#5B5B7A", "#0072B2", "#D55E00", "grey90"), INV_LV)
 build_figS10 <- function() {
   first_by <- CUM %>% filter(cum > 0) %>% group_by(source, zone) %>%
     summarise(first = min(date), .groups = "drop")
+  .so <- sort(setdiff(first_by$zone[first_by$source == "Sitrep"],
+                      first_by$zone[first_by$source == "Line list"]))
+  message(sprintf("[si] FigureS10: %d of %d invaded zones are invaded on the sitrep alone by %s%s",
+                  length(.so), dplyr::n_distinct(first_by$zone), format(max(DATES)),
+                  if (length(.so)) paste0(": ", paste(.so, collapse = ", ")) else ""))
 
-  # Four evenly spaced snapshots across the epidemic, the last pinned to the analysis date so
-  # the final map is the state the manuscript actually reports.
-  snaps <- as.Date(c(OUTBREAK_START + 30, OUTBREAK_START + 60, OUTBREAK_START + 90,
-                     ANALYSIS_DATE))
+  # Four evenly spaced snapshots across the epidemic (whole days from OUTBREAK_START), the last
+  # pinned to the analysis date so the final map is the state on that date. Spaced on the span
+  # itself, so they stay evenly spaced whatever the analysis date.
+  snaps <- OUTBREAK_START + round(as.numeric(ANALYSIS_DATE - OUTBREAK_START) * (1:4) / 4)
   snaps <- sort(unique(snaps[snaps <= ANALYSIS_DATE]))
 
-  # Map extent: the affected provinces, not the whole country — at national extent the
-  # invaded zones are a few pixels and the panel says nothing.
-  PROV_SHOW <- c("Ituri", "Nord-Kivu", "Haut-Uele", "Tshopo", "Bas-Uele")
+  # MAP EXTENT, DERIVED FROM THE INVADED SET. At national extent the invaded zones are a few
+  # pixels and the panel says nothing, so only the affected provinces are drawn: every province
+  # that holds an invaded zone AND is connected to the epicentre's province through such
+  # provinces (a shared border; st_intersects, so a digitising sliver that overlaps rather than
+  # touches cannot cut a border). An invaded zone in a province outside that chain is
+  # geographically detached from the epidemic -- on LINELIST_09102026, Bulu (Sud-Ubangi,
+  # sitrep-only) -- and framing it would shrink everything else, so it is NOT drawn but NAMED
+  # in every panel in which it is invaded, with its status colour and the direction in which it
+  # lies (see `ann` below). Every invaded zone is therefore either on the map or named on it;
+  # the checks below stop the figure otherwise. (The province list used to be typed in, and two invaded zones
+  # outside it simply vanished from the maps.)
+  inv_keys <- unique(key(first_by$zone))
+  if (length(.nm <- setdiff(inv_keys, shp$.key)))
+    stop("invaded zone(s) with no shapefile polygon, so they cannot be mapped: ",
+         paste(sort(unique(first_by$zone[key(first_by$zone) %in% .nm])), collapse = ", "))
+  inv_prov <- unique(shp$.prov[shp$.key %in% inv_keys])
+  pv <- shp %>% filter(.prov %in% inv_prov) %>% group_by(.prov) %>%
+    summarise(.groups = "drop") %>% st_make_valid()
+  adj <- st_intersects(pv)
+  PROV_SHOW <- intersect(unique(shp$.prov[shp$.key %in% key(EPICENTRE_ZONES)]), pv$.prov)
+  if (!length(PROV_SHOW))
+    stop("no epicentre zone (", paste(EPICENTRE_ZONES, collapse = ", "), ") is an invaded zone ",
+         "with a shapefile polygon; the map has no anchor province.")
+  repeat {
+    nxt <- union(PROV_SHOW, pv$.prov[unlist(adj[match(PROV_SHOW, pv$.prov)])])
+    if (length(nxt) == length(PROV_SHOW)) break
+    PROV_SHOW <- nxt
+  }
   reg <- shp %>% filter(.prov %in% PROV_SHOW)
-  if (!nrow(reg)) stop("no shapefile rows for the affected provinces")
-  # EXTENT: the invaded set plus a margin, not the provinces' full footprint. Tshopo and
+  out_keys <- setdiff(inv_keys, reg$.key)          # invaded, but outside the drawn provinces
+  # EXTENT: the drawn invaded set plus a margin, not the provinces' full footprint. Tshopo and
   # Bas-Uele run several hundred kilometres west of anything that has been invaded, and
   # framing on them shrinks the epidemic to a few pixels. The margin keeps the uninvaded
   # frontier — the zones the forecast is about — inside the frame.
+  g_in <- reg[reg$.key %in% inv_keys, ]
   bb <- local({
-    inv_keys <- unique(key(first_by$zone))
-    g <- reg[reg$.key %in% inv_keys, ]
-    b <- st_bbox(if (nrow(g)) g else reg)
+    b <- st_bbox(g_in)
     mx <- 0.55 * as.numeric(b["xmax"] - b["xmin"]); my <- 0.25 * as.numeric(b["ymax"] - b["ymin"])
     rb <- st_bbox(reg)
     c(xmin = max(b[["xmin"]] - mx, rb[["xmin"]]), xmax = min(b[["xmax"]] + mx, rb[["xmax"]]),
       ymin = max(b[["ymin"]] - my, rb[["ymin"]]), ymax = min(b[["ymax"]] + my, rb[["ymax"]]))
   })
+  # Every DRAWN invaded zone lies wholly inside the frame (by construction; asserted, because a
+  # zone clipped off the frame edge would be as invisible as one never drawn).
+  .inside <- vapply(st_geometry(g_in), function(g) {
+    b <- st_bbox(g)
+    b[["xmin"]] >= bb[["xmin"]] && b[["xmax"]] <= bb[["xmax"]] &&
+      b[["ymin"]] >= bb[["ymin"]] && b[["ymax"]] <= bb[["ymax"]]
+  }, logical(1))
+  if (!all(.inside))
+    stop("invaded zone(s) extend beyond the map frame: ", paste(g_in$Nom[!.inside], collapse = ", "))
+  if (length(out_keys))
+    message(sprintf("[si] FigureS10: %d invaded zone(s) outside the drawn provinces, named in-panel: %s",
+                    length(out_keys),
+                    paste(sprintf("%s (%s)", shp$Nom[shp$.key %in% out_keys],
+                                  shp$.prov[shp$.key %in% out_keys]), collapse = ", ")))
 
   # THE STATUS TABLE COVERS EVERY ZONE ON THE MAP, not only the zones one of the streams
   # mentions. Building it over the reported zones alone and joining left the rest with no
@@ -160,10 +260,10 @@ build_figS10 <- function() {
   # is what the join uses, so a zone cannot be absent from one snapshot and present in another.
   reg_keys <- unique(reg$.key)
   lk_key   <- first_by %>% mutate(.key = key(zone))
-  status_at <- function(t) {
+  status_at <- function(t, keys = reg_keys) {
     l <- lk_key$.key[lk_key$source == "Line list" & lk_key$first <= t]
     s <- lk_key$.key[lk_key$source == "Sitrep"    & lk_key$first <= t]
-    tibble(.key = reg_keys,
+    tibble(.key = keys,
            status = factor(case_when(.key %in% l & .key %in% s ~ INV_LV[1],
                                      .key %in% l               ~ INV_LV[2],
                                      .key %in% s               ~ INV_LV[3],
@@ -173,18 +273,54 @@ build_figS10 <- function() {
   }
   st <- bind_rows(lapply(snaps, status_at))
 
+  snap_lv <- .dlab(snaps, year = TRUE)
   mp <- reg %>%
     left_join(st, by = ".key", relationship = "many-to-many") %>%
-    mutate(snap_lab = factor(format(snap, "%d %b %Y"),
-                             levels = format(snaps, "%d %b %Y")))
+    mutate(snap_lab = factor(.dlab(snap, year = TRUE), levels = snap_lv))
   if (anyNA(mp$status))
     stop("some mapped zones have no invasion status; the status table and the shapefile ",
          "disagree on the zone key set.")
+  # THE ZONES OUTSIDE THE FRAME, NAMED: one note per zone, stacked up from the frame's
+  # bottom-left corner, in every snapshot at which the zone is invaded -- a key in its status
+  # colour, its name and province, and the direction in which it lies off the frame. On a
+  # white ground, because the corner is not guaranteed to be empty of zones.
+  ann <- if (!length(out_keys)) NULL else local({
+    W <- bb[["xmax"]] - bb[["xmin"]]; H <- bb[["ymax"]] - bb[["ymin"]]
+    oz <- shp[shp$.key %in% out_keys, ]
+    xy <- suppressWarnings(st_coordinates(st_centroid(st_geometry(oz))))
+    .dir <- function(x, y) {
+      ns <- if (y > bb[["ymax"]]) "north" else if (y < bb[["ymin"]]) "south" else ""
+      ew <- if (x > bb[["xmax"]]) "east"  else if (x < bb[["xmin"]]) "west"  else ""
+      d <- paste0(ns, if (nzchar(ns) && nzchar(ew)) "-" else "", ew)
+      if (nzchar(d)) paste0(", to the ", d) else ""
+    }
+    pos <- tibble(.key = oz$.key,
+                  lab = sprintf("%s (%s)\noutside the frame%s", oz$Nom, oz$.prov,
+                                mapply(.dir, xy[, 1], xy[, 2]))) %>%
+      arrange(lab) %>%
+      mutate(px = bb[["xmin"]] + 0.04 * W, tx = px + 0.025 * W,
+             py = bb[["ymin"]] + 0.06 * H + (dplyr::row_number() - 1L) * 0.11 * H)
+    bind_rows(lapply(snaps, status_at, keys = pos$.key)) %>%
+      filter(status != INV_LV[4]) %>%
+      left_join(pos, by = ".key") %>%
+      mutate(snap_lab = factor(.dlab(snap, year = TRUE), levels = snap_lv))
+  })
+  .last <- if (length(out_keys)) status_at(max(snaps), keys = out_keys) else NULL
+  if (length(out_keys) &&
+      !all(.last$.key[.last$status != INV_LV[4]] %in% ann$.key[ann$snap == max(snaps)]))
+    stop("an invaded zone outside the frame is neither drawn nor named on the final map")
   prov_bounds <- reg %>% group_by(.prov) %>% summarise(.groups = "drop") %>% st_make_valid()
 
   pA <- ggplot(mp) +
     geom_sf(aes(fill = status), colour = "white", linewidth = 0.06) +
     geom_sf(data = prov_bounds, fill = NA, colour = "grey35", linewidth = 0.25) +
+    (if (!is.null(ann) && nrow(ann)) list(
+      geom_label(data = ann, aes(x = tx, y = py, label = lab), hjust = 0, size = 2.2,
+                 lineheight = 0.9, colour = INK, fill = "white", border.colour = NA,
+                 label.padding = unit(1.2, "pt"), inherit.aes = FALSE),
+      geom_point(data = ann, aes(x = px, y = py, fill = status), shape = 22, size = 2.4,
+                 colour = "grey35", stroke = 0.3, inherit.aes = FALSE, show.legend = FALSE))
+     else NULL) +
     facet_wrap(~ snap_lab, nrow = 1) +
     scale_fill_manual(values = INV_COL, name = NULL, drop = FALSE) +
     coord_sf(xlim = c(bb[["xmin"]], bb[["xmax"]]), ylim = c(bb[["ymin"]], bb[["ymax"]]),
@@ -196,23 +332,29 @@ build_figS10 <- function() {
                                     margin = margin(2, 2, 3, 2)),
           panel.border = element_rect(fill = NA, colour = GRID, linewidth = 0.3))
 
-  # --- B: cumulative invaded-zone count per stream, plus the union the models are scored on ---
+  # --- B: cumulative invaded-zone count per stream, plus their union. The union is the models'
+  #     invaded ZONE set, but dated here by specimen / sitrep report date rather than by onset,
+  #     so the curve is not the series the models are scored on (see the note below). ---
   curve <- bind_rows(lapply(DATES, function(t) {
     l <- first_by$zone[first_by$source == "Line list" & first_by$first <= t]
     s <- first_by$zone[first_by$source == "Sitrep"    & first_by$first <= t]
     tibble(date = t,
            `Line list` = length(l), `Sitrep` = length(s),
-           `Union (used by the models)` = length(union(l, s)))
+           `Union of both streams` = length(union(l, s)))
   })) %>% pivot_longer(-date, names_to = "series", values_to = "n")
+  # "Union of both streams", not "Union (used by the models)". The models' invasion set is
+  # this union of ZONES, but they date each invasion by the first confirmed case's ONSET
+  # (load_linelist()), while this curve dates it by specimen date and sitrep report date (the
+  # x-axis title says so), so the curve is not the series the models are scored on.
   SER_COL <- c(`Line list` = "#0072B2", `Sitrep` = "#D55E00",
-               `Union (used by the models)` = "grey20")
+               `Union of both streams` = "grey20")
   pB <- ggplot(curve, aes(date, n, colour = series, linetype = series)) +
     geom_vline(xintercept = snaps, colour = FAINT, linetype = "22", linewidth = 0.3) +
     geom_step(linewidth = 0.85) +
     scale_colour_manual(values = SER_COL, name = NULL) +
     scale_linetype_manual(values = c(`Line list` = "solid", `Sitrep` = "solid",
-                                     `Union (used by the models)` = "22"), name = NULL) +
-    scale_x_date(date_breaks = "3 weeks", date_labels = "%d %b",
+                                     `Union of both streams` = "22"), name = NULL) +
+    scale_x_date(date_breaks = "3 weeks", labels = .dlab,
                  expand = expansion(mult = c(0.01, 0.02))) +
     scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.06))) +
     labs(x = "Date of first confirmed case (specimen date; sitrep report date)",
@@ -237,22 +379,27 @@ build_figS11 <- function() {
   nat <- CUM %>% group_by(source, date) %>% summarise(cum = sum(cum), .groups = "drop")
   gap <- nat %>% pivot_wider(names_from = source, values_from = cum) %>%
     mutate(lo = pmin(`Line list`, Sitrep), hi = pmax(`Line list`, Sitrep))
+  # The line-list series is dated by SPECIMEN collection and omits the records without one
+  # (counted in the [si] line-list message); the axis title says so.
   pA <- ggplot(nat, aes(date, cum, colour = source)) +
     geom_ribbon(data = gap, aes(x = date, ymin = lo, ymax = hi), fill = "grey65", alpha = 0.22,
                 colour = NA, inherit.aes = FALSE) +
     geom_line(linewidth = 0.9) +
     scale_colour_manual(values = SRC_COL, name = NULL) +
-    scale_x_date(date_breaks = "3 weeks", date_labels = "%d %b",
+    scale_x_date(date_breaks = "3 weeks", labels = .dlab,
                  expand = expansion(mult = c(0.01, 0.02))) +
     scale_y_continuous(labels = comma, limits = c(0, NA), expand = expansion(mult = c(0, 0.06))) +
-    labs(x = NULL, y = "Cumulative confirmed cases (national)") +
+    labs(x = "Line list by specimen date (undated records omitted); sitrep by report date",
+         y = "Cumulative confirmed cases (national)") +
     theme_pub(9.5) + theme(legend.position = "top")
 
   # --- C: the per-zone gap over time, for the zones that disagree most ---
   # WEEKLY, not daily: the sitrep is published irregularly, so a daily heatmap is mostly an
-  # image of its publication calendar. The value shown is the gap at the END of each week.
+  # image of its publication calendar. The value shown is the gap at the END of each week, on
+  # the pipeline's own week grid (WEEK_ANCHOR: weeks end on the analysis date's weekday), and
+  # each tile is dated by its week's LAST day, so the final tile is the analysis date itself.
   wk <- CUM %>%
-    mutate(week = as.Date(cut(date, "week", start.on.monday = TRUE)) + 6L) %>%
+    mutate(week = lubridate::floor_date(date, "week", week_start = WEEK_ANCHOR) + 6L) %>%
     group_by(source, zone, week) %>% summarise(cum = max(cum), .groups = "drop") %>%
     pivot_wider(names_from = source, values_from = cum) %>%
     mutate(gap = Sitrep - `Line list`)
@@ -265,8 +412,11 @@ build_figS11 <- function() {
     geom_tile(colour = "white", linewidth = 0.15) +
     scale_fill_gradient2(low = SRC_COL[["Line list"]], mid = "grey96",
                          high = SRC_COL[["Sitrep"]], midpoint = 0, limits = c(-lim, lim),
-                         name = "Sitrep minus line list\n(cumulative confirmed)") +
-    scale_x_date(date_breaks = "3 weeks", date_labels = "%d %b", expand = c(0, 0)) +
+                         name = "Sitrep minus line list\n(cumulative confirmed;\nline list by\nspecimen date)") +
+    # Ticks ON the tiles: every third week counted back from the last (the analysis date), so
+    # each label sits under the tile it dates. date_breaks fell on Mondays, between Friday tiles.
+    scale_x_date(breaks = rev(rev(sort(unique(hb$week)))[seq(1L, dplyr::n_distinct(hb$week), by = 3L)]),
+                 labels = .dlab, expand = c(0, 0)) +
     labs(x = NULL, y = NULL) +
     theme_pub(9.5) + theme(panel.grid = element_blank(), legend.position = "right",
                            legend.key.width = unit(8, "pt"), legend.key.height = unit(26, "pt"),
@@ -292,7 +442,8 @@ build_figS11 <- function() {
                        labels = function(v) comma(v - 1)) +
     scale_y_continuous(trans = "log10", breaks = 1 + c(0, 1, 3, 10, 30, 100, 300, 1000),
                        labels = function(v) comma(v - 1)) +
-    labs(x = "Line-list confirmed cases (unreconciled)", y = "Sitrep confirmed cases") +
+    labs(x = "Line-list confirmed cases with a specimen date (unreconciled)",
+         y = "Sitrep confirmed cases") +
     coord_equal() +
     theme_pub(9.5)
 
@@ -347,7 +498,11 @@ build_figS12 <- function() {
                      names(Ws))
   kshort[kshort == paste0("Bayes-", names(Ws), "-med")] <- names(Ws)[kshort == paste0("Bayes-", names(Ws), "-med")]
 
-  # --- zone subset: every invaded zone, plus the strongest destinations overall ---
+  # --- zone subset: every invaded zone, plus a FIXED number of the strongest destinations ---
+  # A fixed count, not "fill up to 55 zones": that cap left no room for a single destination
+  # once the invaded set alone exceeded it, and the panel drew only the already-invaded block
+  # -- none of the at-risk zones the forecast is about.
+  N_DEST <- 20L
   rs  <- read_csv(fs_risk_csv(OUT), show_col_types = FALSE)
   inv <- rs %>% filter(as.logical(was_active_before) %in% TRUE) %>% pull(health_zone) %>% unique()
   inv <- intersect(inv, zn)
@@ -355,7 +510,9 @@ build_figS12 <- function() {
   # Inflow TO each zone from the invaded set — the quantity the import force is built from.
   inflow <- if (length(inv)) colSums(Wsum[inv, , drop = FALSE]) else colSums(Wsum)
   extra <- setdiff(names(sort(inflow, decreasing = TRUE)), inv)
-  sel <- unique(c(inv, head(extra, max(0L, 55L - length(inv)))))
+  sel <- unique(c(inv, head(extra, N_DEST)))
+  message(sprintf("[si] FigureS12A: %d invaded zones + %d highest-inflow destinations",
+                  length(inv), length(sel) - length(inv)))
   prov <- rs %>% distinct(health_zone, province)
   ord <- tibble(zone = sel) %>% left_join(prov, by = c("zone" = "health_zone")) %>%
     mutate(province = coalesce(province, "Other")) %>%
@@ -415,14 +572,21 @@ build_figS12 <- function() {
   # --- C: where the epicentre's outflow goes ---
   epi <- intersect(EPICENTRE_ZONES, zn)
   if (!length(epi)) stop("no epicentre zone is present in the kernel matrices")
-  # Population-weighted mean of the epicentre rows, so the three seed zones are combined the
-  # way the import force combines them (each row is weighted by the zone's case load, which at
-  # the seeding phase is dominated by the epicentre itself). Equal weights would let the
-  # smallest seed zone speak as loudly as Bunia.
+  # POPULATION-WEIGHTED mean of the epicentre rows — the weighting the published case-blind
+  # "Flowminder cohort inflow from epicentre" comparator applies to these same rows
+  # (naive_epicentre_inflow_scores(), 20_forecast_detail.R: each origin row weighted by its
+  # WorldPop population, a missing or non-positive population replaced by the median of the
+  # others). Equal weights would let the smallest seed zone speak as loudly as Bunia.
+  # The comment here used to say "population-weighted" and then speak of case load while the
+  # code gave every row w = 1: all three disagreed.
   wrow <- local({
-    cw <- rs %>% filter(health_zone %in% epi) %>%
-      transmute(health_zone, w = 1) %>% tibble::deframe()
-    cw <- cw[epi]; cw[!is.finite(cw)] <- 1; cw / sum(cw)
+    pv <- load_population()
+    cw <- as.numeric(pv[match(epi, names(pv))])
+    good <- is.finite(cw) & cw > 0
+    if (!any(good)) stop("no WorldPop population for any epicentre zone (",
+                         paste(epi, collapse = ", "), ")")
+    cw[!good] <- stats::median(cw[good])
+    stats::setNames(cw / sum(cw), epi)
   })
   outfl <- bind_rows(lapply(names(Ws), function(k) {
     r <- colSums(Ws[[k]][epi, , drop = FALSE] * as.numeric(wrow))
@@ -457,10 +621,23 @@ build_figS12 <- function() {
 
 # -----------------------------------------------------------------------------
 if (!isTRUE(get0(".SI_DATA_FIGURES_NO_RUN", ifnotfound = FALSE))) {
-  .build("FigureS10", build_figS10)
-  .build("FigureS11", build_figS11)
-  .build("FigureS12", build_figS12)
+  # Every file each builder writes, composite first (see .clear_figure_files()).
+  .build("FigureS10", build_figS10, c("FigureS10_invasion_by_source",
+                                      "FS10A_invaded_maps_by_source",
+                                      "FS10B_invaded_count_by_source"))
+  .build("FigureS11", build_figS11, c("FigureS11_linelist_vs_sitrep", "FS11A_national_streams",
+                                      "FS11B_zone_scatter", "FS11C_zone_gap_heatmap"))
+  .build("FigureS12", build_figS12, c("FigureS12_mobility_kernels", "FS12A_kernel_matrices",
+                                      "FS12B_kernel_agreement", "FS12C_epicentre_outflow"))
   message(sprintf("\n[si-data] %s  ->  %s",
                   paste(sprintf("%s:%s", names(ok), ifelse(unlist(ok), "ok", "FAILED")),
                         collapse = "  "), FIG_DIR))
+  if (any(!unlist(ok)))
+    stop(sum(!unlist(ok)), " of ", length(ok), " SI data figure(s) failed: ",
+         paste(names(ok)[!unlist(ok)], collapse = ", "),
+         ". Their previous files were removed, so nothing stale is left in their place; see ",
+         "the warnings above for each cause.", call. = FALSE)
 }
+
+}   # end of the script-run guard
+

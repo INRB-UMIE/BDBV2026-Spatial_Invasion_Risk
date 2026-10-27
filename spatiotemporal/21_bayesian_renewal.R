@@ -32,9 +32,6 @@ source(file.path(here::here(), "spatiotemporal", "00_config.R"))
 suppressPackageStartupMessages({
   library(tidyverse); library(brms); library(posterior); library(loo)
 })
-if (!exists("%||%"))
-  `%||%` <- function(a, b) if (is.null(a) || length(a) == 0 ||
-                              (length(a) == 1 && is.na(a))) b else a
 
 # --- Priors (see METHODS §Bayesian) ------------------------------------------
 # Intercept = log(beta0), the log baseline import->first-case coefficient.
@@ -234,7 +231,8 @@ fit_bayes_renewal <- function(design, cov_spec = character(0),
 #' intercept shift). With ~12-18 weekly points that admits phi = exp(-1/l) roughly in
 #' [0.4, 0.95], which is the range the data can speak to.
 #'
-#' SMALL-SAMPLE HONESTY. There are ~54 invasion events over ~18 weeks. A posterior sigma
+#' SMALL-SAMPLE HONESTY. There are only a few tens of invasion events (invasion_evaluation.csv
+#' carries the count per horizon) over the weeks of the record. A posterior sigma
 #' concentrating near 0 ("week-to-week variation is not warranted") is a legitimate and
 #' informative result, and is reported as such rather than being read as a failure.
 #'
@@ -408,7 +406,7 @@ fit_bayes_renewal_tv <- function(design, cov_spec = character(0),
     .old  <- if (.had) get(".Random.seed", envir = globalenv()) else NULL
     on.exit({ if (.had) assign(".Random.seed", .old, envir = globalenv())
               else suppressWarnings(rm(".Random.seed", envir = globalenv())) }, add = TRUE)
-    set.seed(.seed + 7411L)
+    set_fixed_seed(.seed + 7411L)
     # cumsum of iid N(0, sigma) innovations: draws x kmax, then u_{T+k} = u_T + walk[, k].
     walk <- if (kmax >= 1L)
       t(apply(matrix(stats::rnorm(ndr * kmax), nrow = ndr) * sigma, 1, cumsum)) else NULL
@@ -449,16 +447,17 @@ predict_bayes_invasion_tv_scales <- function(fit, offsets_df, design, horizons,
 #' Fitted with .epinow2_rt_fit() (02_epi_params.R) to the national daily confirmed series
 #' as KNOWN on `issue_date`, built by epinow2_daily_confirmed() (02_epi_params.R): dated
 #' EXACTLY as the weekly counts (`date_index`: the usable onset, or an onset imputed from the
-#' sample date) — the only dating consistent with EpiNow2's onset->sample truncation model — and
-#' censored on observation date with the same rule as the weekly training counts
-#' (linelist_observation_date(), 22_daily_reissue.R). The truncation delay is
-#' effective_onset_sample_delay() (the shared full-snapshot estimate), and the generation-time
+#' sample date), and censored on observation date with the same rule as the weekly training
+#' counts (linelist_observation_date(), 22_daily_reissue.R). The right-truncation is the fitted
+#' truncation of the round's regime (epinow2_truncation(); the snapshot's real-time extract fit
+#' for a snapshot round, the shared as-of fit for a re-censored one), and the generation-time
 #' parameters (Gamma mean, SD and support) are those that generated `gt_pmf`. EpiNow2
 #' discretises that Gamma itself, so R and the weekly renewal kernel g share parameters, not an
 #' identical discretisation.
 #'
 #' Each returned value is one posterior sample's MEAN daily R over
-#' [week_start - 7*(window_weeks - 1), min(week_start + 6, issue_date)]: EpiNow2's estimates
+#' [week_start - 7*(window_weeks - 1), min(week_start + 6, issue_date, snapshot date)] (the
+#' snapshot date applies to a vintage fit): EpiNow2's estimates
 #' on days with data, never its forecast tail. With the default window_weeks = 1 that is the
 #' single week [week_start, end_date], which is what every short-term caller wants.
 #'
@@ -494,8 +493,9 @@ predict_bayes_invasion_tv_scales <- function(fit, offsets_df, design, horizons,
 #' missing line list, a GT pmf without its generating parameters, or EpiNow2 not being installed
 #' are configuration errors and stop.
 #'
-#' Cached per (case series, generation time, week, delay, ascertainment, R prior, seed, model
-#' version) and, for a multi-week window, the window length. A lock directory serialises
+#' Cached per (case series, generation time, week, delay, R prior, seed, model version) and,
+#' for a multi-week window, the window length. Ascertainment is NOT part of the key: this
+#' pipeline estimates none, and a constant scale cannot move R (see .hkey below). A lock directory serialises
 #' concurrent callers — parallel LFO workers ask for the same fold's R — so one fits and the
 #' others wait for its cache file.
 #'
@@ -541,6 +541,22 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
          "same generation time as the invasion model.", call. = FALSE)
   gt_max   <- length(gt_pmf)
   end_date <- min(week_start + 6L, issue_date)
+  # LFO_TRAINING_SOURCE = "vintage" (the default): a past round's R is fitted to the archived
+  # snapshot of its issue date with the truncation ESTIMATED ON THAT DATE -- the same data and
+  # the same truncation as the round's counts (asof_counts_source(), 22_daily_reissue.R) and the
+  # same estimator as the live R. The series then ends at the snapshot's own date. Gated exactly
+  # as the counts are (a snapshot AND its real-time truncation), so a round can never pair
+  # snapshot counts with a re-censored R or the reverse.
+  .vin <- if (exists("vintage_for_issue", mode = "function")) vintage_for_issue(issue_date)
+  .vtr <- if (!is.null(.vin)) vintage_truncation(.vin$date)
+  if (is.null(.vtr)) .vin <- NULL
+  if (!is.null(.vin)) {
+    linelist <- load_linelist_vintage(.vin$folder, .vin$date)
+    end_date <- min(end_date, .vin$date)
+  }
+  # A snapshot IS what was known on its date, so it is not re-censored -- exactly as the round's
+  # counts read it (asof_counts_source() aggregates a snapshot with censor = FALSE).
+  .obs_date <- if (!is.null(.vin)) NULL else issue_date
   # Prefixed onto every source-log note so the window is auditable after a run. It goes in the
   # NOTE rather than a new column on purpose: the log is appended to with col.names = FALSE, so
   # widening the schema would write rows with more fields than the existing header declares.
@@ -548,7 +564,7 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
     sprintf("[%d-week window %s..%s] ", window_weeks, format(window_start), format(end_date))
   else ""
 
-  cases   <- epinow2_daily_confirmed(linelist, end_date, issue_date = issue_date,
+  cases   <- epinow2_daily_confirmed(linelist, end_date, issue_date = .obs_date,
                                      caller = "rt-draws")
   n_cases <- sum(cases$confirm)
   dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
@@ -565,8 +581,11 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
   # is measured from the line list, that can change without any config or code change. Resolving
   # it here is cheap: the as-of regime is a sub-second cohort fit with no Stan, and the extract
   # regime's Stan fit is cached to disk, so this is arithmetic or a file read.
-  .trunc_dist <- tryCatch(epinow2_truncation(issue_date = issue_date, ll = linelist),
-                          error = function(e) NULL)
+  # A snapshot is truncated by onset -> APPEARANCE, so it takes the extract-regime fit made on
+  # its own date (vintage_truncation()); a re-censored round takes the shared "asof" fit.
+  .trunc_dist <- if (!is.null(.vin)) .vtr$dist
+                 else tryCatch(epinow2_truncation(issue_date = issue_date, ll = linelist),
+                               error = function(e) NULL)
   # Hash the OBJECT, not its str() — str() prints 3 significant digits and follows the
   # session's strOptions(), so it both collides on materially different fits and changes
   # between environments. Same key construction as estimate_rt_epinow2(), where the reasoning
@@ -576,7 +595,7 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
                 week = week_start, end = end_date, trunc = .trunc_k,
                 prior = unlist(EPINOW2_R_PRIOR),
                 seed = get0("RANDOM_SEED", ifnotfound = 20260704L),
-                version = get0("RT_CACHE_VERSION", ifnotfound = 2L))
+                version = get0("RT_CACHE_VERSION", ifnotfound = 8L))
   # The model/data SPECIFICATION of this fit, without the data or the week: what a posterior
   # carried forward from an earlier week must share with this one (.rt_recent_posterior()).
   # Stamped on every cached posterior. RT_CACHE_VERSION is part of it, so entries fitted under the
@@ -659,13 +678,11 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
   }, add = TRUE)
   seed0 <- get0("RANDOM_SEED", ifnotfound = 20260704L)
   attempt <- function(seed) {
-    set.seed(seed)
-    # THE FOLD REGIME. issue_date is this fold's own origin, so epinow2_truncation() returns
-    # the onset->SAMPLE truncation — correct for a series reaggregate_asof() censored on
-    # linelist_observation_date(). Handing it the deployed (onset->appearance) truncation would
-    # over-correct the folds and break `delta`, which is fitted here and applied to the live
-    # forecast. `ll` is required: the as-of estimate is measured from the line list, not the
-    # archive.
+    set_fixed_seed(seed)
+    # THE ROUND'S REGIME (.trunc_dist above): a snapshot round uses the extract truncation fitted
+    # on its own date (vintage_truncation()); a re-censored round uses the onset->SAMPLE "asof"
+    # truncation, correct for a series reaggregate_asof() censored on
+    # linelist_observation_date(). Each series is corrected for its own truncation.
     fit <- .epinow2_rt_fit(cases, gt_mean, gt_sd, gt_max, truncation = .trunc_dist)
     smp <- as.data.frame(EpiNow2::get_samples(fit))
     # `!(type %in% "forecast")`, NOT `type != "forecast"`. This file's sibling documents the
@@ -761,10 +778,6 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
   draws
 }
 
-#' Draws of R from the EpiNow2 model's own prior, EPINOW2_R_PRIOR: a LogNormal with the given
-#' NATURAL-scale mean and SD — the parameterisation of EpiNow2::LogNormal(mean, sd), so
-#' sdlog = sqrt(log(1 + (sd/mean)^2)) and meanlog = log(mean) - sdlog^2 / 2. Seeded; the
-#' caller's RNG stream is restored.
 #' Most recent cached EpiNow2 posterior for an EARLIER week at the SAME generation time.
 #'
 #' The last resort before the prior. EPINOW2_R_PRIOR is a prior on the INITIAL reproduction
@@ -780,7 +793,7 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
 #' carrying one across GT variants would silently mix generation times.
 #'
 #' THE SPECIFICATION MUST MATCH. A candidate must carry attr "rt_spec" identical to `spec` (the
-#' generation time, delay, ascertainment prior, R prior, seed and RT_CACHE_VERSION of the calling
+#' generation time, delay, R prior, seed and RT_CACHE_VERSION of the calling
 #' fit). Entries without that stamp — every posterior written before it existed, including all
 #' fitted under the retired sample-date dating, which biased R upward — are never carried forward.
 #'
@@ -841,8 +854,8 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
     # CAUSALITY. Never carry forward a posterior fitted at a LATER issue date than the caller's:
     # that fit saw data the caller's fold has not observed, and using it would leak the future
     # into a backtest. An UNSTAMPED entry predates issue-date stamping and cannot be shown to be
-    # causal, so it is refused too — the carry-forward path is a rare stand-in (0 of 193 entries
-    # in the current source log), so refusing an unverifiable one costs nothing and the fallback
+    # causal, so it is refused too — the carry-forward path is a rare stand-in (the source log
+    # records how often it ran), so refusing an unverifiable one costs nothing and the fallback
     # (the prior) is explicit rather than silently wrong.
     if (!is.null(max_issue_date)) {
       .idt <- suppressWarnings(as.Date(attr(d, "issue_date")))
@@ -859,13 +872,17 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
   NULL
 }
 
+#' Draws of R from the EpiNow2 model's own prior, EPINOW2_R_PRIOR: a LogNormal with the given
+#' NATURAL-scale mean and SD — the parameterisation of EpiNow2::LogNormal(mean, sd), so
+#' sdlog = sqrt(log(1 + (sd/mean)^2)) and meanlog = log(mean) - sdlog^2 / 2. Seeded; the
+#' caller's RNG stream is restored.
 .rt_prior_draws <- function(n, seed = get0("RANDOM_SEED", ifnotfound = 20260704L)) {
   pr <- EPINOW2_R_PRIOR
   stopifnot(is.numeric(pr$mean), is.numeric(pr$sd), pr$mean > 0, pr$sd > 0, n >= 1)
   sdlog   <- sqrt(log1p((pr$sd / pr$mean)^2))
   meanlog <- log(pr$mean) - sdlog^2 / 2
   old_seed <- if (exists(".Random.seed", envir = .GlobalEnv)) get(".Random.seed", envir = .GlobalEnv) else NULL
-  set.seed(seed)
+  set_fixed_seed(seed)
   on.exit({
     if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
     else if (exists(".Random.seed", envir = .GlobalEnv)) rm(".Random.seed", envir = .GlobalEnv)
@@ -934,7 +951,7 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
     stop("[bayes draws] horizons >= 2 need finite, non-negative EpiNow2 posterior draws of R ",
          "(bayes_rt_week_draws()).", call. = FALSE)
   old_seed <- if (exists(".Random.seed", envir = .GlobalEnv)) get(".Random.seed", envir = .GlobalEnv) else NULL
-  set.seed(seed)
+  set_fixed_seed(seed)
   on.exit({
     if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
     else if (exists(".Random.seed", envir = .GlobalEnv)) rm(".Random.seed", envir = .GlobalEnv)
@@ -975,11 +992,9 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
     stop("[bayes draws] horizons >= 2 need the source projection attached by ",
          "bayes_forecast_offsets().", call. = FALSE)
   Z <- proj$zones; W <- proj$W; G <- proj$G
-  # Weekly lag-0 mass of THIS projection's kernel; 0 (identity) when the kernel does not
-  # carry the attribute, so a hand-built pmf degrades to the previous behaviour rather than
-  # silently taking another profile's correction.
-  .g0_w   <- { a <- attr(G, "lag0_mass"); if (is.null(a) || !is.finite(a)) 0 else as.numeric(a) }
-  .R_eff_w <- function(R) if (.g0_w > 0) weekly_renewal_R_eff(R, .g0_w) else R
+  # The exact daily-R -> weekly-multiplier map carried by THIS projection's kernel
+  # (weekly_renewal_R_eff()), so no other profile's correction can be applied.
+  .R_eff_w <- function(R) weekly_renewal_R_eff(R, G)
   Yobs <- proj$Y[Z, , drop = FALSE]; Yobs[is.na(Yobs)] <- 0
   T0 <- ncol(Yobs)
   R  <- .pair_rt_draws(proj$rt_draws, S, seed)
@@ -1016,8 +1031,8 @@ bayes_rt_week_draws <- function(linelist, gt_pmf, week_start, issue_date,
       # mass and renormalises (5.8% at the medium profile), while `R` is EpiNow2's DAILY-renewal
       # posterior, which retains it. Multiplying a daily-scale R into a lag-0-dropped kernel
       # under-counts the projected week's own contribution and so understates h>=2 growth.
-      # weekly_renewal_R_eff() (06_simple_models.R) is the exact algebraic correction; it is the
-      # identity at R = 1 and when the kernel carries no lag-0 mass.
+      # weekly_renewal_R_eff() (06_simple_models.R) is the exact correction (the Euler-Lotka
+      # growth-matching multiplier, finite for every R); it is the identity at R = 1.
       Yh <- .R_eff_w(R) * src + mu[, ch, drop = FALSE]
       # NA contributes nothing rather than poisoning every downstream zone's hazard through
       # src %*% W. But an INFINITE cell must NOT be zeroed: mu comes from inv(eta), and under
@@ -1181,6 +1196,29 @@ bayes_forecast_offsets <- function(zone_week_nc, mobility_matrices, gt_pmfs,
 #' SAME draws without recomputing the posterior linear predictor.
 .scale_invasion_draws <- function(drl, delta) {
   if (is.null(drl) || is.null(delta) || !length(delta)) return(drl)
+  # ONE DELTA PER POSTERIOR DRAW, SHARED BY EVERY HORIZON (2026-10-14). When `delta` carries
+  # its Gamma posterior (attached by .suite_delta_for()), draw delta_s ~ Gamma(shape, rate) once
+  # per posterior draw and scale every horizon's cumulative hazard in that draw by the same
+  # delta_s: the intervals then include the uncertainty in delta, and because cum(2 wk) >=
+  # cum(1 wk) within each draw the nesting P(<= 2 wk) >= P(<= 1 wk) is preserved exactly.
+  # The draw is reproducible and leaves the caller's RNG stream untouched.
+  gs <- attr(delta, "gamma_shape"); gr <- attr(delta, "gamma_rate")
+  .dvals <- vapply(drl, function(el) .bayes_recal_delta(delta, el$horizon), numeric(1))
+  if (!is.null(gs) && !is.null(gr) && length(unique(signif(.dvals, 10))) == 1L) {
+    S <- nrow(drl[[1]]$cum)
+    .had <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+    .old <- if (.had) get(".Random.seed", envir = globalenv()) else NULL
+    on.exit({ if (.had) assign(".Random.seed", .old, envir = globalenv())
+              else suppressWarnings(rm(".Random.seed", envir = globalenv())) }, add = TRUE)
+    set_fixed_seed(as.integer(get0("RANDOM_SEED", ifnotfound = 20260704L)) + 9173L)
+    dv <- stats::rgamma(S, shape = gs, rate = gr)
+    return(lapply(drl, function(el) {
+      cum <- el$cum * dv              # draws x zones; row s scaled by dv[s]
+      el$cum <- cum
+      el$p   <- 1 - exp(-cum)
+      el
+    }))
+  }
   lapply(drl, function(el) {
     dh <- .bayes_recal_delta(delta, el$horizon)
     if (dh == 1) return(el)
@@ -1234,8 +1272,8 @@ bayes_forecast_offsets <- function(zone_week_nc, mobility_matrices, gt_pmfs,
 }
 
 #' Summarise one horizon's posterior draws (draws x zones cum/p) into the
-#' per-zone tibble: posterior mean + median invasion probability, 90% CrI, sd,
-#' infection-scale probability, and the RANK credible interval (review §5.1).
+#' per-zone tibble: posterior mean + median invasion probability, 90% CrI, sd, and the RANK
+#' credible interval (review §5.1).
 #' Affected zones are excluded from the ranking (left NA); the caller masks their
 #' probabilities to NA.
 .invasion_horizon_summary <- function(dr, affected_zones = character(0)) {
@@ -1328,7 +1366,7 @@ predict_bayes_invasion_scales <- function(fit, offsets_df, design, horizons,
   if (sum(w) <= 0) w <- rep(1, length(w))
   w <- w / sum(w)
   old_seed <- if (exists(".Random.seed", envir = .GlobalEnv)) get(".Random.seed", envir = .GlobalEnv) else NULL
-  set.seed(seed)
+  set_fixed_seed(seed)
   # Restore the caller's stream exactly. When there was NO stream before, REMOVE the one
   # set.seed() just created rather than leaving a seeded generator behind — otherwise
   # summarising a mixture silently changes every subsequent random draw in the session.
@@ -1357,16 +1395,14 @@ predict_bayes_invasion_scales <- function(fit, offsets_df, design, horizons,
     parts <- lapply(seq_along(comp_draws), function(k) {
       dr <- comp_draws[[k]][[hk]]
       ix <- ix_k[[k]]
-      list(cum = dr$cum[ix, , drop = FALSE], p = dr$p[ix, , drop = FALSE],
-           p = dr$p[ix, , drop = FALSE])
+      list(cum = dr$cum[ix, , drop = FALSE], p = dr$p[ix, , drop = FALSE])
     })
     list(zones   = comp_draws[[1]][[hk]]$zones,
          horizon = comp_draws[[1]][[hk]]$horizon,
          # carried so the pooled draws can be rescaled by a recalibration factor with the
          # SAME helper a single model's draws use (.scale_invasion_draws)
          cum   = do.call(rbind, lapply(parts, `[[`, "cum")),
-         p     = do.call(rbind, lapply(parts, `[[`, "p")),
-         p = do.call(rbind, lapply(parts, `[[`, "p")))
+         p     = do.call(rbind, lapply(parts, `[[`, "p")))
   })
   names(pooled) <- hkeys
   # `return_draws` hands back the POOLED draws instead of a summary, so a caller that needs
@@ -1423,14 +1459,21 @@ predict_bayes_gt_marginal <- function(zone_week_nc, mobility_matrices, covariate
                                       iter = 2000L,
                                       chains = 2L, link = "cloglog", total_draws = NULL,
                                       tv = "none", delta = NULL, scales = FALSE,
-                                      seed = get0("RANDOM_SEED", ifnotfound = 20260704L)) {
+                                      seed = get0("RANDOM_SEED", ifnotfound = 20260704L),
+                                      trunc_delay = NULL) {
   gp   <- make_gt_prior_pmfs(gt_prior)                 # named daily PMFs + prior weights
   keys <- names(gp$gt_pmfs)
   cand <- unique(c(cov_spec, "log_pop", "ccvi", "d_min"))   # mirror fit_bayes_suite's candidates
+  # The same rolling as-of design as fit_bayes_suite() and the back-test (whose delta this
+  # forecast carries): gated exactly as there.
+  .roll_on <- isTRUE(get0("ROLLING_PREDICTORS", ifnotfound = TRUE)) &&
+              !is.null(linelist) && !is.null(trunc_delay)
   # --- fit + extract posterior draws at each GT grid point ---
   comp <- lapply(keys, function(k) {
     des <- tryCatch(build_invasion_design(zone_week_nc, mobility_matrices, gp$gt_pmfs,
-             covariates, osrm_mat, zones_all, mob = mob, gt = k, candidates = cand),
+             covariates, osrm_mat, zones_all, mob = mob, gt = k, candidates = cand,
+             rolling_ll = if (.roll_on) linelist else NULL,
+             rolling_delay = if (.roll_on) trunc_delay else NULL),
              error = function(e) NULL)
     if (is.null(des)) return(NULL)
     # Same tv dispatch as the suite and the LFO closure. Without it the DEPLOYED featured
@@ -1530,34 +1573,6 @@ predict_bayes_gt_marginal <- function(zone_week_nc, mobility_matrices, covariate
   if (isTRUE(scales)) list(raw = raw, calibrated = cal) else cal
 }
 
-#' Kernel-diverse Bayesian ENSEMBLE as a proper MIXTURE PREDICTIVE (review §2.4).
-#'
-#' Pools the posterior draws of a small, pre-specified, structurally-diverse set of
-#' member models (different mobility kernels, GT handled WITHIN each member by the
-#' prior — never as an ensemble axis) into one coherent predictive, so the ensemble
-#' carries a mean, MEDIAN, 90% CrI AND rank CrI from the mixture — not a
-#' normal-approx of member summaries (cf. the legacy bayes_stacked_prediction). This
-#' is the plan's response to the winner's-curse of selecting one of ~40 kernels:
-#' combine kernel-diverse members instead. Weights are equal (robust default) or
-#' loo-stacking; leakage-honest weights are the caller's responsibility (estimate on
-#' training/inner folds, apply frozen).
-#'
-#' @param member_draws named list of `.bayes_invasion_draws` outputs (one per member).
-#' @param weights named numeric member weights; default equal-weight over members.
-#' @return mixture-predictive tibble (columns as predict_bayes_invasion) with
-#'   attr("weights_used").
-bayes_ensemble_mixture <- function(member_draws, weights = NULL,
-                                   affected_zones = character(0), total_draws = NULL,
-                                   seed = get0("RANDOM_SEED", ifnotfound = 20260704L)) {
-  member_draws <- member_draws[!vapply(member_draws, is.null, logical(1))]
-  if (!length(member_draws)) return(NULL)
-  if (is.null(weights))
-    weights <- stats::setNames(rep(1 / length(member_draws), length(member_draws)),
-                               names(member_draws))
-  weights <- weights[names(member_draws)]
-  .mix_and_summarise_draws(member_draws, weights, affected_zones = affected_zones,
-                           total_draws = total_draws, seed = seed)
-}
 
 #' Pairwise directed importation pressure / force of infection between health
 #' zones, decomposed from the FEATURED Bayesian model's renewal-equation
@@ -1570,8 +1585,9 @@ bayes_ensemble_mixture <- function(member_draws, weights = NULL,
 #' DIRECTED contribution of origin j to at-risk destination i is therefore
 #'   FOI_{j->i}(h) = beta * W[j,i] * source_j(h),
 #' and by construction sum_j FOI_{j->i}(h) = mu_i(h) EXACTLY. `beta` is the
-#' posterior-median import coefficient beta0 = median(exp(Intercept)) (the
-#' Intercept `hr` in bayes_parameters), so the pairwise matrix IS the featured
+#' posterior-median import coefficient: median(exp(Intercept)) (the Intercept `hr` in
+#' bayes_parameters) for a fixed-beta model, and for an RW1 form the level its forecast uses
+#' (run_all passes the first forecast week's beta), so the pairwise matrix IS the featured
 #' model's posterior-median force of infection. For horizons >= 2 the sources are rolled
 #' forward with the projection .bayes_project_mu() applies per draw, evaluated at point
 #' values: local renewal at the posterior MEDIAN of `rt_draws`, plus new introductions
@@ -1617,15 +1633,13 @@ bayes_pairwise_import_force <- function(zone_week_nc, mobility_matrices, gt_pmfs
   R_med <- if (hmax >= 2L) stats::median(rt_draws) else NA_real_
   # WEEKLY-EQUIVALENT R, matching .bayes_project_mu(). daily_to_weekly_gt() drops the lag-0
   # mass and renormalises (5.81% at the medium profile), so the raw daily-scale EpiNow2 R
-  # under-projects the weekly renewal; weekly_renewal_R_eff() is the algebraic correction.
+  # under-projects the weekly renewal; weekly_renewal_R_eff() is the exact correction.
   # This function's own docstring calls it "the point analogue of .bayes_project_mu()", and
   # that function applies the correction — so without it the two used DIFFERENT renewal
-  # kernels at h >= 2. Effect is ~+0.1% at the deployed national R ~= 1.02 and ~+10% at
-  # R = 2.5; share_of_dest is a within-destination ratio and partly protected, but foi,
+  # kernels at h >= 2. Effect (medium generation time) is +0.1% at R = 1.02, +2.3% at R = 1.4
+  # and +7.5% at R = 2.5; share_of_dest is a within-destination ratio and partly protected, but foi,
   # import_force, source_origin and dest_hazard_week at h >= 2 are not.
-  .g0_pw  <- attr(G, "lag0_mass")
-  .g0_pw  <- if (is.numeric(.g0_pw) && length(.g0_pw) == 1L && is.finite(.g0_pw)) .g0_pw else 0
-  R_med_w <- if (is.finite(R_med) && .g0_pw > 0) weekly_renewal_R_eff(R_med, .g0_pw) else R_med
+  R_med_w <- if (is.finite(R_med)) weekly_renewal_R_eff(R_med, G) else R_med
   atrisk <- setdiff(zones_all, affected_zones)
   rows <- list()
   for (h in seq_len(hmax)) {
@@ -1709,6 +1723,8 @@ bayes_pairwise_import_force <- function(zone_week_nc, mobility_matrices, gt_pmfs
 bayes_beta_trajectory <- function(fit, design, label = "", horizons = NULL,
                                   week_dates = NULL) {
   if (is.null(fit) || is.null(design) || is.null(design$d) || !nrow(design$d)) return(NULL)
+  if (inherits(fit, "stan_invasion_fit"))       # a time-varying form (21c_frailty_models.R)
+    return(stan_invasion_beta_trajectory(fit, design, label, horizons, week_dates))
   if (!".week" %in% names(design$d)) return(NULL)
   tv    <- attr(fit, "tv") %||% "none"
   weeks <- sort(unique(as.integer(design$d$.week)))
@@ -1777,6 +1793,7 @@ bayes_beta_trajectory <- function(fit, design, label = "", horizons = NULL,
 #' covariate rows are per-SD hazard ratios exp(beta_m).
 bayes_param_table <- function(fit, label = "") {
   if (is.null(fit)) return(NULL)
+  if (inherits(fit, "stan_invasion_fit")) return(stan_invasion_param_table(fit, label))
   dr <- posterior::as_draws_df(fit)
   vars <- grep("^b_", names(dr), value = TRUE)
   # exp(coef) is a HAZARD ratio under cloglog (the renewal default) but an ODDS ratio under
@@ -1868,6 +1885,7 @@ bayes_param_table <- function(fit, label = "") {
 #'   ess_bulk_min, ess_tail_min, n_draws), or NULL when `fit` is NULL.
 bayes_fit_diagnostics <- function(fit, label = "") {
   if (is.null(fit)) return(NULL)
+  if (inherits(fit, "stan_invasion_fit")) return(stan_invasion_diagnostics(fit, label))
   # Divergent transitions via brms::nuts_params (works for both backends).
   np <- tryCatch(brms::nuts_params(fit), error = function(e) NULL)
   n_div <- NA_integer_; n_iter <- NA_integer_
@@ -1909,10 +1927,48 @@ bayes_fit_diagnostics <- function(fit, label = "") {
 #' exp(Intercept) for the intercept row; hazard/odds ratio for covariate rows), in long form
 #' (model, term, is_intercept, .draw, hr). Used to visualise the posterior DISTRIBUTIONS (not
 #' just the median + interval). Thinned to keep the tibble compact.
+#'
+#' EACH ROW CARRIES ITS OWN PRIOR (`prior`, the brms prior_string as fitted, on the LOG scale
+#' — i.e. on the coefficient, not on `hr`). A prior-versus-posterior figure has to state which
+#' prior it is drawing, and the only way it cannot misstate it is to read it off the same
+#' object it reads the posterior off. Re-declaring "Normal(-3,2)" in the figure would be a
+#' second definition of BAYES_PRIOR_INTERCEPT that nothing keeps in step with the first, and
+#' the figure would go on drawing the old prior against a posterior fitted under a new one.
+#'
+#' THE INTERCEPT PRIOR IS NOT ALWAYS A PRIOR ON `b_Intercept`. brms centres the population-level
+#' design matrix, and the generated Stan code is explicit about what that costs:
+#'
+#'     real Intercept;                                          // centred predictors
+#'     lprior += normal_lpdf(Intercept | -3, 2);                // the prior goes HERE
+#'     real b_Intercept = Intercept - dot_product(means_X, b);  // the draws hold THIS
+#'
+#' So BAYES_PRIOR_INTERCEPT describes `b_Intercept` only when means_X is zero — i.e. when every
+#' covariate entering the fit has mean zero. On the shipped designs it does (the covariates are
+#' standardised, and the fitted rows are the full design), which is why the two agree to the
+#' last bit today. It is not guaranteed: fit a suite whose members have DIFFERENT at-risk sets
+#' and the common-support subset no longer has exactly mean-zero columns, at which point the
+#' prior on beta0 becomes a convolution of Normal(-3, 2) with the induced distribution of
+#' dot(means_X, b) and is no longer the stamped one.
+#'
+#' Rather than leave a consumer to assume, the intercept's stamp is checked and dropped to NA
+#' when it cannot be justified — and the figure then draws that posterior with no prior behind
+#' it, which is the honest rendering. Covariate coefficients are untouched by centring, so
+#' their stamp is always valid.
 bayes_posterior_draws <- function(fits, max_draws = 1500L) {
   if (is.null(fits) || !length(fits)) return(NULL)
+  pri_int <- get0("BAYES_PRIOR_INTERCEPT", ifnotfound = NA_character_)
+  pri_coef <- get0("BAYES_PRIOR_COEF", ifnotfound = NA_character_)
   purrr::map_dfr(names(fits), function(nm) {
     fit <- fits[[nm]]; if (is.null(fit)) return(NULL)
+    if (inherits(fit, "stan_invasion_fit")) {
+      # A time-varying form: its prior is on b0 itself, so the intercept stamp needs no check.
+      d <- stan_invasion_posterior_draws(fit, nm)
+      nd <- max(d$.draw)
+      keep <- if (nd > max_draws) round(seq(1, nd, length.out = max_draws)) else seq_len(nd)
+      d <- d[d$.draw %in% keep, , drop = FALSE]
+      d$.draw <- match(d$.draw, keep)
+      return(d)
+    }
     dr <- tryCatch(posterior::as_draws_df(fit), error = function(e) NULL)
     if (is.null(dr)) return(NULL)
     vars <- grep("^b_", names(dr), value = TRUE)
@@ -1920,11 +1976,32 @@ bayes_posterior_draws <- function(fits, max_draws = 1500L) {
     lk <- tryCatch(attr(fit, "link") %||% fit$family$link, error = function(e) "cloglog")
     escale <- if (identical(lk, "cloglog")) "hazard ratio"
               else if (identical(lk, "logit")) "odds ratio" else lk
+    # Column 1 of the Stan `X` is the intercept; columns 2..K are the population-level
+    # covariates whose means brms subtracts. An intercept-only model has K = 1, so there is
+    # nothing to subtract and the stamp stands. A failure to read the Stan data is treated as
+    # "not verified", not as "fine".
+    int_ok <- tryCatch({
+      X <- brms::standata(fit)$X
+      if (is.null(X)) NA
+      else if (ncol(X) < 2L) TRUE
+      else max(abs(colMeans(X[, -1L, drop = FALSE]))) < 1e-8
+    }, error = function(e) NA)
+    if (!isTRUE(int_ok))
+      warning(sprintf(paste0("[bayes] %s: the intercept prior is on the CENTRED intercept but ",
+                             "the draws hold b_Intercept, and the fitted covariates are not ",
+                             "mean-zero (%s). The intercept's prior stamp is set to NA so no ",
+                             "figure draws an incomparable prior against beta0."),
+                      nm, if (is.na(int_ok)) "could not be checked" else "checked and non-zero"),
+              call. = FALSE)
     idx <- if (nrow(dr) > max_draws) round(seq(1, nrow(dr), length.out = max_draws)) else seq_len(nrow(dr))
     purrr::map_dfr(vars, function(v) {
       term <- sub("^b_", "", v)
-      tibble::tibble(model = nm, term = term, is_intercept = term == "Intercept",
-                     effect_scale = escale, .draw = seq_along(idx), hr = exp(dr[[v]][idx]))
+      is_int <- term == "Intercept"
+      tibble::tibble(model = nm, term = term, is_intercept = is_int,
+                     effect_scale = escale,
+                     prior = if (!is_int) pri_coef
+                             else if (isTRUE(int_ok)) pri_int else NA_character_,
+                     .draw = seq_along(idx), hr = exp(dr[[v]][idx]))
     })
   })
 }
@@ -1948,17 +2025,18 @@ bayes_posterior_draws <- function(fits, max_draws = 1500L) {
 #'     — the same kernels keyed on distance instead of travel time. -dist entries are also
 #'     auto-filtered out when the road-distance matrices were not built.
 #'   * GENERATION TIME: a SINGLE medium anchor for the selection grid (review §2.1 — the GT
-#'     is no longer a selectable axis; it is a PRIOR marginalised into the featured forecast).
-#'   * COVARIATES: none (CORE), always fitted. The reduced "geo" subset (log_pop, CCVI,
-#'     d_min) is ON by default (INCLUDE_GEO_COV_MODELS). The FULL-exogenous set (geo +
+#'     is not a selectable axis). It is treated as known (GT_MARGINALISE_FEATURED = FALSE);
+#'     its sensitivity is the featured specification refitted at the short and long GT
+#'     profiles (the -gtshort / -gtlong arms, bayes_gt_sensitivity_specs()).
+#'   * COVARIATES: none (CORE), always fitted. The reduced "geo" subset (BAYES_GEO_COVARIATES:
+#'     CCVI, d_min; log_pop was dropped 2026-09-21) is ON by default (INCLUDE_GEO_COV_MODELS). The FULL-exogenous set (geo +
 #'     healthsite_density) is OFF by default (INCLUDE_FULL_COV_MODELS) — this docstring used
 #'     to call it "always kept", but the code gates it and the flag defaults FALSE, so no
 #'     -full model has been fitted. The suspected-but-not-confirmed leading indicators —
 #'     susp_local (own preceding-week suspected cases) and susp_import (mobility-weighted
 #'     import of other zones' suspected cases), as a susp-only model and a wider FULL+susp
 #'     model — are likewise OFF by default (INCLUDE_SUSPECTED_COV_MODELS), not "default ON".
-#'     Verified against the shipped run: of 52 cross-validated Bayesian models, none is a
-#'     -full or -susp model. positivity and the
+#'     No shipped run has cross-validated a -full or -susp model. positivity and the
 #'     total-alert covariates remain excluded: positivity = confirmed/tests is circular with
 #'     the invasion outcome; the suspected covariate is the line-list classification signal,
 #'     distinct from the raw alert count and used past-only (causal in LFO).
@@ -1968,7 +2046,12 @@ bayes_posterior_draws <- function(fits, max_draws = 1500L) {
 #'     prediction reconciles both on the per-week hazard scale. (Poisson vs NB is the
 #'     COUNT observation for the source-incidence projection, shared with and varied in
 #'     the frequentist suite, not an axis of the binary invasion likelihood.)
-bayes_default_grid <- function(mobility_matrices = NULL) {
+bayes_default_grid <- function(mobility_matrices = NULL,
+                               # Append the generation-time sensitivity arms of the model the
+                               # LAST run featured (model_selection.json; see the block at the
+                               # end). OFF by default: run_all.R builds the arms of THIS run's
+                               # selection after it is made (bayes_gt_sensitivity_specs()).
+                               gt_arms = FALSE) {
   # Optional model families (00_config.R toggles; get0 fallbacks so a config-less caller
   # — e.g. a unit test — still gets the documented defaults).
   # inc_dist is the MASTER switch for EVERY -dist variant (generic M4/M8/M9/M10-dist AND cohort
@@ -2001,7 +2084,7 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
   inc_fill  <- isTRUE(get0("INCLUDE_SOURCEFILL_MODELS",    ifnotfound = TRUE)) &&
                !identical(get0("MOBILITY_SOURCE_FILL", ifnotfound = "unmeasured"), "none")
   # INCLUDE_UNFILLED_MODELS = FALSE (the default) drops every model on a kernel whose source-cell
-  # fill twin is in this grid and built (filter just before the time-varying block).
+  # fill twin is in this grid and built (the filter near the end of this function).
   inc_unfilled <- isTRUE(get0("INCLUDE_UNFILLED_MODELS", ifnotfound = FALSE))
   # Origin-split cohort composites. OFF by default since 2026-09-22 — this ifnotfound MUST
   # track INCLUDE_COHORT_SPLIT_MODELS in 00_config.R (see the note on inc_dist above).
@@ -2013,9 +2096,10 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
   inc_cgrav <- isTRUE(get0("INCLUDE_COHORT_GRAVITY_MODELS", ifnotfound = TRUE))
   # COVARIATE SETS (revised 2026-09-21; `log_pop` dropped from both).
   #
-  # There are only 54 invasion events in the pooled at-risk design (n_obs = 8,623), so at the
-  # conventional ~10 events per parameter the honest ceiling is 2-3 covariates: the retired
-  # 3-covariate `geo` gave 13.5 events/parameter and the 4-covariate `full` gave 10.8.
+  # There were only 54 invasion events in the pooled at-risk design when this was revised
+  # (n_obs = 8,623), so at the conventional ~10 events per parameter the honest ceiling is 2-3
+  # covariates: the retired 3-covariate `geo` gave 13.5 events/parameter and the 4-covariate
+  # `full` 10.8.
   #
   # `log_pop` was dropped on evidence, not taste. Fitting the cloglog hazard with the mobility
   # offset on five composite kernels (M14-fill, M8-fill, M17-fill, M13-fill, M16-fill), the
@@ -2046,21 +2130,11 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
   geo  <- get0("BAYES_GEO_COVARIATES",  ifnotfound = c("ccvi", "d_min"))
   full <- get0("BAYES_FULL_COVARIATES", ifnotfound = c("ccvi", "d_min", "healthsite_density"))
   susp <- c("susp_import", "susp_local")
-  # TIME-VARYING beta families (INCLUDE_TV_BETA_MODELS). Five strict generalisations of the
-  # fixed-beta model, each collapsing back to it as its extra parameter -> 0:
-  #   tv-trend : beta_t = exp(beta0 + gamma_w * z(week))         log-linear, EXTRAPOLATES
-  #   tv-week  : u_t ~ N(0, sigma) iid                           reverts to beta0, wider CrI
-  #   tv-rw1   : u_t = u_{t-1} + eps_t                           PERSISTS the current level
-  #   tv-ar1   : Ornstein-Uhlenbeck, phi = exp(-1/lengthscale)   decays toward beta0
-  #   tv-gp    : squared-exponential GP                          smooth local extrapolation
-  # See the TIME-VARYING block above fit_bayes_renewal_tv() for the full argument.
-  #
-  # THEY RIDE ONE BASE MODEL, NOT THE WHOLE GRID. These are variants OF THE MODEL THE
-  # CROSS-VALIDATION SELECTED, which is what the question "has beta changed since the
-  # epidemic left Ituri?" is about. Sweeping them across every kernel would multiply the
-  # grid sixfold, refit in every fold, and answer a question nobody asked.
-  inc_tv <- isTRUE(get0("INCLUDE_TV_BETA_MODELS", ifnotfound = FALSE))
-  tv_types <- get0("TV_BETA_TYPES", ifnotfound = c("trend", "week", "rw1", "ar1", "gp"))
+  # The brms time-varying-beta arms (INCLUDE_TV_BETA_MODELS: tvtrend/tvweek/tvrw1/tvar1/tvgp,
+  # refits of the PREVIOUS run's featured model) were RETIRED on 2026-10-15 in favour of the
+  # time-varying FORMS of THIS run's stage-1 selection (TV_FORMS, bayes_tv_form_specs()), which
+  # run_all.R cross-validates after the selection. Their fitters remain (fit_bayes_renewal_tv())
+  # for a spec that carries tv != "none"; this grid composes none.
   g <- list()
   # `tv` is carried on EVERY spec (default "none") so downstream dispatch never has to
   # test for the field's existence — a missing field would silently take the fixed-beta
@@ -2081,7 +2155,8 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
   add("M8",  "medium", character(0), "cloglog", "Bayes-M8-med")
   if (inc_m9) add("M9", "medium", character(0), "cloglog", "Bayes-M9-med")
   add("M10", "medium", character(0), "cloglog", "Bayes-M10-med")
-  # --- Flowminder cohort composites (M13/M14 + geographic-distance -dist), default ON ---
+  # --- Flowminder cohort composites (M13/M14, default ON; their -dist variants need inc_dist,
+  #     default OFF) ---
   # Cohort presence source rows + gravity/radiation, on travel-time (M13/M14) or road-km
   # geographic distance (M13/M14-dist). Auto-filtered below when a matrix is absent
   # (INCLUDE_COHORT_MODELS off, or no road-distance matrix). The cohort -dist MATRICES are
@@ -2108,13 +2183,14 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
       if (inc_geo)  add(cm, "medium", geo,  "cloglog", paste0("Bayes-", cm, "-geo"))
     }
   }
-  # --- Flowminder OD family (M15/M16/M17 + M17-dist), default ON ---
+  # --- Flowminder OD family (M16/M17 default ON with INCLUDE_FLOWSTATIC_MODELS; M15 needs
+  #     INCLUDE_M15_MODELS and M17-dist inc_dist, both default OFF) ---
   # M15 = symmetrised Flowminder OD, S = O + t(O) (NOT inflow-informed: no independent
   # inflow table exists); M16 = cohort + DIRECTED OD
   # (cohort source rows where available, the M3 directed Flowminder OD elsewhere — NOT M15, which
   # is not built by default; see 03_mobility_matrices.R); M17/M17-dist = all-kernel consensus.
-  # Each kernel is entered at the single medium-GT anchor (generation time is marginalised into
-  # the featured forecast, not a grid axis) x covariates {none, geo (inc_geo), full (inc_full)}.
+  # Each kernel is entered at the single medium-GT anchor (generation time is not a grid axis)
+  # x covariates {none, geo (inc_geo), full (inc_full)}.
   # Auto-filtered below when a matrix is absent (M16 needs the cohort kernel; M17-dist needs a
   # road-distance matrix), so a cohort-off / distance-off run simply omits them.
   if (inc_flowstat) {
@@ -2151,7 +2227,7 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
       }
     }
   }
-  # --- ORIGIN-SPLIT cohort composites (INCLUDE_COHORT_SPLIT_MODELS, default ON) -------------
+  # --- ORIGIN-SPLIT cohort composites (INCLUDE_COHORT_SPLIT_MODELS, default OFF) ------------
   # The pooled cohort profile disaggregated per origin (split_cohort_rows(), 03), then filled.
   # Same label convention as above. Auto-filtered below when a matrix is absent.
   # The SHORT-TRIP splits (M8/M10-split) ride on inc_split alone — they need the short-trip
@@ -2184,10 +2260,10 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
   # NOTE (review §2.1): the former Bayes-M8-short / Bayes-M8-long and the M15/M16/M17
   # short/long GT-scenario models are REMOVED. Selecting the generation time by
   # cross-validation is "akin to fitting" a quantity the data cannot identify; instead a
-  # single medium anchor is used for the SELECTION grid and the generation time is
-  # marginalised over its prior (GT_PRIOR) in the featured forecast. This also shrinks the
-  # candidate space (fewer models selected among ~39 events; §2.2). GT SENSITIVITY is
-  # reported by re-running the featured forecast under GT_PRIOR_ALTS, not as grid members.
+  # single medium anchor is used for the SELECTION grid and the generation time is treated as
+  # known (GT_MARGINALISE_FEATURED = FALSE). This also shrinks the candidate space (§2.2).
+  # GT SENSITIVITY is the featured specification refitted at the short and long GT profiles
+  # (the -gtshort / -gtlong arms), cross-validated beside the grid but never candidates.
   # --- FULL-exogenous covariate models (OPTIONAL; inc_full, OFF by default). The reduced geo
   #     subset is added separately under inc_geo below. ---
   if (inc_full) {
@@ -2196,7 +2272,8 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
     if (inc_m9) add("M9", "medium", full, "cloglog", "Bayes-M9-full")
     add("M10", "medium", full, "cloglog", "Bayes-M10-full")
   }
-  # --- NEW suspected-but-not-confirmed leading-indicator covariate models (default ON) ---
+  # --- Suspected-but-not-confirmed leading-indicator covariate models (INCLUDE_SUSPECTED_COV_MODELS,
+  #     default OFF) ---
   # susp_import = mobility-weighted import of OTHER zones' preceding suspected (not yet
   # confirmed) cases; susp_local = own preceding-week suspected cases. Both past-only
   # (causal in LFO). One susp-only model and one FULL+susp "wider covariate" model.
@@ -2247,8 +2324,8 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
   # --- OPTIONAL: fill-only composites (INCLUDE_UNFILLED_MODELS = FALSE) ---------------------
   # A kernel is "unfilled" when its source-cell fill twin ("<kernel>-fill") is in this grid AND
   # built. Every model on such a kernel is dropped — all covariate, suspected-case and link
-  # variants — and the time-varying variants below are derived from what remains, so they
-  # follow. Kernels with no fill twin (M4, M4-dist, M9, M9-dist, M11, M15, and the origin-split
+  # variants (the time-varying forms and the GT arms are built later, by run_all.R, from the
+  # selected model, so they follow). Kernels with no fill twin (M4, M4-dist, M9, M9-dist, M11, M15, and the origin-split
   # family) are untouched. With no twin available nothing is dropped, so turning the fill
   # family off can never silently remove the composites altogether.
   if (!inc_unfilled) {
@@ -2264,46 +2341,6 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
     }
   }
 
-  # --- TIME-VARYING beta variants OF THE SELECTED MODEL -----------------------------------
-  # The base spec is the model the LAST cross-validation selected (model_selection.json, the
-  # pipeline's own record — the same file the cascade and the figure suites read), so the tv
-  # arm is a set of variants of THE featured model rather than of an arbitrary kernel. The
-  # variants inherit its mobility kernel, generation time, link AND covariates, so the only
-  # thing that differs between the base model and each variant is the beta_t process — which
-  # is what makes the cross-validated comparison between them interpretable.
-  #
-  # RESOLUTION ORDER, all overridable:
-  #   1. TV_BETA_BASE_MODEL (00_config.R / environment) — an explicit label.
-  #   2. the featured Bayesian model in model_selection.json.
-  #   3. the richest spec on MOBILITY_PRIMARY, so a first-ever run with no selection file
-  #      still produces a coherent tv arm rather than silently producing none.
-  # A label that resolves to no spec in this grid is a hard error, not a warning: silently
-  # attaching the tv variants to a different model than the one being generalised would make
-  # every comparison in the resulting figure false.
-  # sensitivity = TRUE on every arm: these are REFITS of a model already in the grid, not
-  # competing hypotheses, so best_invasion_model() must never be able to feature one. The
-  # deployed gate is INVASION_SELECTION_EXCLUDE (00_config.R), which matches on the label;
-  # the flag here is the grid's own record of the same fact and is what a future change
-  # should read instead of a regex.
-  if (inc_tv && length(tv_types)) {
-    base <- .bayes_featured_base_spec(g)
-    for (ty in tv_types) {
-      lab <- paste0(base$label, "-tv", ty)
-      if (identical(ty, "trend")) {
-        # tv-trend rides the ordinary covariate machinery: `week_idx` IS the trend term, so it
-        # is ADDED to the base model's covariates rather than replacing them.
-        add(base$mob, base$gt, unique(c(base$cov, "week_idx")), base$link, lab, tv = "trend",
-            sensitivity = TRUE)
-      } else {
-        # week / rw1 / ar1 / gp are structural terms handled by fit_bayes_renewal_tv();
-        # the base model's covariates are carried through unchanged.
-        add(base$mob, base$gt, base$cov, base$link, lab, tv = ty, sensitivity = TRUE)
-      }
-    }
-    message(sprintf("[bayes grid] time-varying beta variants of %s: %s",
-                    base$label, paste(paste0("tv", tv_types), collapse = ", ")))
-  }
-
   # --- GENERATION-TIME SENSITIVITY OF THE SELECTED MODEL ----------------------------------
   # The generation time is an ASSUMPTION, not a fitted quantity: it enters the renewal
   # convolution that builds the import force Lambda, so a different GT gives a different
@@ -2311,92 +2348,135 @@ bayes_default_grid <- function(mobility_matrices = NULL) {
   # anchor (medium) precisely so that GT is not a selection axis — but that makes "how much
   # does the GT assumption matter?" a question the main grid cannot answer.
   #
-  # This adds the SELECTED model refit at the short and long GT profiles, nothing else. They
-  # are ordinary suite members, so they are cross-validated on the same folds (answering
-  # part i: does the GT assumption change out-of-sample skill?) and they produce a current
-  # forecast (answering part ii: does it change today's invasion probabilities?).
-  #
-  # These are SENSITIVITY arms, not candidates. They share the featured model's kernel and
-  # covariates and differ only in an assumption, so letting one of them win selection would
-  # be selecting on the GT — exactly what the design excludes. They are marked here and
-  # best_invasion_model() excludes any model carrying sensitivity_arm = TRUE.
-  if (isTRUE(get0("INCLUDE_GT_SENSITIVITY_MODELS", ifnotfound = TRUE))) {
-    base <- .bayes_featured_base_spec(g)
-    alt_gt <- setdiff(get0("GT_SENSITIVITY_PROFILES", ifnotfound = c("short", "long")), base$gt)
-    for (gk in alt_gt) {
-      # Strip the base label's own GT token before appending the alternative one, so
-      # "Bayes-M14-fill-med" becomes "Bayes-M14-fill-short", not "...-med-short".
-      stem <- sub("-(med|short|long)$", "", base$label)
-      add(base$mob, gk, base$cov, base$link, paste0(stem, "-gt", gk), sensitivity = TRUE)
-    }
-    if (length(alt_gt))
-      message(sprintf("[bayes grid] generation-time sensitivity arms of %s: %s",
-                      base$label, paste(alt_gt, collapse = ", ")))
+  # The arms are the featured model refit at the short and long GT profiles. run_all.R builds
+  # THIS run's arms with bayes_gt_sensitivity_specs() after BOTH selection stages (so a featured
+  # form's arms are forms), cross-validates them on the same folds (part i: does the GT
+  # assumption change out-of-sample skill?) and fits them in the deployed suite (part ii: does
+  # it change today's invasion probabilities?). They are SENSITIVITY arms, not candidates:
+  # selecting one would be selecting on the GT, so SENSITIVITY_ARM_REGEX /
+  # INVASION_SELECTION_EXCLUDE (00_config.R) keep them out of both stages.
+  # gt_arms = TRUE (not used by the pipeline) appends the arms of the PREVIOUS run's featured
+  # model (model_selection.json) instead.
+  if (isTRUE(gt_arms)) {
+    base <- .bayes_featured_spec_from_selection(g)
+    for (a in bayes_gt_sensitivity_specs(base)) g[[length(g) + 1L]] <- a
   }
 
   if (!is.null(mobility_matrices)) g <- Filter(function(x) !is.null(mobility_matrices[[x$mob]]), g)
   g
 }
 
-#' The spec in `g` that the time-varying-beta variants generalise.
-#'
-#' Kept out of bayes_default_grid() so the resolution rule is testable on its own and so the
-#' three sources it consults are visible in one place. Errors rather than guessing: see the
-#' call site for why a wrong base silently invalidates the whole tv comparison.
-.bayes_featured_base_spec <- function(g) {
-  cand <- Filter(function(x) identical(x$tv %||% "none", "none"), g)
-  if (!length(cand))
-    stop("[bayes grid] INCLUDE_TV_BETA_MODELS is on but the grid holds no fixed-beta spec ",
-         "to generalise.", call. = FALSE)
-  pick <- function(lab) {
-    if (is.null(lab) || !length(lab) || is.na(lab[1]) || !nzchar(lab[1])) return(NULL)
-    hit <- Filter(function(x) identical(x$label, as.character(lab[1])), cand)
-    if (length(hit)) hit[[1]] else NULL
-  }
-  # 1. explicit override
-  lab_cfg <- get0("TV_BETA_BASE_MODEL", ifnotfound = NULL)
-  b <- pick(lab_cfg)
-  if (!is.null(b)) return(b)
-  if (!is.null(lab_cfg) && length(lab_cfg) && !is.na(lab_cfg[1]) && nzchar(lab_cfg[1]))
-    stop(sprintf(paste0("[bayes grid] TV_BETA_BASE_MODEL = '%s' matches no fixed-beta spec in ",
-                        "the grid. Available: %s"), lab_cfg[1],
-                 paste(vapply(cand, function(x) x$label, character(1)), collapse = ", ")),
+#' The generation-time sensitivity arms of ONE model: the same kernel, covariates and link,
+#' refitted at each alternative profile in GT_SENSITIVITY_PROFILES. They are sensitivity arms
+#' (sensitivity = TRUE), scored but never eligible for selection. Labelled by appending
+#' "-gt<profile>" to the base label after stripping a trailing GT/covariate-free token
+#' ("-med|-short|-long"), so "Bayes-M14-fill-geo" gives "Bayes-M14-fill-geo-gtshort" and
+#' "Bayes-M14-fill-med" gives "Bayes-M14-fill-gtshort" (make_si_model_figures.R's .gt_arms()
+#' applies the same rule).
+bayes_gt_sensitivity_specs <- function(base) {
+  alt_gt <- setdiff(get0("GT_SENSITIVITY_PROFILES", ifnotfound = c("short", "long")), base$gt)
+  stem <- bayes_gt_arm_stem(base$label)
+  # A time-varying FORM keeps its engine and switches, so the arms of a featured form are the
+  # same form refitted at the other generation times ("...-tvfrailty-gtshort").
+  out <- lapply(alt_gt, function(gk)
+    c(list(mob = base$mob, gt = gk, cov = base$cov, link = base$link %||% "cloglog",
+           label = paste0(stem, "-gt", gk), tv = "none", sensitivity = TRUE),
+      base[intersect(c("engine", "form", "use_rw", "use_frailty"), names(base))]))
+  if (length(out))
+    message(sprintf("[bayes grid] generation-time sensitivity arms of %s: %s",
+                    base$label, paste(alt_gt, collapse = ", ")))
+  out
+}
+
+#' Is this grid spec fitted by the Stan engine (a time-varying form, 21c_frailty_models.R)?
+#' ONE predicate for every dispatch site: a form spec carries tv = "none", so a site that tested
+#' only `tv` would silently refit it as the brms fixed-beta model.
+.spec_is_stan <- function(g) identical(g$engine %||% "brms", "stan")
+
+#' The time-varying FORMS of one fixed-beta candidate (TV_FORMS, 00_config.R): the same kernel,
+#' covariates and generation time, refitted by the Stan engine. They are CANDIDATES (stage 2 of
+#' the selection, select_featured_two_stage(), 16_invasion_eval.R), not sensitivity arms.
+bayes_tv_form_specs <- function(base) {
+  if (.spec_is_stan(base) || isTRUE(base$sensitivity) || !identical(base$tv %||% "none", "none"))
+    stop(sprintf("[bayes grid] the time-varying forms generalise a fixed-beta candidate; %s is not one.",
+                 base$label), call. = FALSE)
+  if (!identical(base$link %||% "cloglog", "cloglog"))
+    stop(sprintf("[bayes grid] the Stan engine is cloglog-only; %s uses the %s link.",
+                 base$label, base$link), call. = FALSE)
+  forms <- get0("TV_FORMS", ifnotfound = list())
+  lapply(names(forms), function(sfx) {
+    f <- forms[[sfx]]
+    list(mob = base$mob, gt = base$gt, cov = base$cov, link = "cloglog",
+         label = paste0(base$label, "-", sfx), tv = "none", sensitivity = FALSE,
+         engine = "stan", form = f$form, use_rw = isTRUE(f$use_rw),
+         use_frailty = isTRUE(f$use_frailty), base_label = base$label)
+  })
+}
+
+#' The LFO closure for ANY grid spec: brms (fixed beta or a brms tv arm) or a Stan form. One
+#' factory, so the main grid, the forms and the generation-time arms are cross-validated by the
+#' same code. `iter_brms` / `iter_stan` are the back-test sampling efforts (run_all.R: 600 and
+#' TV_FORM_ITER).
+make_suite_lfo_model <- function(sp, mobility_matrices, gt_pmfs, covariates, osrm_mat, zones_all,
+                                 linelist, trunc_delay, iter_brms = 600L,
+                                 iter_stan = get0("TV_FORM_ITER", ifnotfound = 1000L),
+                                 diag_dir = NULL) {
+  if (.spec_is_stan(sp))
+    make_stan_form_lfo_model(sp, mobility_matrices, gt_pmfs, covariates, osrm_mat, zones_all,
+                             linelist = linelist, trunc_delay = trunc_delay, iter = iter_stan,
+                             diag_dir = diag_dir)
+  else
+    make_bayes_lfo_model(sp$mob, sp$gt, sp$cov, mobility_matrices, gt_pmfs, covariates, osrm_mat,
+                         zones_all, iter = iter_brms, link = sp$link %||% "cloglog",
+                         tv = sp$tv %||% "none", linelist = linelist, trunc_delay = trunc_delay)
+}
+
+#' The time-varying forms of `base`, or none (list()) when it cannot have any: forms exist only of
+#' a fixed-beta, cloglog, non-sensitivity brms candidate (bayes_tv_form_specs() refuses anything
+#' else -- e.g. a logit sensitivity model that won stage 1).
+bayes_tv_forms_of <- function(base) {
+  if (is.null(base) || .spec_is_stan(base) || isTRUE(base$sensitivity) ||
+      !identical(base$link %||% "cloglog", "cloglog") || !identical(base$tv %||% "none", "none"))
+    return(list())
+  bayes_tv_form_specs(base)
+}
+
+#' The grid spec of a model LABEL: a member of `grid`, or a time-varying FORM of one
+#' ("<candidate>-tvfrailty", bayes_tv_form_specs()). NULL when the label names neither -- a
+#' generation-time arm, an ensemble, a baseline, or a model the grid does not compose. The ONE
+#' resolver every consumer of a featured label uses (run_all.R, 46, 47, 50, 52, the cascade), so
+#' a featured form is never mistaken for, or silently replaced by, its fixed-beta parent.
+bayes_spec_for_label <- function(label, grid) {
+  if (is.null(label) || length(label) != 1L || is.na(label)) return(NULL)
+  hit <- Filter(function(g) identical(g$label, label), grid)
+  if (length(hit) == 1L) return(hit[[1]])
+  if (length(hit) > 1L)
+    stop(sprintf("[bayes grid] label %s names %d specs.", label, length(hit)), call. = FALSE)
+  sfx <- tv_form_of(label)
+  if (is.na(sfx) || grepl(get0("SENSITIVITY_ARM_REGEX", ifnotfound = "-(gtshort|gtlong)$"), label))
+    return(NULL)
+  base <- Filter(function(g) identical(g$label, sub(paste0("-", sfx, "$"), "", label)), grid)
+  if (length(base) != 1L) return(NULL)
+  hit <- Filter(function(g) identical(g$label, label), bayes_tv_forms_of(base[[1]]))
+  if (length(hit) == 1L) hit[[1]] else NULL
+}
+
+#' The spec of the model the LAST run featured (model_selection.json), for
+#' bayes_default_grid(gt_arms = TRUE). A featured form resolves to the form. No fallback: a
+#' missing or unresolvable selection is an error, because arms built on any other model would be
+#' labelled as the featured model's.
+.bayes_featured_spec_from_selection <- function(g) {
+  f <- file.path(get0("OUT_DIR", ifnotfound = file.path(here::here(), "spatiotemporal", "outputs")),
+                 "key_outputs", "model_selection.json")
+  if (!file.exists(f))
+    stop("[bayes grid] gt_arms = TRUE needs the featured model, but model_selection.json is absent.",
          call. = FALSE)
-  # 2. the pipeline's own selection record. STRIP any variant suffix the previous run's
-  #    winner may carry: if a tv variant or a GT arm was featured last time, the label is
-  #    e.g. "Bayes-M14-fill-geo-tvrw1", and building variants on THAT would produce
-  #    "...-tvrw1-tvrw1" — a label no grid generates and a model nothing can fit. The base
-  #    of a variant is its fixed-beta, anchor-GT parent, which is what belongs here.
-  lab_sel <- tryCatch({
-    f <- file.path(get0("OUT_DIR", ifnotfound = file.path(here::here(), "spatiotemporal", "outputs")),
-                   "key_outputs", "model_selection.json")
-    if (!file.exists(f)) NULL else {
-      sel <- jsonlite::fromJSON(f, simplifyVector = TRUE)
-      m <- sel$featured$bayesian$method
-      if (is.null(m) || !length(m) || is.na(m[1])) m <- sel$featured$headline$method
-      if (is.null(m) || !length(m) || is.na(m[1])) NULL
-      else sub("-(tvtrend|tvweek|tvrw1|tvar1|tvgp|gtshort|gtlong)$", "", as.character(m[1]))
-    }
-  }, error = function(e) NULL)
-  b <- pick(lab_sel)
-  if (!is.null(b)) return(b)
-  if (!is.null(lab_sel) && length(lab_sel) && !is.na(lab_sel[1]))
-    warning(sprintf(paste0("[bayes grid] the selected model '%s' is not in the current grid, so ",
-                           "the time-varying variants cannot be built on it; falling back to the ",
-                           "primary kernel. Re-point TV_BETA_BASE_MODEL, or re-run selection."),
-                    lab_sel[1]), call. = FALSE)
-  # 3. fallback: the richest (most covariates) spec on the primary kernel, then the richest
-  #    spec of all. Deterministic ties: first by covariate count, then by label order.
-  prim <- as.character(get0("MOBILITY_PRIMARY", ifnotfound = NA_character_))
-  on_prim <- Filter(function(x) identical(x$mob, prim) && identical(x$link, "cloglog"), cand)
-  pool <- if (length(on_prim)) on_prim else cand
-  ord <- order(-vapply(pool, function(x) length(x$cov), integer(1)),
-               vapply(pool, function(x) x$label, character(1)), method = "radix")
-  b <- pool[[ord[1]]]
-  warning(sprintf(paste0("[bayes grid] no usable model selection was found; the time-varying ",
-                         "variants are built on '%s'. They generalise THAT model, not ",
-                         "necessarily the one this run selects."), b$label), call. = FALSE)
-  b
+  m <- jsonlite::fromJSON(f, simplifyVector = TRUE)$featured$bayesian$method
+  sp <- bayes_spec_for_label(if (length(m)) as.character(m[1]) else NA_character_, g)
+  if (is.null(sp))
+    stop(sprintf("[bayes grid] the featured model %s in model_selection.json is not in this grid.",
+                 if (length(m)) m[1] else "NULL"), call. = FALSE)
+  sp
 }
 
 #' Label of a model's source-cell fill twin, as bayes_default_grid() names it.
@@ -2444,6 +2524,15 @@ BAYES_H2_PROJECTION <- "epinow2-R-draws x per-draw-posterior-hazard v1"
   d <- d[is.finite(d) & d > 0]
   d <- d[names(d) %in% as.character(horizons)]
   if (!length(d)) return(NULL)
+  # UNCERTAINTY IN DELTA (2026-10-14). When the table carries the Gamma posterior of the single
+  # factor (16b: gamma_shape, gamma_rate; identical on every horizon row), attach it so
+  # .scale_invasion_draws() draws delta per posterior draw instead of fixing it.
+  if (all(c("gamma_shape", "gamma_rate") %in% names(r))) {
+    gs <- unique(as.numeric(r$gamma_shape)); gr <- unique(as.numeric(r$gamma_rate))
+    if (length(gs) == 1L && length(gr) == 1L && is.finite(gs) && is.finite(gr) && gs > 0 && gr > 0) {
+      attr(d, "gamma_shape") <- gs; attr(d, "gamma_rate") <- gr
+    }
+  }
   if (length(d) < length(horizons))
     warning(sprintf(paste0("[recal] %s: a delta is available for horizon(s) %s but not %s; ",
                            "the unmatched horizon(s) are left UNRECALIBRATED, so probabilities ",
@@ -2458,11 +2547,17 @@ BAYES_H2_PROJECTION <- "epinow2-R-draws x per-draw-posterior-hazard v1"
 #' observation link), predict the current forecast for each, collect posterior
 #' parameters, and compute loo predictive-stacking weights.
 #'
+#' EVERY MODEL IS FITTED ON ITS OWN FULL DESIGN, exactly as the back-test fits it
+#' (make_suite_lfo_model()), so the deployed recalibration factor -- fitted on the back-test --
+#' is applied to the model it was fitted for. Only the stacking LOO is restricted to the rows
+#' common to the stacked models (below). The time-varying forms (engine "stan") are fitted by
+#' 21c_frailty_models.R on the same design and summarised by the same draws machinery.
+#'
 #' @param delta_tbl optional data.frame(method, horizon, delta) of POOLED post-hoc
 #'   recalibration factors (16b_invasion_recalibration.R). When supplied, each suite
 #'   model's current forecast is recalibrated with its OWN delta, applied to the
 #'   cumulative hazard inside the posterior draws so every summary — mean, median,
-#'   90% CrI, sd, infection scale — and the rank credible interval stay exact. A model
+#'   90% CrI, sd — and the rank credible interval stay exact. A model
 #'   with no matching row is left unrecalibrated. NULL (default) = no recalibration.
 fit_bayes_suite <- function(zone_week_nc, mobility_matrices, gt_pmfs, covariates,
                             osrm_mat, zones_all, affected_zones, horizons,
@@ -2478,6 +2573,15 @@ fit_bayes_suite <- function(zone_week_nc, mobility_matrices, gt_pmfs, covariates
                             trunc_delay = NULL) {
   if (is.null(grid)) grid <- bayes_default_grid(mobility_matrices)
   grid <- Filter(function(g) !is.null(mobility_matrices[[g$mob]]), grid)
+  .any_stan <- any(vapply(grid, .spec_is_stan, logical(1)))
+  if (.any_stan) {
+    # The forms exist only on the rolling design; refuse here rather than lose the whole suite
+    # (and possibly the featured model) to a per-model error below.
+    .stan_form_require_rolling(linelist, trunc_delay)
+    # Compile ONCE in this process before any parallel fit, so workers find an up-to-date
+    # executable and never compile concurrently into the same directory.
+    invisible(frailty_stan_model())
+  }
 
   # ---- Pass 1: build every design (cheap; no MCMC yet) ----------------------
   designs <- list()
@@ -2496,36 +2600,34 @@ fit_bayes_suite <- function(zone_week_nc, mobility_matrices, gt_pmfs, covariates
     return(list(fits = list(), preds = tibble::tibble(), params = tibble::tibble(),
                 weights = NULL, stacked = FALSE, grid = grid))
 
-  # loo predictive stacking requires every model's pointwise log-likelihood to be
-  # over the SAME observations. Each design's at-risk set (!affected & Lambda>0)
-  # depends on the mobility kernel (M8 short-trip rows are sparse; M4 gravity is
-  # dense), so the raw designs have different row counts and loo_model_weights()
-  # would abort. We therefore fit every suite model on the COMMON at-risk zones
-  # (intersection of the designs' zones), keeping the full-design center/scale so
-  # standardisation is unchanged. Predictions are still made on each model's full
-  # forecast grid (bayes_forecast_offsets), so forecast coverage is not reduced —
-  # only the rows used to estimate the stacking weights are aligned.
-  # Key each at-risk observation by (zone, week). loo_model_weights matches the
-  # per-model pointwise log-likelihoods BY POSITION, so we both intersect to the
-  # common observations AND sort every model's fit data into the same canonical key
-  # order below, otherwise the weights would be computed on mismatched rows.
+  # THE STACKED SET is the stage-1 CANDIDATE grid: brms models that are not sensitivity arms.
+  # The generation-time arms (refits of one model under another assumption) and the time-varying
+  # forms (refits of one specification, stage 2 of the selection) are fitted and forecast here
+  # but are not members of the loo-stacked ensemble, whose membership therefore does not depend
+  # on which model this run happens to feature.
+  stack_members <- names(designs)[vapply(designs, function(x)
+    !isTRUE(x$g$sensitivity) && !.spec_is_stan(x$g), logical(1))]
+  # loo predictive stacking requires every member's pointwise log-likelihood over the SAME
+  # observations. Each design's at-risk set (!affected & Lambda>0) depends on the mobility
+  # kernel, so the LOO rows are the (zone, week) keys COMMON to the stacked designs, in one
+  # canonical order (loo_model_weights matches pointwise values BY POSITION). Models are fitted
+  # on their full designs; the LOO is evaluated on these rows of each fit.
   key_of <- function(dd) paste(dd$.zone, dd$.week, sep = "@")
-  common_keys <- Reduce(intersect, lapply(designs, function(x) key_of(x$des$d)))
-  # Also require the grid covariates to be non-NA on the shared rows: brms drops
-  # rows with any NA in a formula term, so a covariate (geo) model would silently
-  # fit on FEWER complete cases than an intercept-only model even on identical
-  # (zone,week) keys — which breaks loo's equal-observations requirement. Restrict
-  # to rows that are complete for every covariate any suite model uses.
-  grid_covs <- unique(unlist(lapply(designs, function(x) x$g$cov)))
+  common_keys <- if (length(stack_members))
+    Reduce(intersect, lapply(designs[stack_members], function(x) key_of(x$des$d))) else character(0)
+  # Also require the members' covariates to be non-NA on the shared rows (brms drops rows with
+  # any NA in a formula term), so every member's LOO is over identical complete cases.
+  grid_covs <- unique(unlist(lapply(designs[stack_members], function(x) x$g$cov)))
   if (length(grid_covs) && length(common_keys)) {
-    for (x in designs) {
+    for (x in designs[stack_members]) {
       dd <- x$des$d; present <- intersect(grid_covs, names(dd))
       if (length(present))
         common_keys <- intersect(common_keys, key_of(dd)[stats::complete.cases(dd[, present, drop = FALSE])])
     }
   }
-  message(sprintf("[bayes] suite: %d models; %d common complete-case (zone,week) rows for stacking alignment",
-                  length(designs), length(common_keys)))
+  message(sprintf(paste0("[bayes] suite: %d models (%d stacked); %d common complete-case ",
+                         "(zone,week) rows for the stacking LOO"),
+                  length(designs), length(stack_members), length(common_keys)))
 
   # Week index -> calendar date, so every beta_t trajectory is dated rather than carrying a
   # bare column index. build_invasion_design() numbers `.week` by COLUMN POSITION in the count
@@ -2548,42 +2650,50 @@ fit_bayes_suite <- function(zone_week_nc, mobility_matrices, gt_pmfs, covariates
                                             week_start = max(zone_week_nc$week_start),
                                             issue_date = analysis_date)
 
-  # ---- Pass 2: fit each model on the aligned row-set, predict on the full grid --
+  # ---- Pass 2: fit each model on its full design, predict on the full grid ---
   # Every model is independent. Reuse the future pool configured by run_all.R;
   # PARALLEL_JOBS=1 retains the historical sequential execution and ordering.
   fit_one <- function(nm) {
     g <- designs[[nm]]$g; des <- designs[[nm]]$des
-    message(sprintf("[bayes] fitting %s (mobility %s, %d covariates) ...",
-                    g$label, g$mob, length(g$cov)))
-    des_fit <- des
-    if (length(common_keys) >= 10L) {           # align rows when a usable common set exists
-      keep <- key_of(des$d) %in% common_keys
-      des_fit$d <- des$d[keep, , drop = FALSE]
-      des_fit$d <- des_fit$d[order(key_of(des_fit$d)), , drop = FALSE]   # canonical order for loo
-      des_fit$n_events <- sum(des_fit$d$invaded); des_fit$n_obs <- nrow(des_fit$d)
-    }
-    # tv = "week" needs the group-level fitter and the matching predictor (which injects the
-    # forecast week's .week_f level). tv = "trend" is an ordinary covariate model — it must NOT
-    # take the tv branch, or the trend term would be fitted twice over.
+    stan <- .spec_is_stan(g)
+    message(sprintf("[bayes] fitting %s (mobility %s, %d covariates%s) ...",
+                    g$label, g$mob, length(g$cov), if (stan) paste0(", Stan form ", g$form) else ""))
     .tv  <- g$tv %||% "none"
-    fit <- if (.tv_is_structural(.tv))
-             fit_bayes_renewal_tv(des_fit, cov_spec = g$cov, iter = iter,
-                                  link = g$link %||% "cloglog", tv = .tv)
-           else
-             fit_bayes_renewal(des_fit, cov_spec = g$cov, iter = iter,
-                               link = g$link %||% "cloglog")
+    fit <- if (stan) {
+      ex <- invasion_exposure(zone_week_nc, linelist, zones_all, mobility_matrices, gt_pmfs,
+                              covariates, osrm_mat, g$mob, g$gt, intersect(g$cov, des$feat),
+                              des$center, des$scale, trunc_delay)
+      stan_invasion_fit(des, ex, zones_all, g$cov, g$use_rw, g$use_frailty, iter = iter,
+                        label = g$label)
+    } else if (.tv_is_structural(.tv))
+      # tv = "week"/"rw1"/... needs the group-level fitter and the matching predictor. tv =
+      # "trend" is an ordinary covariate model and must NOT take this branch.
+      fit_bayes_renewal_tv(des, cov_spec = g$cov, iter = iter, link = g$link %||% "cloglog", tv = .tv)
+    else
+      fit_bayes_renewal(des, cov_spec = g$cov, iter = iter, link = g$link %||% "cloglog")
     if (is.null(fit)) return(NULL)
     pr <- NULL; pr_raw <- NULL
     off <- tryCatch(bayes_forecast_offsets(zone_week_nc, mobility_matrices, gt_pmfs,
              covariates, osrm_mat, zones_all, g$mob, g$gt, g$cov, horizons,
-             rt_draws = rt_by_gt[[g$gt]]), error = function(e) NULL)
+             rt_draws = rt_by_gt[[g$gt]]),
+             error = function(e) {
+               warning(sprintf("[bayes] %s: forecast offsets failed (%s); it has no live forecast.",
+                               g$label, conditionMessage(e)), call. = FALSE)
+               NULL })
     if (!is.null(off)) {
       .dl <- .suite_delta_for(delta_tbl, g$label, horizons)
-      # BOTH probability scales from one posterior-linear-predictor pass: `pred` is the
-      # deployed (recalibrated) forecast that every primary product uses, `pred_raw` its
-      # uncorrected twin for the parallel raw artifact set. With no factor for this model
-      # the two are the same object, which is the honest answer.
-      .ps <- if (.tv_is_structural(.tv))
+      # BOTH probability scales from one set of posterior draws: `pred` is the deployed
+      # (recalibrated) forecast that every primary product uses, `pred_raw` its uncorrected
+      # twin for the parallel raw artifact set. With no factor for this model the two are the
+      # same object, which is the honest answer.
+      .ps <- if (stan) {
+               drl <- stan_invasion_forecast_draws(fit, off, horizons)
+               raw <- .finalise_invasion_summary(drl, affected_zones)
+               list(raw = raw,
+                    calibrated = if (is.null(.dl) || !length(.dl)) raw
+                                 else .finalise_invasion_summary(.scale_invasion_draws(drl, .dl),
+                                                                 affected_zones))
+             } else if (.tv_is_structural(.tv))
                predict_bayes_invasion_tv_scales(fit, off, des, horizons, affected_zones, delta = .dl)
              else
                predict_bayes_invasion_scales(fit, off, des, horizons, affected_zones, delta = .dl)
@@ -2593,26 +2703,17 @@ fit_bayes_suite <- function(zone_week_nc, mobility_matrices, gt_pmfs, covariates
         if (!is.null(pr_raw)) pr_raw$method <- g$label
       }
     }
-    # Compute the model's aligned pointwise LOO here, while the suite workers are
-    # already fanned out. Previously this was a second sequential pass over every
-    # fit and took several minutes after the parallel sampling had finished.
+    # The member's pointwise LOO on the common rows, computed here while the workers are fanned
+    # out. Only stacked members need it.
     lo <- NULL
-    if (length(common_keys) >= 10L) {
+    if (nm %in% stack_members && length(common_keys) >= 10L) {
       dd <- des$d
       dd <- dd[key_of(dd) %in% common_keys, , drop = FALSE]
       dd <- dd[order(key_of(dd)), , drop = FALSE]
-      # The tv-week fit's formula references .week_f, which fit_bayes_renewal_tv() added to
-      # its own local copy of the design — NOT to des$d. Without recreating it here brms
-      # errors on the missing grouping variable, this model's LOO comes back NULL, and
-      # stacking then fails for the ENTIRE suite (the weights block requires every model's
-      # LOO). These rows are all training weeks, so no new levels arise.
-      # Recreate the columns the tv formulas reference. fit_bayes_renewal_tv() adds .week_f to
-      # its OWN local copy of the design, not to des$d, so without this brms errors on a
-      # missing grouping variable, this model's LOO comes back NULL, and stacking then fails
-      # for the ENTIRE suite. The factor LEVELS must be the fitted ones (attr "train_weeks"),
-      # not the levels of this subset, or brms maps the same week to a different group.
-      # `.week` itself is already present (build_invasion_design writes it) and is what the
-      # ar1/gp terms read. These rows are all training weeks, so no new levels arise.
+      # The tv-week fit's formula references .week_f, which fit_bayes_renewal_tv() added to its
+      # OWN local copy of the design, not to des$d, so it is recreated here with the FITTED
+      # levels (attr "train_weeks"); without it brms errors, this LOO is NULL and stacking fails
+      # for the entire suite. These rows are all training weeks, so no new levels arise.
       if (.tv_is_structural(.tv)) {
         .twk <- attr(fit, "train_weeks")
         if (is.null(.twk)) .twk <- sort(unique(as.integer(dd$.week)))
@@ -2624,9 +2725,8 @@ fit_bayes_suite <- function(zone_week_nc, mobility_matrices, gt_pmfs, covariates
         suppressWarnings(loo::loo(llm))
       }, error = function(e) NULL)
     }
-    # Posterior trajectory of beta_t, computed HERE because this is the only place the fit and
-    # its design are both in scope, and computed for EVERY model (a fixed-beta model's flat
-    # line is the reference the time-varying variants are read against).
+    # Posterior trajectory of beta_t for EVERY model (a fixed-beta model's flat line is the
+    # reference the time-varying forms are read against).
     btj <- tryCatch(bayes_beta_trajectory(fit, des, g$label, horizons = horizons,
                                           week_dates = .week_dates),
                     error = function(e) NULL)
@@ -2652,40 +2752,32 @@ fit_bayes_suite <- function(zone_week_nc, mobility_matrices, gt_pmfs, covariates
   params <- lapply(fit_res, `[[`, "params")
   beta_traj <- Filter(Negate(is.null), lapply(fit_res, `[[`, "beta_traj"))
 
-  # ---- loo predictive stacking (Yao et al. 2018); honest fallback -----------
-  # Each worker computed its model's pointwise log-likelihood on its own aligned rows
-  # (the common complete-case (zone,week) set, in a canonical order, carrying that
-  # model's own mobility offset and covariates). Relying on each brms fit's INTERNAL
-  # loo is fragile — the fits use different mobility offsets and one may transiently
-  # fail — and yields loo objects of differing dimension that loo_model_weights
-  # rejects. Extracting log_lik on identical observations guarantees aligned
-  # dimensions, so stacking on the shared evaluation set is well defined. The expensive
-  # extraction is part of the parallel pass above; only the cheap weight calculation
-  # remains here. Falls back to an equal-weight average if any LOO calculation failed.
+  # ---- loo predictive stacking (Yao et al. 2018) over the stacked set; honest fallback ----
+  # Each member's pointwise log-likelihood is on the same common rows in the same order, so
+  # stacking on the [obs x model] matrix of pointwise ELPD is well defined. stacking_weights()
+  # on the pointwise ELPD (draws integrated out) is immune to differing draw counts between
+  # fits, which loo_model_weights() rejects. Falls back to an equal-weight average over the
+  # stacked set if any member's fit or LOO failed.
   wts <- NULL; stacked <- FALSE
-  if (length(fits) >= 2 && length(common_keys) >= 10L) {
+  if (length(stack_members) >= 2L && length(common_keys) >= 10L) {
     wts <- tryCatch({
-      ll_list <- lapply(fit_res, `[[`, "loo")
-      if (length(ll_list) != length(fits) || any(vapply(ll_list, is.null, logical(1))))
-        stop("one or more aligned model LOO calculations failed")
-      # Collapse each model to its per-observation ELPD (draws integrated out) and
-      # stack on that [obs x model] matrix. loo_model_weights() compares full
-      # [draws x obs] matrices and rejects models with DIFFERING DRAW COUNTS — which
-      # happens when a cmdstanr chain partially fails; stacking_weights() on the
-      # pointwise ELPD is immune because the draws are already integrated out.
+      ll_list <- lapply(fit_res[intersect(stack_members, names(fit_res))], `[[`, "loo")
+      if (length(ll_list) != length(stack_members) || any(vapply(ll_list, is.null, logical(1))))
+        stop("one or more stacked models' fits or aligned LOO calculations failed")
       lpd <- sapply(ll_list, function(l) l$pointwise[, "elpd_loo"])
       if (!is.matrix(lpd) || ncol(lpd) < 2L) stop("insufficient aligned models for stacking")
       w <- loo::stacking_weights(lpd)
       stacked <- TRUE
-      stats::setNames(as.numeric(w), names(fits)) },
+      stats::setNames(as.numeric(w), names(ll_list)) },
       error = function(e) { warning("[bayes] loo stacking failed (", conditionMessage(e),
-                                    "); reporting equal-weight average."); NULL })
+                                    "); reporting the equal-weight average of the stacked set."); NULL })
   }
   list(fits = fits, preds = dplyr::bind_rows(preds),
        preds_raw = dplyr::bind_rows(preds_raw),
        params = dplyr::bind_rows(params),
        beta_traj = if (length(beta_traj)) dplyr::bind_rows(beta_traj) else NULL,
-       weights = wts, stacked = stacked, grid = grid)
+       weights = wts, stacked = stacked, grid = grid,
+       stack_members = intersect(stack_members, names(fits)))
 }
 
 #' Data-informed posterior over the generation-time MEAN for one model spec. The GT is a fixed
@@ -2698,17 +2790,26 @@ fit_bayes_suite <- function(zone_week_nc, mobility_matrices, gt_pmfs, covariates
 bayes_gt_posterior <- function(zone_week_nc, mobility_matrices, gt_pmfs, covariates, osrm_mat,
                                zones_all, mob = "M8", cov = character(0), link = "cloglog",
                                gt_means = seq(12, 20, by = 1), gt_cv = 0.6, max_tau = 50L,
-                               prior_mean = 15.3, prior_sd = 1.5, iter = 1000L) {
-  # gt_cv and max_tau are held FIXED across the grid ON PURPOSE: that keeps the weekly GT support
-  # (all lags 1..ceil(max_tau/7) strictly positive) constant, so the at-risk set !aff & Lam>0 is
-  # GT-INVARIANT and every fit's loo is over the SAME observations — a precondition for comparing
-  # them. This is asserted below.
+                               prior_mean = 15.3, prior_sd = 1.5, iter = 1000L,
+                               # The design of the FEATURED model, so the loo comparison across
+                               # generation times is about that model: rolling as-of predictors
+                               # under the same gate and truncation as make_bayes_lfo_model() and
+                               # the deployed suite, and the same candidate set.
+                               linelist = NULL, trunc_delay = NULL) {
+  # Every fit's loo must be over the SAME observations to be comparable. The weekly kernel's
+  # support is NOT fixed by max_tau (daily_to_weekly_gt() rebuilds it from the Gamma, with a support
+  # set by its 99.9% quantile, so it lengthens with the mean), and the at-risk rows !aff & Lam > 0
+  # can therefore differ between fits; the n_obs check below refuses the comparison if they do.
+  .roll_on <- isTRUE(get0("ROLLING_PREDICTORS", ifnotfound = TRUE)) &&
+              !is.null(linelist) && !is.null(trunc_delay)
   fit_one <- function(m) {
     pmf <- tryCatch(make_gt_pmf(mean = m, sd = m * gt_cv, max_tau = max_tau), error = function(e) NULL)
     if (is.null(pmf)) return(NULL)
     des <- tryCatch(build_invasion_design(zone_week_nc, mobility_matrices, list(g = pmf),
              covariates, osrm_mat, zones_all, mob = mob, gt = "g",
-             candidates = unique(c(cov, "log_pop", "ccvi", "d_min"))), error = function(e) NULL)
+             candidates = unique(c(cov, "log_pop", "ccvi", "d_min", "healthsite_density")),
+             rolling_ll    = if (.roll_on) linelist else NULL,
+             rolling_delay = if (.roll_on) trunc_delay else NULL), error = function(e) NULL)
     if (is.null(des) || is.null(des$d) || !nrow(des$d)) return(NULL)
     fit <- fit_bayes_renewal(des, cov_spec = cov, iter = iter, link = link)
     if (is.null(fit)) return(NULL)
@@ -2757,12 +2858,19 @@ bayes_gt_posterior <- function(zone_week_nc, mobility_matrices, gt_pmfs, covaria
 }
 
 #' SENSITIVITY of the featured Bayesian model to the two-stage nowcast INPUT. The suite feeds
-#' epinowcast-corrected training counts into the renewal fit as a fixed second stage, which
+#' nowcast-corrected training counts (the deterministic correction, apply_nowcast_correction(),
+#' 04_nowcasting.R; epinowcast is one of the variants here) into the renewal fit as a fixed second stage, which
 #' ignores nowcast uncertainty; a fully joint model would estimate the nowcast and the invasion
 #' hazard together. As a pragmatic check we REFIT the same model spec on several nowcast
 #' treatments of the training counts (each `zw_variants[[nm]]` must carry a `confirmed_nc`
 #' column) and return the posterior draws of beta0 per scenario, so a reader can see whether the
 #' nowcast choice materially shifts the inference. Returns tibble(scenario, .draw, beta0, ...).
+# NOTE ON SCOPE. This refits on the SHARED-MATRIX design (no rolling as-of predictors), because the
+# nowcast variant is the thing varied: under rolling predictors every training transition's import
+# force is rebuilt from the as-of counts with the regime's own truncation, so the variant would
+# reach only the forecast row and the comparison would be empty. It is therefore a diagnostic of
+# how much the nowcast input moves beta0 in that design, not a statement about the featured
+# model's beta0 (which is fitted with rolling predictors).
 bayes_nowcast_sensitivity <- function(zw_variants, mobility_matrices, gt_pmfs, covariates,
                                       osrm_mat, zones_all, mob = "M8", gt = "medium",
                                       cov = character(0), link = "cloglog", iter = 1000L) {
@@ -2801,7 +2909,18 @@ bayes_nowcast_sensitivity <- function(zw_variants, mobility_matrices, gt_pmfs, c
 bayes_stacked_prediction <- function(suite) {
   if (is.null(suite$preds) || !nrow(suite$preds)) return(NULL)
   w <- suite$weights
-  if (is.null(w)) { nm <- unique(suite$preds$method); w <- stats::setNames(rep(1 / length(nm), length(nm)), nm) }
+  # Equal-weight fallback over the STACKED set (fit_bayes_suite()'s stack_members), never over
+  # every forecast in the suite: the generation-time arms and the time-varying forms are not
+  # ensemble members.
+  if (is.null(w)) {
+    # is.null(), not %||%: an EMPTY stacked set (character(0)) means no member fitted, and must not
+    # fall back to every forecast in the suite. NULL only for a suite object predating
+    # stack_members.
+    nm <- intersect(if (is.null(suite$stack_members)) unique(suite$preds$method) else suite$stack_members,
+                    unique(suite$preds$method))
+    if (!length(nm)) return(NULL)
+    w <- stats::setNames(rep(1 / length(nm), length(nm)), nm)
+  }
   lab <- if (isTRUE(suite$stacked) && !is.null(suite$weights)) "Bayes-stack (loo)" else "Bayes-stack (equal-weight)"
   # loo stacking (Yao 2018) is a LINEAR POOL of the member predictive distributions. The
   # pooled MEAN is the weighted mean of member means, but the pooled INTERVAL is NOT the
@@ -2903,35 +3022,53 @@ make_bayes_lfo_model <- function(mob, gt, cov_spec, mobility_matrices, gt_pmfs,
 #' week <= cutoff) to trace the POSTERIOR import coefficient beta0 and covariate
 #' hazard ratios over time, carrying proper posterior 90% credible intervals. (This replaced
 #' the retired frequentist compute_beta_over_folds / compute_params_over_time traces, whose
-#' per-fold Firth GLM refits drew figures FIGURE_KEEP then gated out.) A
-#' covariate spec is used so BOTH beta0 and covariate-HR traces are produced.
+#' per-fold Firth GLM refits drew figures FIGURE_KEEP then gated out.)
+#'
+#' EACH REFIT IS THE BACK-TEST'S OWN FIT OF THE MODEL AT THAT CUTOFF: the training counts come
+#' from the same dispatcher as run_invasion_lfo() (asof_counts_source(): what was known at the
+#' origin cut + 6, nowcast with the regime's truncation), and the design and fit are those of
+#' make_bayes_lfo_model() -- the same candidate set, the rolling as-of predictors under the same
+#' gate, the same link. Until 2026-10-14 the traces were refitted WITHOUT the rolling predictors
+#' and with the generation time and covariates hard-coded, so the published beta0 and hazard
+#' ratios described a different model from the one they were labelled with (at the last cutoff
+#' beta0 0.192 against the featured fit's 0.115, and the d_min hazard ratio on the other side
+#' of 1).
+#' @param mob,gt,cov_spec,link the FEATURED model's specification (run_all.R reads it from the
+#'   grid entry of the selected model).
+#' @param delay the AS-OF truncation, as passed to run_invasion_lfo() (`delay`).
+#' @param form the featured grid spec when it is a time-varying FORM (engine "stan"), else NULL.
+#'   A form is refitted by the Stan engine with the back-test's effort (iter_stan); its traced
+#'   beta is the import coefficient at the LAST training week, exp(b0 + u_S) -- for an RW1 form
+#'   exp(b0) alone is the level before the first week -- and only covariate hazard ratios enter
+#'   `params` (theta and sigma are not hazard ratios).
 compute_bayes_params_over_time <- function(zone_week_outbreak, cutoffs, mobility_matrices,
                                            gt_pmfs, covariates, osrm_mat, zones_all,
-                                           mob = "M8", gt = "medium",
-                                           cov_spec = c("log_pop", "ccvi", "d_min"),
-                                           iter = 800L, nowcast_fn = NULL,
-                                           linelist = NULL,
-                                           # The AS-OF truncation. These origins are built by
-                                           # .asof_train_slice()/reaggregate_asof(), so they
-                                           # are the asof regime and must be nowcast with it —
-                                           # the same object run_invasion_lfo() and
-                                           # 33b_cascade_calibration.R receive. Without it this
-                                           # path fell through to the onset->sample delay, so
-                                           # the published beta0 trace was produced under a
-                                           # DIFFERENT nowcast from the LFO that selected and
-                                           # calibrated the models — the one cross-read a
-                                           # reviewer would actually make. NULL warns.
-                                           delay = NULL) {
+                                           mob, gt, cov_spec, link = "cloglog",
+                                           iter = 600L, nowcast_fn = NULL,
+                                           linelist = NULL, delay = NULL, form = NULL,
+                                           iter_stan = get0("TV_FORM_ITER", ifnotfound = 1000L)) {
+  .stan <- !is.null(form) && .spec_is_stan(form)
+  if (.stan) .stan_form_require_rolling(linelist, delay)
   if (is.null(nowcast_fn)) nowcast_fn <- get0("apply_nowcast_correction")
-  # As-of training slice, matching run_invasion_lfo(): see .asof_train_slice()
-  # (20_forecast_detail.R) for why the final-count slice was a revision leak.
-  .slice <- get0(".asof_train_slice")
+  zones <- sort(unique(zone_week_outbreak$health_zone))
+  weeks <- sort(unique(zone_week_outbreak$week_start))
+  .roll_on <- isTRUE(get0("ROLLING_PREDICTORS", ifnotfound = TRUE)) &&
+              !is.null(linelist) && !is.null(delay)
   fit_one <- function(ci) {
     cut <- cutoffs[ci]            # index, NOT `for (cut in cutoffs)` — iterating a
                                   # Date vector unclasses cut to numeric (throws on R<4.3)
-    zw  <- if (is.function(.slice)) .slice(zone_week_outbreak, cut, linelist, zones_all)
-           else zone_week_outbreak %>% dplyr::filter(week_start <= cut)
-    zwn <- tryCatch(nowcast_fn(zw, analysis_date = cut + 6, delay = delay),
+    # Training counts exactly as run_invasion_lfo() builds them for this round.
+    src <- if (!is.null(linelist) && exists("asof_counts_source", mode = "function"))
+      tryCatch(asof_counts_source(linelist, zones, cut + 6, week_spine = weeks[weeks <= cut],
+                                  delay_recensor = delay),
+               error = function(e) {
+                 warning(sprintf("[bayes-folds] fold %s: as-of reconstruction failed (%s); this fold falls back to the final-count (revision-leaky) slice.",
+                                 format(cut), conditionMessage(e)), call. = FALSE); NULL })
+    zw <- if (!is.null(src)) dplyr::filter(src$raw, week_start <= cut)
+          else dplyr::filter(zone_week_outbreak, week_start <= cut)
+    .nd <- if (!is.null(src)) src$nowcast_date else cut + 6
+    .dl <- if (!is.null(src)) src$delay else delay
+    zwn <- tryCatch(nowcast_fn(zw, analysis_date = .nd, delay = .dl),
                     error = function(e) {
                       # Named handler with a WARNING and a column guard, matching
                       # run_invasion_lfo() (16_invasion_eval.R). Returning `zw` bare was
@@ -2948,17 +3085,32 @@ compute_bayes_params_over_time <- function(zone_week_outbreak, cutoffs, mobility
                     })
     des <- tryCatch(build_invasion_design(zwn, mobility_matrices, gt_pmfs, covariates,
              osrm_mat, zones_all, mob = mob, gt = gt,
-             candidates = unique(c(cov_spec, "log_pop", "ccvi", "d_min"))),
+             candidates = unique(c(cov_spec, "log_pop", "ccvi", "d_min", "healthsite_density")),
+             rolling_ll    = if (.roll_on) linelist else NULL,
+             rolling_delay = if (.roll_on) delay else NULL),
              error = function(e) NULL)
     if (is.null(des) || des$n_events < 1L) return(NULL)
-    fit <- tryCatch(fit_bayes_renewal(des, cov_spec = cov_spec, iter = iter, chains = 2L),
-                    error = function(e) NULL)
+    fit <- tryCatch(if (.stan) {
+        ex <- invasion_exposure(zwn, linelist, zones_all, mobility_matrices, gt_pmfs, covariates,
+                                osrm_mat, mob, gt, intersect(cov_spec, des$feat), des$center,
+                                des$scale, delay)
+        stan_invasion_fit(des, ex, zones_all, cov_spec, form$use_rw, form$use_frailty,
+                          iter = iter_stan, label = form$label)
+      } else fit_bayes_renewal(des, cov_spec = cov_spec, iter = iter, chains = 2L, link = link),
+      error = function(e) NULL)
     if (is.null(fit)) return(NULL)
     tb <- bayes_param_table(fit, "")
     ic <- tb %>% dplyr::filter(is_intercept)
-    bl <- if (nrow(ic)) tibble::tibble(cutoff = as.Date(cut),
+    bl <- if (.stan && fit$use_rw) {
+      b <- exp(fit$draws[, "b0"] + fit$draws[, sprintf("u[%d]", fit$S)])
+      tibble::tibble(cutoff = as.Date(cut), beta0 = stats::median(b),
+                     beta0_lo = stats::quantile(b, 0.05, names = FALSE),
+                     beta0_hi = stats::quantile(b, 0.95, names = FALSE))
+    } else if (nrow(ic)) tibble::tibble(cutoff = as.Date(cut),
       beta0 = ic$hr[1], beta0_lo = ic$lo[1], beta0_hi = ic$hi[1]) else NULL
-    cv <- tb %>% dplyr::filter(!is_intercept)
+    # Covariate ratios only: the process parameters and an RW1 form's last-training-week level
+    # (beta_last_training_week, an import coefficient) are not hazard ratios per +1 SD.
+    cv <- tb %>% dplyr::filter(!is_intercept, effect_scale %in% c("hazard ratio", "odds ratio"))
     pl <- if (nrow(cv)) cv %>%
       dplyr::transmute(cutoff = as.Date(cut), term, hr, lo, hi)
       else NULL
@@ -2977,8 +3129,11 @@ compute_bayes_params_over_time <- function(zone_week_outbreak, cutoffs, mobility
   res <- Filter(Negate(is.null), res)
   pl <- Filter(Negate(is.null), lapply(res, `[[`, "params"))
   bl <- Filter(Negate(is.null), lapply(res, `[[`, "beta"))
-  list(params = if (length(pl)) dplyr::bind_rows(pl) else NULL,
-       beta   = if (length(bl)) dplyr::bind_rows(bl) else NULL)
+  # Under an RW1 form each fold's beta0 is the level at its last training week, exp(b0 + u_S),
+  # not exp(intercept); the attribute lets the figure say which it plots.
+  beta <- if (length(bl)) dplyr::bind_rows(bl) else NULL
+  if (!is.null(beta)) attr(beta, "rw1_level") <- isTRUE(.stan && isTRUE(form$use_rw))
+  list(params = if (length(pl)) dplyr::bind_rows(pl) else NULL, beta = beta)
 }
 
 message("[bayes] 21_bayesian_renewal.R loaded — Bayesian renewal invasion suite (brms; cloglog/logit links, full grid).")

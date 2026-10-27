@@ -25,9 +25,9 @@ CASCADE_REPORT_HORIZONS <- c(4L, 8L, 13L)
 # M iterations = draws over BOTH parameter uncertainty (posterior of (beta0, gamma), R_eff and
 # delta) AND process stochasticity (branching + Bernoulli seeding). k_indiv is a FIXED scalar
 # (CASCADE_K_INDIV), swept in sensitivity (41_kindiv_sweep.R) but never drawn, so the credible
-# intervals contain NO overdispersion uncertainty — the intervals used to claim otherwise. Default
-# 1000 gives Monte-Carlo SE < ~0.005 on mid-range reach probabilities; production
-# runs use 2000+. Set via env var CASCADE_N_MC to override without editing.
+# intervals contain NO overdispersion uncertainty — the intervals used to claim otherwise. The
+# default, 2000, gives a Monte-Carlo SE of ~0.011 on a reach probability of 0.5 and less away from
+# it (sqrt(p(1-p)/M)). Set via env var CASCADE_N_MC to override without editing.
 CASCADE_N_MC <- as.integer(Sys.getenv("CASCADE_N_MC",
                   unset = if (identical(Sys.getenv("CASCADE_SMOKE"), "1")) "40" else "2000"))
 CASCADE_SEED <- get0("RANDOM_SEED", ifnotfound = 20260704L)
@@ -42,11 +42,19 @@ CASCADE_N_REP <- as.integer(Sys.getenv("CASCADE_N_REP",
 # ---------------------------------------------------------------------------
 # Hazard model reused from the Bayesian suite (PLAN §3.3)
 # ---------------------------------------------------------------------------
-# ASSUMPTION: the cascade's per-week seeding hazard IS the validated cloglog
-# invasion hazard from 21_bayesian_renewal.R, p = 1 - exp(-beta_i * Lambda_i),
-# beta_i = exp(beta0 + sum_m gamma_m z_{m,i}). We MUST use a COVARIATE-BEARING
-# posterior (not the intercept-only featured model) so the dynamically-updated
-# d_min frontier covariate modulates the hazard as the front advances.
+# ASSUMPTION: the cascade's per-week seeding hazard is the cloglog invasion hazard of
+# 21_bayesian_renewal.R, p = 1 - exp(-beta_i * Lambda_i), beta_i = exp(beta0 + sum_m
+# gamma_m z_{m,i}), REFIT here (run_cascade.R, and per held-out origin in 33b) with the
+# validated model's own design: the same kernel and GT, and the same ROLLING AS-OF
+# PREDICTORS (each training transition's import force from the counts known at that
+# transition; ROLLING_PREDICTORS, 00_config.R), and the featured model's FORM of the import
+# coefficient (CASCADE_FORM below: fixed beta, RW1 drift, gamma frailty, or both). Without the
+# rolling design the refit's
+# intercept sits on a different scale from the cross-validated model's, so any delta carried
+# between the two — 16b's short-horizon factor included — would not mean the same thing. We
+# MUST use a COVARIATE-BEARING posterior (the -geo twin, not the intercept-only featured
+# model) so the dynamically-updated d_min frontier covariate modulates the hazard as the
+# front advances.
 #
 # MOBILITY KERNEL: track the LFO-CV-selected model so the cascade's seeding hazard
 # stays the *validated* short-horizon model rather than a hardcoded (drift-prone)
@@ -54,7 +62,7 @@ CASCADE_N_REP <- as.integer(Sys.getenv("CASCADE_N_REP",
 # key_outputs/model_selection.json and pair it with the -geo covariate spec above
 # (the selected variant may be constant-beta `-med`, but the cascade needs the
 # covariate-bearing `-geo` twin for the dynamic d_min frontier). Precedence:
-#   CASCADE_KERNEL env override > CV-selected kernel > "M13-dist-fill" fallback.
+#   CASCADE_KERNEL env override > CV-selected kernel > CASCADE_KERNEL_FALLBACK (= MOBILITY_PRIMARY).
 # Extract the kernel token: strip the "Bayes-" prefix and any trailing beta/GT spec
 # suffix, KEEPING "-dist" (part of the kernel).
 # The suffix set must track bayes_default_grid() (21_bayesian_renewal.R). It did not:
@@ -115,6 +123,83 @@ CASCADE_GT       <- get0("GT_PRIMARY", ifnotfound = "medium")        # 15.3 d me
 # d_min stays the dynamic frontier term: the cascade recomputes it as the front advances.
 CASCADE_COV_SPEC <- get0("BAYES_GEO_COVARIATES", ifnotfound = c("ccvi", "d_min"))
 CASCADE_LINK     <- "cloglog"
+# THE FEATURED MODEL'S FORM of the import coefficient (00_config.R, TIME-VARYING FORMS). The
+# selection is two-stage, and a time-varying form can be featured; the cascade then refits THAT
+# form (with the covariate set above, for the dynamic d_min term) instead of fixed beta:
+#   rw1          the weekly drift u_t continues as a random walk over the 13 weeks, one path per
+#                parameter group (epistemic, like the national R walk), from the fitted level;
+#   frailty      each never-invaded zone's first-invasion hazard is conditioned on its own
+#                cumulative hazard, which the simulator carries from the fit's training exposure
+#                and accumulates week by week (the frailty depletes exposed, silent zones);
+#   rw1_frailty  both.
+# Precedence: CASCADE_FORM env override (the onset-MI arms pin it, as they pin CASCADE_KERNEL) >
+# model_selection.json (featured$bayesian$spec$form, written by write_model_selection.R) >
+# "fixed" when no selection record exists (a fresh checkout), said loudly.
+# The SAME record as .cascade_selected_kernel(): featured$bayesian, else featured$headline. NA
+# when the record names no featured model (the caller says so).
+.cascade_selected_form <- function() {
+  f <- file.path(OUT_DIR, "key_outputs", "model_selection.json")
+  sel <- if (file.exists(f)) tryCatch(jsonlite::fromJSON(f), error = function(e) NULL) else NULL
+  if (is.null(sel)) return(NA_character_)
+  m <- sel$featured$bayesian$method
+  from_bayes <- !(is.null(m) || !length(m) || is.na(m[1]))
+  if (!from_bayes) m <- sel$featured$headline$method
+  if (is.null(m) || !length(m) || is.na(m[1])) return(NA_character_)
+  fm <- if (from_bayes) sel$featured$bayesian$spec$form else NULL
+  if (is.null(fm) || !length(fm) || is.na(fm[1])) {
+    # No stored spec (a record written before it was, or the headline record): decode the label.
+    sfx <- tv_form_of(as.character(m[1]))
+    fm <- if (is.na(sfx)) "fixed" else TV_FORMS[[sfx]]$form
+  }
+  as.character(fm[1])
+}
+.cascade_form_env <- Sys.getenv("CASCADE_FORM")
+CASCADE_FORM <- if (nzchar(.cascade_form_env)) .cascade_form_env else {
+  .fm_sel <- .cascade_selected_form()
+  if (is.na(.fm_sel)) {
+    warning("[30_cascade_config] no featured model in model_selection.json (missing, unreadable, ",
+            "or naming none): the cascade refits FIXED beta.", call. = FALSE)
+    "fixed"
+  } else .fm_sel
+}
+# The kernel falls back (to CASCADE_KERNEL_FALLBACK) when the featured kernel's matrix is not
+# built; the featured FORM is then applied to another kernel. Said, not silent.
+if (!nzchar(.cascade_kernel_env) && is.na(.cascade_selected_kernel()) &&
+    !nzchar(.cascade_form_env) && !is.na(.cascade_selected_form()) && !identical(CASCADE_FORM, "fixed"))
+  warning(sprintf(paste0("[30_cascade_config] the featured kernel is unavailable, so the cascade uses ",
+                         "the fallback kernel %s with the featured model's '%s' form."),
+                  CASCADE_KERNEL, CASCADE_FORM), call. = FALSE)
+.cascade_forms <- c(fixed = "fixed", stats::setNames(vapply(TV_FORMS, `[[`, "", "form"),
+                                                      vapply(TV_FORMS, `[[`, "", "form")))
+if (!CASCADE_FORM %in% .cascade_forms)
+  stop(sprintf("[30_cascade_config] CASCADE_FORM = '%s' is not one of %s.", CASCADE_FORM,
+               paste(.cascade_forms, collapse = ", ")), call. = FALSE)
+# A frailty form is never featured (TV_FORMS `selectable`, 00_config.R): through the override it is
+# a sensitivity run; from model_selection.json it is a selection made before that rule (run_cascade.R
+# then refuses to run). Either way it must not be mistaken for the main projection.
+if (!identical(CASCADE_FORM, "fixed") &&
+    !isTRUE(Filter(function(x) identical(x$form, CASCADE_FORM), TV_FORMS)[[1]]$selectable))
+  warning(sprintf(paste0("[30_cascade_config] CASCADE_FORM = '%s' is a SECONDARY form (never featured: ",
+                         "a frailty cannot tell a zone that resists invasion from one invaded but not ",
+                         "yet detected). %s"), CASCADE_FORM,
+                  if (nzchar(.cascade_form_env)) "This cascade is a sensitivity run, not the main projection."
+                  else "It comes from a model_selection.json written before that rule; re-run run_all.R."),
+          call. = FALSE)
+# The switches of the cascade's hazard (both FALSE for fixed beta).
+CASCADE_FORM_SWITCHES <- if (identical(CASCADE_FORM, "fixed")) list(use_rw = FALSE, use_frailty = FALSE) else {
+  .tf <- Filter(function(x) identical(x$form, CASCADE_FORM), TV_FORMS)[[1]]
+  list(use_rw = isTRUE(.tf$use_rw), use_frailty = isTRUE(.tf$use_frailty))
+}
+#' The method label of the cascade's hazard on `kernel` -- the covariate-bearing "-geo" model,
+#' with the featured form's suffix -- under which 16b's recalibration table records its factor.
+cascade_hazard_label <- function(kernel = CASCADE_KERNEL, form = CASCADE_FORM) {
+  sfx <- if (identical(form, "fixed")) "" else
+    paste0("-", names(Filter(function(x) identical(x$form, form), TV_FORMS))[1])
+  paste0("Bayes-", kernel, "-geo", sfx)
+}
+message(sprintf("[30_cascade_config] hazard form = %s (%s)", CASCADE_FORM,
+                if (nzchar(.cascade_form_env)) "env override"
+                else if (!is.na(.cascade_selected_form())) "featured model" else "fallback"))
 
 # ---------------------------------------------------------------------------
 # Layer A — within-zone transmission (PLAN §3.2)
@@ -276,9 +361,12 @@ CASCADE_R_MIN_CASES <- 10L
 # pre-registered scenario multiplier c(t). That made the week-13 credible interval exactly as
 # tight as the week-4 one, which cannot be right: the further out you look, the less you know.
 #
-# WHAT THIS ADDS, AND WHAT IT DELIBERATELY DOES NOT. log R_i evolves as
-#     log R_i(t) = log R_i(t-1) + rho * (log R_i(0) - log R_i(t-1)) + sigma * eps
-# with rho = 0 since 2026-09-22, i.e. a PURE RANDOM WALK on log R. E[log R_i(t)] stays at the
+# WHAT THIS ADDS, AND WHAT IT DELIBERATELY DOES NOT. The single NATIONAL log R evolves as
+#     log R(t) = log R(t-1) + rho * (log R(0) - log R(t-1)) + sigma * eps_t
+# with ONE innovation eps_t per week and posterior-parameter group, shared by every transmitting
+# zone (a zone seeded mid-projection takes the current walked value) — the walk is of the one
+# national number the projection transmits on, not a per-zone drift (32_cascade_simulator.R).
+# rho = 0 since 2026-09-22, i.e. a PURE RANDOM WALK on log R. E[log R(t)] stays at the
 # estimate, so this adds UNCERTAINTY that grows as sigma*sqrt(t) — it does NOT add a trend.
 # That distinction is deliberate. (With rho > 0 the same expression is an Ornstein-Uhlenbeck
 # walk whose spread instead plateaus at sigma/sqrt(1-(1-rho)^2); see the rho entry below for
@@ -356,12 +444,12 @@ CASCADE_R_USE_IMPORTS <- TRUE
 CASCADE_R_IMPORT_CASES_PER_INTRO <- NULL
 
 # --- Seeded-city reproduction number: an ASSUMPTION, made explicit --------------------
-# A zone seeded during the projection inherits its province pool, and for a province with no
-# case history that pool IS the national value. The urban scenarios therefore ask "what if a
+# A zone seeded during the projection transmits at the single NATIONAL R (there is no province
+# pool: 31_source_dynamics.R). The urban scenarios therefore ask "what if a
 # capital is seeded and then behaves like the current national average", and answer, quite
 # correctly, that little happens: at a national R near 1 with k = 0.30 a one-to-two case seed
 # usually fades out. That is a premise, not a finding, so it is swept rather than assumed.
-# NULL/NA = use the province pool (previous behaviour). (The measured fade-out probabilities
+# NULL/NA = use the national R (the primary specification). (The measured fade-out probabilities
 # once quoted here were computed at R = 1.19, a value the deployed anchor has long since left.)
 #
 # REGIME NOTE, measured rather than assumed. The within-zone layer has no saturating
@@ -383,7 +471,7 @@ CASCADE_SEED_R_SWEEP <- c(NA, 1.5, 2.0, 2.5)   # NA = the pooled value, as one a
 
 # --- Common random numbers ------------------------------------------------------------
 # Every scenario contrast in this layer (urban seeding, gateway knockout, conditional hub
-# seeding, the out-of-sample delta search) is a DIFFERENCE between two simulations. Without
+# seeding, the held-out-origin delta search) is a DIFFERENCE between two simulations. Without
 # pairing, that difference is dominated by Monte-Carlo noise: the 2026-09-07 urban run reported
 # a NEGATIVE expected number of added invasions for most cities, and the zones it credited with
 # the largest increase from seeding Kinshasa were beside the actual outbreak 1,500 km away.
@@ -391,7 +479,10 @@ CASCADE_SEED_R_SWEEP <- c(NA, 1.5, 2.0, 2.5)   # NA = the pooled value, as one a
 # HOW TO READ A NEGATIVE NOW THAT psi = 0. Under the retired saturation term a small negative
 # could be genuine — frontier saturation was a real negative feedback. With psi fixed at 0 that
 # channel is gone, so seeding a city can only ADD import force, and any negative attributable
-# change is Monte-Carlo noise or the (small) re-seeding channel, never protection. Negatives
+# change is Monte-Carlo noise, the frontier covariate's posterior tail (gamma_dmin > 0 in a minority
+# of draws) or the (small) re-seeding channel, never protection. (A featured gamma frailty makes
+# individual paths non-monotone but cannot lower an expected cumulative reach; see the channel
+# list in 32_cascade_simulator.R.) Negatives
 # should therefore no longer be explained away as saturation; if they are large, the pairing is
 # not working. Set FALSE only to reproduce pre-2026-09 outputs.
 CASCADE_CRN <- {
@@ -416,7 +507,7 @@ CASCADE_SCENARIOS <- list(
   S2_control = list(
     label = "Strengthened control",
     desc  = "Response scale-up: c(t) decays so R_j crosses 1 by ~week 6 for R_j0~1.3.",
-    # exponential decay to a 0.65 floor; halving time ~5 weeks
+    # exponential decay to a 0.65 floor; e-folding time 5 weeks (half-life 5 ln 2 ~ 3.5 weeks)
     c_fun = function(t) 0.65 + 0.35 * exp(-t / 5)),
   S3_deterioration = list(
     label = "Deterioration",
@@ -455,7 +546,7 @@ CASCADE_PSI       <- 0
 # Kept as a SENSITIVITY only, to show what turning saturation on would do. The baseline is now 0,
 # so a 0 arm would merely duplicate it; these are the two arms the earlier fits wandered between.
 CASCADE_PSI_SWEEP <- c(1.0, 2.0)
-# Relative width of the delta bracket, on the LOG scale, at which the out-of-sample search stops
+# Relative width of the delta bracket, on the LOG scale, at which the held-out-origin delta search stops
 # (log(hi/lo) <= this). delta is a multiplicative factor, so its bracket is naturally a ratio;
 # 0.01 is a 1% bracket. As with psi, this is NUMERICAL width and not delta's uncertainty — the
 # Monte-Carlo component dominates it — and the report must not quote it as a precision.
@@ -501,10 +592,11 @@ CASCADE_DELTA_DEFAULT <- 1.0
 #     from their posteriors. delta's zone-clustered interval now travels with it
 #     (attr "se_log") and simulate_cascade() draws it per parameter group.
 #
-# Fallbacks degrade in order and each one says so: the 16b table -> the same kernel's
-# intercept-only twin -> the median over Bayesian models in that table -> the legacy moment
-# estimator from invasion_evaluation.csv (band-clamped, LOUDLY warned) -> 1/2.3 from the report.
-cascade_fit_delta <- function(cov_model = "Bayes-M13-dist-fill-geo",
+# Fallbacks degrade in order and each one says so: the 16b table's row for the model -> (for a
+# time-varying form) its fixed-beta parent's row -> the same kernel's intercept-only twin -> the
+# median over Bayesian models in that table -> the legacy moment estimator from
+# invasion_evaluation.csv (band-clamped, LOUDLY warned) -> STOP (no hard-coded factor).
+cascade_fit_delta <- function(cov_model = cascade_hazard_label(),
                               eval_csv  = file.path(OUT_DIAGNOSTICS, "invasion_evaluation.csv"),
                               recal_csv = file.path(OUT_DIAGNOSTICS, "invasion_recalibration.csv"),
                               band      = get0("RECAL_BAND", ifnotfound = c(0.01, 5.0))) {
@@ -545,6 +637,24 @@ cascade_fit_delta <- function(cov_model = "Bayes-M13-dist-fill-geo",
                           if (!is.na(i) && is.finite(r1$delta[i]) && r1$delta[i] > 0) i else NA_integer_ }
     i <- pick(cov_model)
     used <- cov_model
+    .req_note <- ""     # set when a form's label falls through to the lower tiers
+    # A TIME-VARYING FORM ("<kernel>-geo-tvfrailty") is cross-validated only when its stage-1
+    # specification carried those covariates; otherwise fall back to its fixed-beta parent,
+    # which is the same hazard without the form -- said, because the form shifts the level.
+    .form_re <- sprintf("-(%s)$", paste(get0("TV_FORM_SUFFIXES", ifnotfound = "tvrw1"), collapse = "|"))
+    if (is.na(i) && grepl(.form_re, cov_model)) {
+      .par <- sub(.form_re, "", cov_model)
+      i <- pick(.par)
+      if (!is.na(i)) {
+        used <- .par
+        warning(sprintf(paste0("[cascade] delta: '%s' is absent from %s; using its fixed-beta ",
+                               "parent '%s'. The form's own level may differ."),
+                        cov_model, basename(recal_csv), .par), call. = FALSE)
+      } else {                                       # the intercept-only tier below starts here
+        .req_note <- sprintf(" (requested for the time-varying-form hazard '%s')", cov_model)
+        cov_model <- .par
+      }
+    }
     if (is.na(i)) {                                  # same kernel, intercept-only twin
       # TRY BOTH SPELLINGS. The intercept-only twin of "<kernel>-geo" is sometimes
       # "<kernel>-med" and sometimes the BARE kernel: the -dist-fill family is labelled
@@ -560,9 +670,9 @@ cascade_fit_delta <- function(cov_model = "Bayes-M13-dist-fill-geo",
       i <- if (is.na(alt)) NA_integer_ else pick(alt)
       if (!is.na(i)) {
         used <- alt
-        warning(sprintf(paste0("[cascade] delta: '%s' is absent from %s; using the same kernel's ",
+        warning(sprintf(paste0("[cascade] delta: '%s'%s is absent from %s; using the same kernel's ",
                                "intercept-only twin '%s'. The covariate model's own level may differ."),
-                        cov_model, basename(recal_csv), alt), call. = FALSE)
+                        cov_model, .req_note, basename(recal_csv), alt), call. = FALSE)
       }
     }
     if (!is.na(i)) {
@@ -574,10 +684,10 @@ cascade_fit_delta <- function(cov_model = "Bayes-M13-dist-fill-geo",
     }
     bay <- r1[grepl("^Bayes", r1$method) & !grepl("-ens-", r1$method) & is.finite(r1$delta), , drop = FALSE]
     if (nrow(bay)) {
-      warning(sprintf(paste0("[cascade] delta: neither '%s' nor its intercept-only twin is in %s; ",
+      warning(sprintf(paste0("[cascade] delta: neither '%s'%s nor its intercept-only twin is in %s; ",
                              "using the MEDIAN factor over %d Bayesian models. This is a fallback, ",
                              "not a fit for this kernel."),
-                      cov_model, basename(recal_csv), nrow(bay)), call. = FALSE)
+                      cov_model, .req_note, basename(recal_csv), nrow(bay)), call. = FALSE)
       return(.out(stats::median(bay$delta), "median_over_models_16b", "median(Bayesian)",
                   cil = NA_real_))
     }
@@ -625,7 +735,15 @@ cascade_fit_delta <- function(cov_model = "Bayes-M13-dist-fill-geo",
 # Conditional / attribution (PLAN §3.7)
 # ---------------------------------------------------------------------------
 CASCADE_KNOCKOUT_TOPN <- 15L   # gateway shortlist size for exact knockout Delta_j
-CASCADE_HUBS_FOR_COND <- NULL  # NULL -> auto (current high-incidence source hubs)
+# Hubs for the designed conditional experiment (force-seed a hub at week 1, measure who follows).
+# A hub must be a zone NOT yet invaded at the projection origin: force-seeding an infected zone
+# is a no-op (simulate_cascade() only forces zones that are not already infected), and it used
+# to be exactly that — the hubs were taken from the gateway list, i.e. from the currently
+# infected sources, so every "conditional" table was the baseline. NULL -> the auto rule in
+# run_cascade.R: the two not-yet-invaded zones with the largest expected onward seedings in the
+# baseline projection (cascade_gateway_screen()'s out-flux). A character vector names them
+# explicitly, and an already-invaded name is an error (cascade_conditional_seed()).
+CASCADE_HUBS_FOR_COND <- NULL
 
 # ---------------------------------------------------------------------------
 # Sensitivity axes swept in 33 (PLAN §6.6)
@@ -640,7 +758,21 @@ CASCADE_SENS_KERNELS <- c("M14-fill", "M13-dist-fill", "M8-fill")
 # ---------------------------------------------------------------------------
 # Output location
 # ---------------------------------------------------------------------------
-OUT_CASCADE <- file.path(OUT_DIR, "cascade")
+# CASCADE_OUT_ROOT REDIRECTS EVERY CASCADE PRODUCT to a sandbox root holding the same
+# relative layout (<root>/cascade/{tables,figures,diagnostics} and <root>/key_outputs).
+# Added for the onset multiple-imputation sweep (47_onset_mi_arm.R), which runs the cascade
+# once per imputation: without it every arm would overwrite the PUBLISHED cascade tables and
+# key_outputs bundle in turn, and the canonical tree would end up holding whichever arm
+# happened to finish last — with nothing on disk saying which one that was.
+# Unset (the default) is the canonical tree, unchanged.
+CASCADE_OUT_DIR <- local({
+  .r <- trimws(Sys.getenv("CASCADE_OUT_ROOT", ""))
+  if (!nzchar(.r)) return(OUT_DIR)
+  if (!dir.exists(.r)) dir.create(.r, recursive = TRUE, showWarnings = FALSE)
+  message("[30_cascade_config] CASCADE_OUT_ROOT set — cascade products go to ", .r)
+  normalizePath(.r, mustWork = TRUE)
+})
+OUT_CASCADE <- file.path(CASCADE_OUT_DIR, "cascade")
 for (.d in c(OUT_CASCADE, file.path(OUT_CASCADE, "figures"),
              file.path(OUT_CASCADE, "tables"), file.path(OUT_CASCADE, "diagnostics")))
   if (!dir.exists(.d)) dir.create(.d, recursive = TRUE, showWarnings = FALSE)

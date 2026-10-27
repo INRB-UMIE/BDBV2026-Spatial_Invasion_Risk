@@ -19,10 +19,11 @@
 #         v_radial : OLS slope of zone distance-from-epicentre on invasion week
 #                    (mean radial expansion rate of the invaded set; also fitted on
 #                    great-circle km and on travel-time hours)
-#         v_front  : the LEADING EDGE R_max(t) = furthest zone invaded by week t,
-#                    split into the rate at which the extent was ESTABLISHED and the
-#                    slope AFTER 90% of it was reached (~0 = saturated, no wavefront),
-#                    plus the whole-window OLS slope for reference only
+#         v_front  : the LEADING EDGE R_max(t) = furthest zone invaded by week t
+#                    (whole-window OLS slope, for reference only), and the ENVELOPE
+#                    R_p90(t) = 90th-percentile reach, split into the slope while it was
+#                    ESTABLISHED and the slope AFTER it first reached 90% of its final
+#                    value; the saturation verdict is derived from those two slopes
 #         v_reach  : OLS slope of the MEDIAN distance of invaded zones on week, and of
 #                    the case-weighted mean distance (bulk, not envelope, expansion)
 #         v_cog    : step speed of the weekly-case centre of gravity
@@ -40,10 +41,10 @@
 #       PLUS, and not optional: how far THAT WEEK's new invasions actually landed
 #       (new_max_km / new_med_km). The cumulative maxima above are running maxima, so
 #       once one zone sets a far record every later introduction is invisible in them
-#       however distant — a fresh 767 km seeding into a new province hides completely
-#       behind an earlier 794 km one in a different direction. Reporting only the
-#       running max would say "the extent saturated" and let a reader conclude that
-#       long-range spread had stopped, when it demonstrably had not.
+#       however distant — on the 2026-10-09 frame a 767 km seeding in week 13 hides
+#       completely behind a 794 km one from week 3, in a different direction.
+#       Reporting only the running max would say "the extent saturated" and let a
+#       reader conclude that long-range spread had stopped, when it demonstrably had not.
 #
 # Distance is measured three ways for every zone — great-circle (km), OSRM road
 # distance (km) and OSRM travel time (h) — and the three are compared on how well
@@ -56,14 +57,24 @@
 #     confirmation delay ECDF, estimated on the sub-sample with >= DELAY_CAP_DAYS of
 #     follow-up (so the ECDF itself is not truncated), gives an expected reporting
 #     completeness per onset week; trailing weeks below COMPLETE_MIN are excluded
-#     from EVERY fit and drawn hollow in the figure. Sensitivity to that choice
+#     from EVERY fit — the kinematics AND the arrival-predictor fits of Section 5b —
+#     and drawn hollow in Figure_spread_kinematics_compact. Sensitivity to that choice
 #     (1/2/3 weeks) is reported in the diagnostics CSV.
-#   * ONSET IMPUTATION. ~15% of confirmed records have no onset date and are dated
-#     by a stochastic backward draw (00_config.R ONSET_MODE). The primary run uses
-#     the project's own RANDOM_SEED, so its invasion dates are exactly the ones the
-#     rest of the suite scores; N_IMPUTE replicates then VARY that seed (a local
-#     set.seed() would be ignored — load_linelist() reseeds itself) and re-run the
-#     whole pipeline, so every headline statistic carries an imputation interval.
+#   * ONSET IMPUTATION. A share of confirmed records have no usable onset date and are
+#     dated by load_linelist() from their sample date minus a donor interval (00_config.R
+#     ONSET_MODE). The share is NOT typed here: load_linelist() publishes it as
+#     .PCT_ONSET_IMPUTED and this script prints it at run time (a "~15%" written here was
+#     ~24.5% on the frame it described). Each record's draw is a hash of (alert_id,
+#     ONSET_IMPUTE_SEED), with no RNG stream, so a local set.seed() is a no-op. The primary
+#     run uses the project's own ONSET_IMPUTE_SEED (default RANDOM_SEED), so its invasion
+#     dates are exactly the ones the rest of the suite scores; N_IMPUTE replicates then VARY
+#     that onset seed alone and re-run load_linelist() and compute_kinematics() on each
+#     completion, so every summary-CSV statistic carries an imputation interval (imp_*
+#     columns) except the centre-of-gravity BEARING, an angle, for which linear percentiles
+#     are not meaningful; the envelope verdict's stability across completions is stated on
+#     its row, and the arrival-predictor fits carry their own interval columns. The
+#     headline VALUE is that primary completion, not a summary over completions (see the
+#     imp_* columns of the summary CSV).
 #   * PROJECTION. Mean centres are computed in a Lambert azimuthal EQUAL-AREA plane
 #     centred on the outbreak; every reported DISTANCE is geodesic (WGS84) or the
 #     OSRM road network — never a planar approximation.
@@ -98,21 +109,22 @@
 #   - The completeness ECDF is fitted on cases with >= DELAY_CAP_DAYS of follow-up, i.e.
 #     EARLY-epidemic cases. If notification delays have since shortened it over-drops
 #     recent weeks (and vice versa); the truncation sensitivity table bounds that.
-#   - The outbreak seeded Nord-Kivu within the first epidemic week, so the invaded
-#     set is NOT a single expanding wave; the radial statistics summarise a
-#     multi-focus process and should be read as such (Panel C makes this visible).
+#   - Nord-Kivu was invaded within the first epidemic weeks, far from the index zone (on the
+#     2026-10-09 frame four Nord-Kivu zones 190-280 km by road away in week 1, Goma at 550 km
+#     in week 2; invasion_week in the zones CSV), so the invaded set is NOT a single
+#     expanding wave; the radial statistics summarise a multi-focus process and should be
+#     read as such.
 #
 # Run:  Rscript spatiotemporal/43_spread_kinematics.R
 # Env:  SPREAD_SEED, SPREAD_TRUNC_WEEKS, SPREAD_IMPUTE_REPS, SPREAD_BOOT
-# Out:  outputs/key_outputs/Figure_spread_kinematics.{pdf,png}
-#       outputs/key_outputs/spread_kinematics_{weekly,zones,summary,diagnostics}.csv
-# Panel titles/subtitles/captions are intentionally OMITTED (house style): figure
-# identity is carried by the A-E tags and axis titles; the caption lives externally.
+# Out:  <OUT_DIR>/key_outputs/spread_kinematics_{weekly,zones,summary,diagnostics}.csv
+#       <OUT_DIR>/key_outputs/arrival_predictors.csv, arrival_predictor_fits.csv
+#       (no figure: make_spread_kinematics_compact.R and make_manuscript_figures.R draw
+#       these tables; see SECTION 6)
 # =============================================================================
 suppressPackageStartupMessages({
-  library(dplyr); library(tidyr); library(readr); library(ggplot2)
-  library(patchwork); library(sf); library(scales); library(geosphere)
-  library(ggrepel); library(here)
+  library(dplyr); library(tidyr); library(readr)
+  library(sf); library(geosphere); library(here)
 })
 
 ST_DIR <- Sys.getenv("SPREAD_ST_DIR", unset = file.path(here::here(), "spatiotemporal"))
@@ -131,7 +143,7 @@ source(file.path(ST_DIR, "03_mobility_matrices.R"))
 # Parameters
 # ---------------------------------------------------------------------------
 # Seeds the zone bootstrap only. The onset draw is NOT seeded from here — it comes
-# from the project-wide RANDOM_SEED that load_linelist() reads (see Section 4).
+# from the project-wide ONSET_IMPUTE_SEED that load_linelist() reads (see Section 4).
 SEED           <- .envint("SPREAD_SEED", 20260812L)
 SEED_WEEKS     <- 3L        # weeks used to identify the index (epicentre) zone
 DELAY_CAP_DAYS <- 30L       # follow-up needed for an untruncated delay ECDF (and its cap)
@@ -142,82 +154,12 @@ TRUNC_FORCE    <- .envint("SPREAD_TRUNC_WEEKS", NA_integer_)   # manual override
 N_BOOT         <- .envint("SPREAD_BOOT", 2000L)       # zone bootstrap replicates
 N_IMPUTE       <- .envint("SPREAD_IMPUTE_REPS", 100L) # onset-imputation replicates
 REACH_FAR_KM   <- 100       # "far from the epicentre" threshold for the case-share statistic
-# Geodesic (straight-line) rings drawn on the map. NOTE they are NOT road distance —
-# every numeric reach statistic is road distance — so the innermost ring is labelled
-# "straight-line" to keep the two metrics from being read as one.
-RINGS_KM       <- c(200, 400, 600)
 TRUNC_SENS     <- 1:3       # trailing-week drops compared in the sensitivity table
 
 KEY_DIR <- file.path(OUT_DIR, "key_outputs")
-FIG_DIR <- file.path(KEY_DIR, "figures")
-for (d in c(KEY_DIR, FIG_DIR)) if (!dir.exists(d)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+if (!dir.exists(KEY_DIR)) dir.create(KEY_DIR, recursive = TRUE, showWarnings = FALSE)
 
-# ---------------------------------------------------------------------------
-# Style (verbatim from 40_cascade_next_dominoes.R / make_publication_figures.R)
-# ---------------------------------------------------------------------------
-INK <- "grey15"; MUTED <- "grey38"; FAINT <- "grey72"; GRID <- "grey92"
-# Province identity, VERBATIM from 37/40_* so a province keeps the same hue across every
-# figure in the suite. It deliberately re-uses the hues the series palette below also
-# draws on: Panel C is the only panel with a province scale and it carries its own
-# legend, and cross-figure province identity matters more than intra-figure hue purity.
-# Do not "fix" this by recolouring provinces — that would desynchronise Figures 2 and 4.
-PROV_COL <- c("Ituri"="#0072B2","Nord-Kivu"="#D55E00","Haut-Uele"="#009E73",
-              "Sud-Kivu"="#CC79A7","Tshopo"="#E69F00","Bas-Uele"="#56B4E9")
-SPARE_COL <- c("#882255","#332288","#661100","#999933","#44AA99","#AA4499","#DDCC77","#117733")
-# ONE semantic colour scheme across every panel. The panels share a vocabulary, so the
-# colours must too: a reader who learns "orange = cases, green = new invasions" from the
-# map must not then meet orange standing for "furthest invaded zone" in a line panel —
-# they would read that panel exactly backwards. Every series below is coloured by WHAT
-# IT MEASURES, never by which panel it happens to sit in.
-CASE_COL <- "#D55E00"   # anything CASE-weighted (that week's confirmed cases)
-INV_COL  <- "#009E73"   # anything about the zones NEWLY invaded that week
-EXT_COL  <- "#0072B2"   # the CUMULATIVE invaded set — its extent / envelope
-EXT_COL2 <- "#56B4E9"   # lighter shade, for a second cumulative-set series in one panel
-EPI_COL  <- "#7A0177"   # epicentre marker
-base_family <- "sans"
 
-theme_pub <- function(base = 8.6) {
-  theme_minimal(base_size = base, base_family = base_family) %+replace% theme(
-    plot.title = element_blank(), plot.subtitle = element_blank(), plot.caption = element_blank(),
-    axis.title = element_text(size = base - 0.4, colour = MUTED),
-    axis.title.x = element_text(margin = margin(t = 4)),
-    axis.title.y = element_text(margin = margin(r = 4), angle = 90),
-    axis.text = element_text(size = base - 1.2, colour = MUTED),
-    panel.grid.minor = element_blank(),
-    panel.grid.major = element_line(colour = GRID, linewidth = 0.3),
-    strip.text = element_text(size = base - 0.6, colour = INK, face = "bold"),
-    legend.position = "top", legend.justification = "left",
-    legend.title = element_text(size = base - 1.2, colour = MUTED),
-    legend.text = element_text(size = base - 1.4, colour = INK),
-    legend.key.height = unit(9, "pt"), legend.key.width = unit(15, "pt"),
-    legend.margin = margin(0, 0, 0, 0), legend.box.spacing = unit(3, "pt"),
-    plot.tag = element_text(size = base + 4.5, face = "bold", colour = INK),
-    plot.margin = margin(6, 8, 6, 6))
-}
-theme_map <- function(base = 8.6) {
-  theme_void(base_size = base, base_family = base_family) %+replace% theme(
-    plot.title = element_blank(), plot.subtitle = element_blank(), plot.caption = element_blank(),
-    legend.position = "right", legend.justification = "centre",
-    legend.title = element_text(size = base - 1.4, colour = MUTED),
-    legend.text = element_text(size = base - 1.8, colour = INK),
-    legend.key.height = unit(14, "pt"), legend.key.width = unit(9, "pt"),
-    plot.tag = element_text(size = base + 4.5, face = "bold", colour = INK),
-    plot.margin = margin(2, 2, 2, 2))
-}
-save_dual <- function(p, name, w, h, dirs = c(FIG_DIR, KEY_DIR)) {
-  # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
-  # is not on the published allow-list. get0() so the helper still works standalone.
-  .fk <- get0("figure_is_kept", ifnotfound = NULL)
-  # Gate on each destination path (these helpers write into several directories), so
-  # FIGURE_DROP's "<dir>/<stem>" entries and the raw/ rule can actually match.
-  if (is.function(.fk) && !any(vapply(dirs, function(.d) .fk(file.path(.d, name)),
-                                      logical(1)))) return(invisible(p))
-  for (d in dirs) {
-    ggsave(file.path(d, paste0(name, ".pdf")), p, width = w, height = h, device = "pdf", bg = "white")
-    ggsave(file.path(d, paste0(name, ".png")), p, width = w, height = h, dpi = 600, bg = "white")
-  }
-  message(sprintf("  saved %-34s %.1f x %.1f in", name, w, h)); invisible(p)
-}
 
 # =============================================================================
 # SECTION 1 — geography: centroids, provinces, distance metrics
@@ -293,28 +235,37 @@ build_geo <- function(proj_centre = NULL) {
 #' The ECDF is estimated ONLY on records whose onset is at least `cap` days before
 #' `asof` — that sub-sample has complete follow-up out to `cap` days, so the ECDF is
 #' not itself right-truncated (the naive all-records ECDF would over-state
-#' completeness). Delays are capped at `cap` days; longer delays (rare: the 95th
-#' percentile is ~24 d) are therefore treated as if they had arrived, so this is a
-#' slight UPPER bound on completeness — conservative about how few weeks it flags,
-#' which is why TRUNC_MIN also applies. Sitrep top-up rows carry no lab/report date
-#' and drop out of the ECDF automatically.
+#' completeness). Delays are CAPPED at `cap` days (pmin), not dropped: a longer delay
+#' still counts in the denominator, as not yet arrived at any follow-up below `cap`, and
+#' is treated as arrived at `cap`, so this is a slight UPPER bound on completeness only
+#' at `cap` itself — conservative about how few weeks it flags, which is why TRUNC_MIN
+#' also applies. (Dropping the longer delays instead would condition the ECDF on
+#' D <= cap and over-state completeness at every follow-up.) The share of delays beyond
+#' `cap` is returned as attr "share_over_cap" and printed by the caller, so how rare they
+#' are is measured on the frame rather than asserted here. "Known" is the lab date, which
+#' load_linelist() has already restored to the CONFIRMING test's (apply_earliest_sample_dates(),
+#' 00_config.R), so a later repeat test does not lengthen the delay. Sitrep top-up rows
+#' carry no lab/report/notification date and drop out of the ECDF automatically.
 week_completeness <- function(ll, weeks, asof, cap = DELAY_CAP_DAYS) {
   cf <- ll %>% dplyr::filter(confirmed %in% TRUE, !is.na(date_index))
   known <- dplyr::coalesce(as.Date(cf$lab_analysis_date),
                            as.Date(cf$reporting_date),
                            as.Date(cf$date_of_notification))
   del <- as.numeric(known - cf$date_index)
-  ok  <- is.finite(del) & del >= 0 & del <= cap & cf$date_index <= (asof - cap)
+  ok  <- is.finite(del) & del >= 0 & cf$date_index <= (asof - cap)
   if (sum(ok) < 50L) {
     warning("[kinematics] only ", sum(ok), " complete-follow-up delay pairs — ",
             "completeness not estimated; falling back to TRUNC_MIN.", call. = FALSE)
     return(rep(NA_real_, length(weeks)))
   }
-  Fhat <- stats::ecdf(del[ok])
-  vapply(weeks, function(w) {
+  Fhat <- stats::ecdf(pmin(del[ok], cap))
+  out <- vapply(weeks, function(w) {
     avail <- as.numeric(asof - (w + 0:6))              # follow-up days per onset day
     mean(ifelse(avail < 0, 0, Fhat(pmin(avail, cap)))) # onset days after `asof` contribute 0
   }, numeric(1))
+  attr(out, "share_over_cap") <- mean(del[ok] > cap)
+  attr(out, "n_pairs")        <- sum(ok)
+  out
 }
 
 #' Number of trailing weeks to exclude, from the completeness profile.
@@ -427,9 +378,11 @@ choose_trunc <- function(comp, force = NA_integer_) {
 #' Full kinematic summary for one zone-week case table.
 #'
 #' Both windows are anchored to CALENDAR DATES, not to positions in this table's week
-#' vector: an onset-imputation replicate can draw an onset far enough back to add an
-#' earlier week to the grid, which would shift every positional index and make the
-#' replicates incomparable with each other and with the primary run.
+#' vector, so two tables whose week grids start on different weeks still fit the same span
+#' of real time. On the current line list the grid's first week does not move between onset
+#' completions — load_linelist() floors date_index at OUTBREAK_START, so no draw can open an
+#' earlier week, and aggregate_to_zone_week() ends the grid on the analysis week — so the
+#' anchoring is a guard on that invariant, not a correction the replicates currently need.
 #'
 #' @param zw          zone-week tibble (health_zone, week_start, confirmed) covering
 #'                    ALL zones, zero-filled — output of aggregate_to_zone_week().
@@ -523,8 +476,8 @@ compute_kinematics <- function(zw, geo, fit_cutoff, seed_cutoff, epi_zone = NULL
       reach_max_gc_km = .mx(cum$d_gc),
       # How far THIS WEEK's new invasions actually landed. The running maxima above
       # are cumulative, so once one zone sets a far record every later introduction is
-      # invisible in them however distant it is — a brand-new 767 km seeding into a new
-      # province hides completely behind an earlier 794 km one in another direction.
+      # invisible in them however distant it is — on the 2026-10-09 frame a 767 km seeding in
+      # week 13 hides completely behind a 794 km one from week 3, in another direction.
       # These two columns are the un-hidden version, and are what shows that long-range
       # seeding continued long after the envelope stopped growing.
       new_max_km      = .mx(nz$d_road),
@@ -574,19 +527,46 @@ compute_kinematics <- function(zw, geo, fit_cutoff, seed_cutoff, epi_zone = NULL
   v_disp        <- .ols(fw$week, fw$cog_sd_km)
   v_disp2       <- .ols(fw$week, fw$cog_sd_km^2)          # SD^2 ~ 4 D t  =>  D = slope/4
 
-  # SATURATION of the leading edge. R_max(t) is a running maximum: if the epidemic
-  # reaches its full extent early by long-range seeding and then stops expanding, a
-  # single OLS slope over the whole window is NOT a wavefront speed. Split it:
-  # how quickly the envelope reached 90% of its final value, and whether it still
-  # grows afterwards.
-  rmax_fin <- fw$reach_max_km[nrow(fw)]
-  i90 <- which(is.finite(fw$reach_max_km) & fw$reach_max_km >= 0.9 * rmax_fin)
-  wk90 <- if (length(i90)) fw$week[i90[1]] else NA_real_
-  v_front_early <- if (is.finite(wk90) && wk90 > 0) fw$reach_max_km[i90[1]] / wk90 else NA_real_
-  late <- fw %>% dplyr::filter(is.finite(wk90), week >= wk90)
-  v_front_late <- .ols(late$week, late$reach_max_km)
+  # SATURATION of the envelope. If the epidemic reaches its full extent early by
+  # long-range seeding and then stops expanding, a single OLS slope over the whole window
+  # is NOT a wavefront speed. Split it: the slope while the envelope was being established,
+  # and the slope after it first reached 90% of its final value.
+  #
+  # THE ENVELOPE IS THE 90th-PERCENTILE REACH R_p90(t), NOT THE RUNNING MAXIMUM R_max(t).
+  # R_max is set by ONE zone. In the run published 2026-10-13 (index zone then Mongbwalu) a single
+  # seeding 1,606 km out at week 18 moved it from 948 km to 1,606 km, so the "week R_max reached 90% of its final
+  # value" was simply that zone's week, the "speed to 90%" was that zone's distance divided
+  # by 18, and the slope "after 90%" was zero BY CONSTRUCTION, because a running maximum is
+  # flat once its final value is set. R_p90 moves only when a tenth of the invaded set moves,
+  # and it is not monotone, so its post-threshold slope is a measurement, not an identity.
+  #
+  # Both phases are OLS slopes of the SAME series (weeks 0..wk90 and wk90..end of the fit
+  # window), so the two are like for like; dividing R(wk90) by wk90 would instead assume
+  # the envelope started at zero, which it does not (week 0 is the seed zones' own reach).
+  # A slope needs >= 3 fit-window weeks on a side (.ols()); with fewer the verdict is
+  # UNDETERMINED rather than defaulting to either answer. The verdict rule itself — the
+  # post-threshold slope at most a tenth of the establishing slope — is the one used before.
+  p90_fin <- fw$reach_p90_km[nrow(fw)]
+  i90 <- which(is.finite(fw$reach_p90_km) & fw$reach_p90_km >= 0.9 * p90_fin)
+  wk90 <- if (is.finite(p90_fin) && length(i90)) fw$week[i90[1]] else NA_real_
+  early <- fw %>% dplyr::filter(is.finite(wk90), week <= wk90)
+  late  <- fw %>% dplyr::filter(is.finite(wk90), week >= wk90)
+  v_env_early <- .ols(early$week, early$reach_p90_km)
+  v_env_late  <- .ols(late$week,  late$reach_p90_km)
+  envelope_verdict <- if (!is.finite(v_env_early$slope) || !is.finite(v_env_late$slope)) {
+    sprintf(paste0("UNDETERMINED: %d fit-window week(s) up to the 90%% threshold and %d from it; ",
+                   "a slope needs at least 3 on each side"), v_env_early$n, v_env_late$n)
+  } else if (abs(v_env_late$slope) <= 0.1 * abs(v_env_early$slope)) {   # <=: a flat-from-the-start envelope (0 vs 0) is saturated
+    sprintf("SATURATED: %+.1f km/wk from week %d against %+.1f km/wk before it; no travelling wavefront",
+            v_env_late$slope, as.integer(wk90), v_env_early$slope)
+  } else {
+    sprintf("NOT SATURATED (%s): %+.1f km/wk from week %d against %+.1f km/wk before it",
+            if (v_env_late$slope > 0) "still expanding" else "contracting",
+            v_env_late$slope, as.integer(wk90), v_env_early$slope)
+  }
   # A saturated envelope does NOT mean long-range introductions stopped — only that
-  # none exceeded the standing record. Quantify what kept arriving after saturation.
+  # the bulk of the invaded set stopped moving outward. Quantify what kept arriving after
+  # the threshold week.
   after <- fw %>% dplyr::filter(is.finite(wk90), week > wk90, new_zones > 0)
   newmax_med_after <- stats::median(after$new_max_km, na.rm = TRUE)
   newmax_max_after <- .mx(after$new_max_km)
@@ -624,8 +604,6 @@ compute_kinematics <- function(zw, geo, fit_cutoff, seed_cutoff, epi_zone = NULL
     epi_zone = epi_zone, epi_ll = epi_ll, epi_province = epi$province,
     zones = zones_inv, zone_dist = zc, weekly = weekly, metric_fit = metric_fit,
     seed_rank = seed,
-    front_intercept = v_front$intercept, radial_intercept = v_radial_road$intercept,
-    disp_intercept = v_disp$intercept, reach_med_intercept = v_reach_med$intercept,
     stats = list(
       v_radial_road = v_radial_road$slope, v_radial_road_r2 = v_radial_road$r2,
       v_radial_gc   = v_radial_gc$slope,   v_radial_gc_r2   = v_radial_gc$r2,
@@ -633,8 +611,9 @@ compute_kinematics <- function(zw, geo, fit_cutoff, seed_cutoff, epi_zone = NULL
       v_radial_road_ts = .theil_sen(fitz$inv_week, fitz$d_road),
       v_radial_gc_ts   = .theil_sen(fitz$inv_week, fitz$d_gc),
       v_front_road  = v_front$slope,       v_front_p90_road = v_front_p90$slope,
-      v_front_early = v_front_early,       v_front_late = v_front_late$slope,
-      week_reach_90pct = wk90,
+      v_env_p90_early = v_env_early$slope, v_env_p90_late = v_env_late$slope,
+      n_weeks_env_early = v_env_early$n,   n_weeks_env_late = v_env_late$n,
+      week_p90_reach_90pct = wk90,         envelope_verdict = envelope_verdict,
       newmax_med_after = newmax_med_after, newmax_max_after = newmax_max_after,
       n_weeks_after = n_weeks_after,
       v_reach_med = v_reach_med$slope, v_case_mean = v_case_mean$slope,
@@ -677,16 +656,25 @@ message("\n", strrep("=", 74))
 message("[kinematics] 43_spread_kinematics.R — descriptive spatiotemporal summaries")
 message(strrep("=", 74))
 
-# load_linelist() seeds its own onset draw from the GLOBAL `RANDOM_SEED`
-# (01_data_prep.R) and restores the caller's RNG stream on exit. Two consequences:
+# load_linelist() derives each record's onset draw from a hash of (alert_id, GLOBAL
+# `ONSET_IMPUTE_SEED`) (01_data_prep.R; 00_config.R defaults it to RANDOM_SEED) and uses no
+# RNG stream. Two consequences:
 #   1. the primary run needs no set.seed() here and is byte-identical to the line
 #      list every other module in the suite sees — the invasion dates below are the
 #      same events the forecasting pipeline scores;
-#   2. imputation replicates must vary RANDOM_SEED ITSELF. A set.seed() around the
-#      call is silently ignored and would yield N identical "replicates", i.e. a
-#      zero-width uncertainty interval that looks like precision.
+#   2. imputation replicates must vary ONSET_IMPUTE_SEED ITSELF — the onset draw's only seed;
+#      RANDOM_SEED no longer reaches it. A set.seed() around the call is a no-op and would
+#      yield N identical "replicates", i.e. a zero-width uncertainty interval that looks
+#      like precision.
+# RANDOM_SEED_BASE still seeds this script's own bootstrap (Section 5); ONSET_SEED_BASE is the
+# primary completion's onset seed, and replicate r is ONSET_SEED_BASE + r.
 RANDOM_SEED_BASE <- as.integer(get0("RANDOM_SEED", ifnotfound = 20260704L))
+ONSET_SEED_BASE  <- as.integer(get0("ONSET_IMPUTE_SEED", ifnotfound = RANDOM_SEED_BASE))
 ll_primary <- load_linelist()
+# The imputed share, as load_linelist() measured it on THIS frame (never a typed literal).
+message(sprintf("[kinematics] %.1f%% of confirmed records have an imputed onset (%s)",
+                get0(".PCT_ONSET_IMPUTED", ifnotfound = NA_real_),
+                get0(".ONSET_IMPUTE_MODE", ifnotfound = "mode not published")))
 pop        <- load_population()
 zw_primary <- aggregate_to_zone_week(ll_primary, names(pop))
 weeks_all  <- sort(unique(zw_primary$week_start))
@@ -706,6 +694,10 @@ message(sprintf("[kinematics] equal-area plane centred at %.3fE %.3fN (seed-wind
 
 # ---- right-truncation: how many trailing weeks to drop ---------------------
 comp    <- week_completeness(ll_primary, weeks_all, ANALYSIS_DATE)
+message(sprintf("[kinematics] delay ECDF: %s complete-follow-up pairs; %.1f%% of their delays exceed the %d-day cap (counted as arrived at the cap)",
+                format(attr(comp, "n_pairs")), 100 * as.numeric(attr(comp, "share_over_cap")),
+                DELAY_CAP_DAYS))
+comp    <- as.numeric(comp)          # attributes reported; keep a plain vector downstream
 n_trunc <- choose_trunc(comp, TRUNC_FORCE)
 stopifnot(n_trunc < length(weeks_all) - 2L)
 # Calendar anchor for the fit window, so every replicate and every sensitivity run
@@ -725,6 +717,9 @@ message(sprintf("[kinematics] index zone: %s (%s); %d invaded zones (%d inside t
 # Resamples INVADED ZONES with replacement (one row per zone; no clustering needed)
 # and refits v_radial. The leading-edge slope has no honest bootstrap (a resampled
 # running maximum is biased low by construction) and is reported point-only.
+# 90% (5th-95th percentile), the suite's default level and the level of every other lo/hi pair
+# in the summary CSV (week bootstrap, imputation percentiles) EXCEPT the case centre-of-gravity
+# speed row, whose lo/hi are its interquartile range (its basis column says so).
 boot_ci <- function(z, col, B = N_BOOT) {
   dd <- z[[col]]; tt <- z$inv_week
   ok <- is.finite(dd) & is.finite(tt); dd <- dd[ok]; tt <- tt[ok]; n <- length(dd)
@@ -734,16 +729,16 @@ boot_ci <- function(z, col, B = N_BOOT) {
     if (length(unique(tt[i])) < 2L) return(NA_real_)
     unname(stats::coef(stats::lm(dd[i] ~ tt[i]))[2])
   }, numeric(1))
-  c(.q(s, 0.025), .q(s, 0.975))
+  c(.q(s, 0.05), .q(s, 0.95))
 }
-set.seed(SEED + 1L)
+set_fixed_seed(SEED + 1L)
 fitz_primary <- dplyr::filter(K$zones, in_fit_window)
 ci_road <- boot_ci(fitz_primary, "d_road")
 ci_gc   <- boot_ci(fitz_primary, "d_gc")
 
 # ---- sensitivity to the index-zone choice ----------------------------------
-# The top seed-window zones are separated by only a case or two AND all sit in the
-# same urban focus, so the argmax rule is fragile by construction. Re-running the
+# The top seed-window zones are separated by a few cases (counts in the diagnostics CSV), so the
+# argmax rule is fragile by construction. Re-running the
 # whole analysis from each of the top ORIGIN_SENS_N candidates shows whether that
 # fragility actually moves any number.
 ORIGIN_SENS_N <- 3L
@@ -774,42 +769,53 @@ sens <- dplyr::bind_rows(lapply(TRUNC_SENS, function(nt) {
                  n_zones_fit = Kn$stats$n_zones_fit)
 }))
 
+# Mean new invasions per week over weeks 1..fit_max of a compute_kinematics() weekly table:
+# week 0 is the seeding condition (those zones already had confirmed cases when the series
+# opens) and the truncated tail is incompletely observed. One definition for the primary run
+# (the summary row, Section 5) and for every onset completion.
+.nz_window <- function(weekly) {
+  rows <- weekly$week >= 1L & !weekly$truncated & is.finite(weekly$new_zones)
+  vals <- as.numeric(weekly$new_zones[rows])
+  list(vals = vals, mean = if (length(vals)) mean(vals) else NA_real_,
+       fit_max = if (any(rows)) max(weekly$week[rows]) else NA_integer_)
+}
+.verdict_class <- function(v) sub(":.*$", "", v)   # "SATURATED" / "NOT SATURATED (...)" / "UNDETERMINED"
+
 # ---- onset-imputation replicates -------------------------------------------
-# The whole pipeline (including the index-zone choice) is re-run on independent
-# onset draws, so every headline number carries an imputation-uncertainty interval.
+# load_linelist() and compute_kinematics() (including the index-zone choice) are re-run on
+# each onset completion. Every scalar statistic compute_kinematics() returns is kept, so each
+# summary-CSV row it feeds carries an imputation interval (imp_map below); the zone bootstrap
+# and the sensitivity tables are primary-completion analyses and are not re-run.
 imp <- NULL
 if (N_IMPUTE > 0L) {
   message(sprintf("[kinematics] %d onset-imputation replicate(s)...", N_IMPUTE))
   imp <- dplyr::bind_rows(lapply(seq_len(N_IMPUTE), function(r) {
-    # Vary the seed load_linelist() actually reads, and put it back afterwards so the
-    # rest of the session still sees the project default.
-    .old <- get0("RANDOM_SEED", envir = globalenv(), ifnotfound = NULL)
-    assign("RANDOM_SEED", RANDOM_SEED_BASE + r, envir = globalenv())
-    on.exit(if (is.null(.old)) suppressWarnings(rm("RANDOM_SEED", envir = globalenv()))
-            else assign("RANDOM_SEED", .old, envir = globalenv()), add = TRUE)
+    # Vary the seed load_linelist() actually reads (ONSET_IMPUTE_SEED, NOT RANDOM_SEED, which
+    # no longer reaches the onset draw: varying it would give N identical replicates), and put
+    # it back afterwards so the rest of the session still sees the project default.
+    .old <- get0("ONSET_IMPUTE_SEED", envir = globalenv(), ifnotfound = NULL)
+    assign("ONSET_IMPUTE_SEED", ONSET_SEED_BASE + r, envir = globalenv())
+    on.exit(if (is.null(.old)) suppressWarnings(rm("ONSET_IMPUTE_SEED", envir = globalenv()))
+            else assign("ONSET_IMPUTE_SEED", .old, envir = globalenv()), add = TRUE)
     out <- try({
       llr <- suppressMessages(suppressWarnings(load_linelist()))
       zwr <- suppressMessages(suppressWarnings(aggregate_to_zone_week(llr, names(pop))))
       Kr  <- compute_kinematics(zwr, geo, fit_cutoff = FIT_CUTOFF,
                                 seed_cutoff = SEED_CUTOFF)
-      tibble::tibble(rep = r, epi_zone = Kr$epi_zone, n_weeks = length(Kr$weeks),
-                     # per-zone first confirmed onset on THIS draw, carried as a list
-                     # column so Section 5b can put an imputation interval on the
-                     # arrival-vs-predictor correlations too (the predictors are fixed
-                     # geography and mobility; only the arrival dates are imputed).
-                     arrivals = list(llr %>%
-                       dplyr::filter(confirmed %in% TRUE, !is.na(date_index), !is.na(health_zone)) %>%
-                       dplyr::group_by(health_zone) %>%
-                       dplyr::summarise(first_onset = min(date_index), .groups = "drop")),
-                     v_radial_road = Kr$stats$v_radial_road,
-                     v_radial_gc = Kr$stats$v_radial_gc,
-                     v_reach_med = Kr$stats$v_reach_med,
-                     v_cog_med = Kr$stats$v_cog_med,
-                     v_cog_net = Kr$stats$v_cog_net,
-                     v_disp_km_wk = Kr$stats$v_disp_km_wk,
-                     accrual_doubling_wk = Kr$stats$accrual_doubling_wk,
-                     reach_max_km = Kr$stats$reach_max_km,
-                     n_zones_fit = Kr$stats$n_zones_fit)
+      dplyr::bind_cols(
+        tibble::tibble(rep = r, epi_zone = Kr$epi_zone, n_weeks = length(Kr$weeks),
+                       envelope_verdict = Kr$stats$envelope_verdict,
+                       nz_mean = .nz_window(Kr$weekly)$mean,
+                       # per-zone first confirmed onset on THIS draw, carried as a list
+                       # column so Section 5b can put an imputation interval on the
+                       # arrival-vs-predictor correlations too (the predictors are fixed
+                       # geography and mobility; only the arrival dates are imputed).
+                       arrivals = list(llr %>%
+                         dplyr::filter(confirmed %in% TRUE, !is.na(date_index), !is.na(health_zone)) %>%
+                         dplyr::group_by(health_zone) %>%
+                         dplyr::summarise(first_onset = min(date_index), .groups = "drop"))),
+        # every scalar numeric statistic of this completion, under its compute_kinematics() name
+        tibble::as_tibble(Filter(function(v) is.numeric(v) && length(v) == 1L, Kr$stats)))
     }, silent = TRUE)
     if (inherits(out, "try-error")) NULL else out
   }))
@@ -817,9 +823,17 @@ if (N_IMPUTE > 0L) {
     warning("[kinematics] ", N_IMPUTE - nrow(imp), " imputation replicate(s) failed.",
             call. = FALSE)
 }
+# 5th / 50th / 95th percentile over the COMPLETIONS, with the primary completion counted as
+# replicate 0 (it is the ONSET_SEED_BASE draw; the replicates are BASE + 1..N). The published
+# point VALUE stays the primary completion, because that is the completion every other module
+# scores; the median is published beside it, so a value lying outside its own replicate band
+# (the primary is one draw, not a summary) is visible as such rather than looking like an error.
+NZ_PRIMARY <- .nz_window(K$weekly)
 imp_q <- function(col) {
-  if (is.null(imp) || !nrow(imp)) return(c(NA_real_, NA_real_))
-  c(.q(imp[[col]], 0.05), .q(imp[[col]], 0.95))
+  if (is.null(imp) || !nrow(imp)) return(c(NA_real_, NA_real_, NA_real_))
+  stopifnot(col %in% names(imp))
+  v <- c(if (identical(col, "nz_mean")) NZ_PRIMARY$mean else S[[col]], imp[[col]])
+  c(.q(v, 0.05), .q(v, 0.50), .q(v, 0.95))
 }
 
 # =============================================================================
@@ -841,14 +855,18 @@ fitz_nosit  <- fitz_primary %>% dplyr::filter(!health_zone %in% sitrep_only_zone
 nosit_road  <- .ols(fitz_nosit$inv_week, fitz_nosit$d_road)
 nosit_n     <- nrow(fitz_primary) - nrow(fitz_nosit)
 
+# Distances and bearing here are from the single INDEX zone, and the column names say so:
+# arrival_predictors.csv (Section 5b) publishes same-unit columns measured from the nearest
+# of the three EPICENTRE_ZONES, so the bare names would mean two different things in two
+# files of the same run.
 zones_out <- K$zones %>%
   dplyr::transmute(health_zone, province,
                    invasion_week = inv_week, invasion_week_start = inv_week_start,
                    cases_total,
-                   dist_greatcircle_km = round(d_gc, 2),
-                   dist_road_km = round(d_road, 2),
-                   travel_time_h = round(t_road, 3),
-                   bearing_from_epicentre_deg = round(bearing, 1),
+                   dist_greatcircle_km_from_index_zone = round(d_gc, 2),
+                   dist_road_km_from_index_zone = round(d_road, 2),
+                   travel_time_h_from_index_zone = round(t_road, 3),
+                   bearing_from_index_zone_deg = round(bearing, 1),
                    lon = round(lon, 5), lat = round(lat, 5),
                    in_fit_window,
                    sitrep_only = health_zone %in% sitrep_only_zones)
@@ -857,7 +875,8 @@ readr::write_csv(zones_out, file.path(KEY_DIR, "spread_kinematics_zones.csv"))
 # -----------------------------------------------------------------------------
 # SECTION 5b — arrival time vs candidate predictors
 #   publishes: arrival_predictors.csv, arrival_predictor_fits.csv
-#   consumed by: make_manuscript_figures.R (Figure 1C and Figure S1)
+#   consumed by: make_manuscript_figures.R (Figure 1C and Figure S1),
+#                45_ascertainment_figures.R (arrival_predictors.csv)
 # -----------------------------------------------------------------------------
 # Figure 1C asks a descriptive question — which geography orders the arrivals? —
 # and answers it with a per-predictor OLS fit and a Spearman rho. Those statistics
@@ -873,13 +892,20 @@ readr::write_csv(zones_out, file.path(KEY_DIR, "spread_kinematics_zones.csv"))
 # — because that is the exposure the manuscript panel claims. Distance and travel
 # time are the MINIMUM over the three (a zone is reached via its nearest seed);
 # mobility is the flow leaving the region as a whole. The index-zone distances
-# remain available in spread_kinematics_zones.csv, so the two are comparable rather
-# than conflated.
+# remain available in spread_kinematics_zones.csv (the *_from_index_zone columns), so the
+# two are comparable rather than conflated.
 #
 # ARRIVAL. Days from ARRIVAL_ORIGIN, the earliest confirmed date_index in the
-# reconciled line list — an observed event, not a chosen calendar date. date_index
-# is load_linelist()'s, i.e. the same onset draw the forecasting pipeline scores,
-# including the sitrep top-up.
+# reconciled line list — derived from the data, not typed. date_index is
+# load_linelist()'s, i.e. the same onset draw the forecasting pipeline scores, including
+# the sitrep top-up. load_linelist() floors date_index at OUTBREAK_START, so when an
+# imputed onset is clamped there the origin is that floor rather than an observed onset;
+# the run message says whether it is.
+#
+# FIT WINDOW. A zone whose first onset falls in the right-truncated tail (after the last
+# day of the FIT_CUTOFF week) is in the table, flagged `in_fit_window = FALSE` exactly as
+# in spread_kinematics_zones.csv, and in no fit: its week is incompletely observed, so the
+# zones that arrived then and are already confirmed are the quickly reported subset.
 #
 # MOBILITY PREDICTORS. -log(share of flow from the epicentre region into the zone).
 # That is the one-step Brockmann-Helbing effective distance up to the additive
@@ -890,6 +916,13 @@ readr::write_csv(zones_out, file.path(KEY_DIR, "spread_kinematics_zones.csv"))
 # measured connectivity at a fabricated finite predictor value, at the top of the
 # range being fitted. They are therefore DROPPED, the per-predictor n differs
 # between columns, and every consumer must report n alongside R^2 and rho.
+#
+# THE EPICENTRE ZONES ARE IN THIS TABLE BUT IN NO FIT. They are flagged `epicentre`
+# and excluded from every predictor's fit alike (see arrival_predictor_fits): they are
+# the origin the predictors are measured from, not arrivals. A consumer that draws the
+# points must draw the same set it reports the fit for, i.e. filter
+# `!epicentre & in_fit_window`.
+FIT_LAST_DAY <- FIT_CUTOFF + 6L   # last day of the last fit-window week (weeks run week_start..+6)
 arrival_predictors <- local({
   zones_all <- names(pop)
   aliases   <- tryCatch(load_aliases(), error = function(e) { 
@@ -938,7 +971,7 @@ arrival_predictors <- local({
                    nrow = nrow(ctr))
   gc_km_v <- setNames(apply(gc_mat, 1L, min, na.rm = TRUE), ctr$health_zone)
 
-  # ---- March relocation OD share out of the epicentre region ----------------
+  # ---- relocation OD share out of the epicentre region (month: FLOWMINDER_OD_MONTH) ----
   # NA in the OD matrix means "no count released for this pair this month", not zero
   # (see load_flowminder_od). A destination for which EVERY epicentre row is NA has
   # an unobserved share and is carried as NA; where some rows are released, the
@@ -948,7 +981,7 @@ arrival_predictors <- local({
   ei <- intersect(epi_set, rownames(M_od))
   if (!length(ei)) {
     warning("[kinematics] no epicentre zone present in the Flowminder OD matrix; ",
-            "the March relocation predictor is unavailable.", call. = FALSE)
+            "the relocation predictor is unavailable.", call. = FALSE)
     od_share_v <- setNames(rep(NA_real_, nrow(ctr)), ctr$health_zone)
   } else {
     sub  <- M_od[ei, , drop = FALSE]
@@ -959,15 +992,24 @@ arrival_predictors <- local({
     od_share_v <- raw / sum(raw, na.rm = TRUE)
   }
 
-  # ---- latest short-trip snapshot (pooled M+B+R cohort) ---------------------
-  # load_short_trip_snapshot() already returns destination PROPORTIONS for the pooled
-  # epicentre cohort, so there is no epicentre subsetting to do here; it is
-  # renormalised because the released percentages need not sum to exactly 100.
-  st_tag <- FLOWMINDER_ST_TAGS[length(FLOWMINDER_ST_TAGS)]
-  st_v   <- load_short_trip_snapshot(st_tag)
-  names(st_v) <- .can(names(st_v))
-  st_v <- .collapse(st_v)
-  st_v <- st_v / sum(st_v, na.rm = TRUE)
+  # ---- short-trip snapshot (pooled M+B+R cohort) -----------------------------
+  # SNAPSHOT: build_M1's rule — the LATEST on or before the analysis date, else (a back-dated
+  # run older than every snapshot) the EARLIEST, which leaks least; never the newest overall.
+  # SOURCE: load_short_trip_profile(), i.e. the RAW annex table resolved against the zone
+  # spine with its province column — the source build_M1 and M2 use. The processed matrix
+  # (load_short_trip_snapshot()) was canonicalised upstream against the 437-zone OD header and
+  # silently lacks real spine destinations (see load_short_trip_profile and
+  # .warn_if_processed_source_stale), which then dropped out of this predictor as NA. The
+  # profile's proportions are of the pooled epicentre cohort, so there is no epicentre
+  # subsetting to do here; they are renormalised because the released percentages need not
+  # sum to exactly 100. The loader itself falls back to the processed matrix, with a warning,
+  # only if the raw table is absent or unusable; the source used is printed below.
+  .st_elig <- which(FLOWMINDER_ST_DATES <= ANALYSIS_DATE)
+  st_tag <- if (length(.st_elig)) FLOWMINDER_ST_TAGS[.st_elig[which.max(FLOWMINDER_ST_DATES[.st_elig])]]
+            else FLOWMINDER_ST_TAGS[which.min(FLOWMINDER_ST_DATES)]
+  st_date <- FLOWMINDER_ST_DATES[match(st_tag, FLOWMINDER_ST_TAGS)]
+  st_prof <- load_short_trip_profile(st_tag, zones_all, if (length(aliases)) aliases else NULL)
+  st_v    <- st_prof$props / sum(st_prof$props, na.rm = TRUE)
 
   .lk <- function(v, z) { out <- as.numeric(v[z]); out[is.na(match(z, names(v)))] <- NA_real_; out }
   .neglog <- function(p) ifelse(is.finite(p) & p > 0, -log(p), NA_real_)
@@ -975,8 +1017,17 @@ arrival_predictors <- local({
   out <- arr %>%
     dplyr::mutate(
       province            = ctr$province[match(health_zone, ctr$health_zone)],
+      # The epicentre set is the SOURCE of every predictor below, not an arrival: its
+      # distance and travel time are 0 by definition and its own outflow share is undefined
+      # (the short-trip cohort IS these zones). Flagged so the fits can exclude it from EVERY
+      # predictor alike — see arrival_predictor_fits.
+      epicentre           = health_zone %in% epi_set,
+      # first onset on or before the last day of the FIT_CUTOFF week: the right-truncated tail
+      # enters no fit (the same rule, and the same flag, as spread_kinematics_zones.csv)
+      in_fit_window       = first_onset <= FIT_LAST_DAY,
       arrival_origin      = arrival_origin,
       arrival_days        = as.numeric(first_onset - arrival_origin),
+      shorttrip_snapshot  = st_date,
       dist_greatcircle_km = .lk(gc_km_v,  health_zone),
       dist_road_km        = .lk(road_km_v, health_zone),
       travel_time_h       = .lk(road_h_v,  health_zone),
@@ -989,17 +1040,34 @@ arrival_predictors <- local({
       log10_population        = ifelse(is.finite(population) & population > 0, log10(population), NA_real_)) %>%
     dplyr::arrange(arrival_days, health_zone)
 
-  attr(out, "epi_set")        <- epi_set
-  attr(out, "shorttrip_tag")  <- st_tag
-  attr(out, "arrival_origin") <- arrival_origin
+  attr(out, "epi_set")          <- epi_set
+  attr(out, "shorttrip_tag")    <- st_tag
+  attr(out, "shorttrip_source") <- st_prof$source
+  attr(out, "arrival_origin")   <- arrival_origin
   out
 })
 
+# The fit-window flag must be the kinematics' own: same line list, same weeks, so a zone is in
+# the arrival fits exactly when compute_kinematics() counted it inside the fit window.
+.fw_chk <- match(K$zones$health_zone, arrival_predictors$health_zone)
+stopifnot(!anyNA(.fw_chk),
+          identical(arrival_predictors$in_fit_window[.fw_chk], K$zones$in_fit_window))
+
 ARRIVAL_ORIGIN <- attr(arrival_predictors, "arrival_origin")
-message(sprintf("[kinematics] arrival-predictor table: %d zone(s), origin %s, epicentre = %s, short-trip snapshot %s",
-                nrow(arrival_predictors), format(ARRIVAL_ORIGIN, "%Y-%m-%d"),
+# Whether the origin is the date_index floor, and how many of the confirmed onsets dated on it
+# are imputed (an imputed onset that would fall earlier is clamped there) — counts only.
+.on_floor <- ll_primary$confirmed %in% TRUE & !is.na(ll_primary$date_index) &
+  ll_primary$date_index == ARRIVAL_ORIGIN
+message(sprintf("[kinematics] arrival-predictor table: %d zone(s), %d in the fit window (first onset <= %s), origin %s%s, epicentre = %s, short-trip snapshot %s (%s source)",
+                nrow(arrival_predictors), sum(arrival_predictors$in_fit_window),
+                format(FIT_LAST_DAY, "%Y-%m-%d"), format(ARRIVAL_ORIGIN, "%Y-%m-%d"),
+                if (ARRIVAL_ORIGIN == as.Date(OUTBREAK_START))
+                  sprintf(" (= OUTBREAK_START, the date_index floor; %d of the %d confirmed onset(s) on it imputed)",
+                          sum(.on_floor & ll_primary$onset_imputed %in% TRUE), sum(.on_floor))
+                else "",
                 paste(attr(arrival_predictors, "epi_set"), collapse = "+"),
-                attr(arrival_predictors, "shorttrip_tag")))
+                attr(arrival_predictors, "shorttrip_tag"),
+                attr(arrival_predictors, "shorttrip_source")))
 
 # Written at FULL WORKING PRECISION, not rounded for reading. The fits below are the
 # panel's published statistics and a reader must be able to recompute them from this
@@ -1009,13 +1077,17 @@ message(sprintf("[kinematics] arrival-predictor table: %d zone(s), origin %s, ep
 # these magnitudes and still keeps the file readable.
 readr::write_csv(
   arrival_predictors %>%
-    dplyr::transmute(health_zone, province, first_onset, arrival_origin, arrival_days,
+    dplyr::transmute(health_zone, province, epicentre, in_fit_window,
+                     first_onset, arrival_origin, arrival_days,
                      dplyr::across(c(dist_greatcircle_km, dist_road_km, travel_time_h,
                                      share_shorttrip, share_relocation,
                                      neglog_share_shorttrip, neglog_share_relocation,
                                      population, log10_population),
                                    ~ signif(.x, 12)),
-                     cases_total),
+                     cases_total,
+                     # the snapshot share_shorttrip was read from (one date for the table), so a
+                     # figure can name its month without re-deriving the selection rule
+                     shorttrip_snapshot),
   file.path(KEY_DIR, "arrival_predictors.csv"))
 
 # Per-predictor fit of PREDICTOR on ARRIVAL DAYS. The orientation matters and is the
@@ -1024,8 +1096,13 @@ readr::write_csv(
 # line from these two numbers rather than refitting. R^2 is symmetric in x and y, rho
 # is rank-based, so neither depends on the orientation; the slope does.
 arrival_predictor_fits <- local({
-  preds <- c(neglog_share_shorttrip  = "-log(share of the epicentre region's short-trip outflow)",
-             neglog_share_relocation = "-log(share of the epicentre region's March relocation outflow)",
+  # Month NAME by lookup (month.name), not format(, "%B"), which follows the session locale.
+  .month_of <- function(d) if (length(d) == 1L && !is.na(d))
+    paste0(month.name[as.integer(format(as.Date(d), "%m"))], " ") else ""
+  preds <- c(neglog_share_shorttrip  = sprintf("-log(share of the epicentre region's %sshort-trip outflow)",
+                                               .month_of(arrival_predictors$shorttrip_snapshot[1])),
+             neglog_share_relocation = sprintf("-log(share of the epicentre region's %srelocation outflow)",
+                                               .month_of(get0("FLOWMINDER_OD_MONTH", ifnotfound = as.Date(NA)))),
              dist_greatcircle_km     = "great-circle distance from the nearest epicentre zone (km)",
              dist_road_km            = "road distance from the nearest epicentre zone (km)",
              travel_time_h           = "road travel time from the nearest epicentre zone (h)",
@@ -1047,51 +1124,97 @@ arrival_predictor_fits <- local({
   }
 
   # Imputation uncertainty. The predictors are fixed geography and mobility; only the
-  # arrival dates are imputed, so each replicate re-dates the SAME zones and refits.
-  # A replicate can invade a zone the primary draw does not (its first usable onset
-  # can land inside the window), so the replicate n is allowed to differ and is not
-  # asserted equal to the primary n.
+  # arrival dates are imputed, so each replicate re-dates the SAME zones and refits. The zone
+  # set itself does not change (every confirmed record has a date_index, so the onset seed
+  # moves arrival dates, never which zones are invaded), but a completion's dates can move a
+  # zone's first onset across FIT_LAST_DAY. Each completion is therefore held to its OWN fit
+  # window — as compute_kinematics() holds each replicate to the same calendar cutoff — and
+  # its n may differ from the primary n; it is not asserted equal.
   rep_arr <- if (!is.null(imp) && nrow(imp) && "arrivals" %in% names(imp)) imp$arrivals else list()
   .rep_x <- lapply(rep_arr, function(a) {
     if (is.null(a) || !nrow(a)) return(NULL)
-    as.numeric(a$first_onset[match(arrival_predictors$health_zone, a$health_zone)] -
-                 min(a$first_onset))
+    fo <- a$first_onset[match(arrival_predictors$health_zone, a$health_zone)]
+    xr <- as.numeric(fo - min(a$first_onset))
+    xr[!(fo <= FIT_LAST_DAY)] <- NA_real_          # this completion's right-truncated tail
+    xr
   })
   .rep_x <- Filter(Negate(is.null), .rep_x)
 
+  # THE EPICENTRE SET IS EXCLUDED FROM EVERY FIT. Its zones are the source the predictors are
+  # measured FROM: distance and travel time are 0 by definition and their arrival days are the
+  # earliest of all (arrival_predictors.csv lists them), while their outflow share is
+  # undefined. They used to sit in the distance, travel-time and relocation fits as three
+  # perfectly concordant points at the origin of both axes, and to drop out of the short-trip
+  # fit as NA, so the predictors were compared on DIFFERENT supports and the geographic ones
+  # carried an advantage that measured nothing about arrival order. Every predictor is now fitted
+  # on the invaded zones OUTSIDE the epicentre set and INSIDE the fit window (`support` says so
+  # on every row), and n is published per fit, because the mobility predictors still drop the
+  # zones for which no flow out of the epicentre was released.
+  #
+  # THE COMMON-SUPPORT COLUMNS (*_common) close the remaining gap: every predictor refitted on
+  # the ONE zone set on which ALL of them are defined, so R^2 and rho can be compared across
+  # predictors like for like (n_common is the same on every row by construction).
+  epi   <- arrival_predictors$epicentre %in% TRUE
+  infit <- arrival_predictors$in_fit_window %in% TRUE
   x_all <- arrival_predictors$arrival_days
+  x_all[!infit] <- NA_real_                          # the right-truncated tail enters no fit
+  .y_of <- function(p) { y <- arrival_predictors[[p]]; y[epi] <- NA_real_; y }
+  common <- is.finite(x_all) & !epi &
+    Reduce(`&`, lapply(names(preds), function(p) is.finite(arrival_predictors[[p]])))
+  .support <- sprintf(paste0("invaded zones outside the epicentre set (%s), first onset on or before %s ",
+                             "(the right-truncated tail is excluded, as from every kinematics fit), ",
+                             "with this predictor defined"),
+                      paste(attr(arrival_predictors, "epi_set"), collapse = "+"),
+                      format(FIT_LAST_DAY, "%Y-%m-%d"))
   dplyr::bind_rows(lapply(names(preds), function(p) {
-    y  <- arrival_predictors[[p]]
+    y  <- .y_of(p)
     f  <- .fit_one(x_all, y)
+    fc <- .fit_one(x_all[common], y[common])
     k  <- is.finite(x_all) & is.finite(y)
-    rr <- if (length(.rep_x)) vapply(.rep_x, function(xr) {
-            g <- .fit_one(xr, y); c(g$r2, g$spearman) }, numeric(2)) else matrix(numeric(0), nrow = 2)
+    # Imputation interval over the COMPLETIONS, the primary counted as replicate 0 — the same
+    # convention as the summary CSV's imp_* columns, so a published value can no longer sit
+    # outside its own interval merely because the primary draw was left out of it.
+    rr <- cbind(c(f$r2, f$spearman),
+                if (length(.rep_x)) vapply(.rep_x, function(xr) {
+                  g <- .fit_one(xr, y); c(g$r2, g$spearman) }, numeric(2))
+                else matrix(numeric(0), nrow = 2))
     .qq <- function(v, q) if (length(v) && any(is.finite(v))) unname(stats::quantile(v[is.finite(v)], q, names = FALSE)) else NA_real_
     tibble::tibble(
-      predictor = p, label = unname(preds[p]), n = f$n,
+      predictor = p, label = unname(preds[p]), support = .support, n = f$n,
       r2 = f$r2, intercept = f$intercept, slope = f$slope,
       pearson = f$pearson, spearman = f$spearman,
-      n_imputation_replicates = ncol(rr),
-      r2_lo       = .qq(rr[1, ], 0.05), r2_hi       = .qq(rr[1, ], 0.95),
-      spearman_lo = .qq(rr[2, ], 0.05), spearman_hi = .qq(rr[2, ], 0.95),
-      # The facets are NOT on common support, and the dropping is selection ON the
-      # predictor, which is correlated with the outcome: a zone is dropped precisely
-      # when no flow out of the epicentre was released for it. These two columns make
-      # that selection visible, so a reader comparing R^2 across predictors can see
-      # whether the denominators describe the same outbreak.
+      n_common = fc$n, r2_common = fc$r2, spearman_common = fc$spearman,
+      n_imputation_completions = ncol(rr),
+      r2_lo       = .qq(rr[1, ], 0.05), r2_med       = .qq(rr[1, ], 0.50),
+      r2_hi       = .qq(rr[1, ], 0.95),
+      spearman_lo = .qq(rr[2, ], 0.05), spearman_med = .qq(rr[2, ], 0.50),
+      spearman_hi = .qq(rr[2, ], 0.95),
+      # Beyond the epicentre exclusion the per-predictor fits are still NOT on common support,
+      # and that dropping is selection ON the predictor, which is correlated with the outcome:
+      # a zone is dropped precisely when no flow out of the epicentre was released for it.
+      # These two columns make that selection visible (both over the non-epicentre zones
+      # inside the fit window), so a reader comparing R^2 across predictors can see whether
+      # the denominators describe the same outbreak; the *_common columns remove it.
       mean_arrival_days_used    = if (any(k)) mean(x_all[k]) else NA_real_,
-      mean_arrival_days_dropped = if (any(!k)) mean(x_all[!k], na.rm = TRUE) else NA_real_)
+      mean_arrival_days_dropped = { d <- is.finite(x_all) & !epi & !is.finite(y)
+                                    if (any(d)) mean(x_all[d]) else NA_real_ })
   }))
 })
 readr::write_csv(
   arrival_predictor_fits %>%
     dplyr::mutate(dplyr::across(c(r2, intercept, slope, pearson, spearman,
-                                  r2_lo, r2_hi, spearman_lo, spearman_hi,
+                                  r2_common, spearman_common,
+                                  r2_lo, r2_med, r2_hi, spearman_lo, spearman_med, spearman_hi,
                                   mean_arrival_days_used, mean_arrival_days_dropped),
                                 ~ signif(.x, 12))),
   file.path(KEY_DIR, "arrival_predictor_fits.csv"))
+message(sprintf("[kinematics] arrival-predictor fits exclude the epicentre set (%s) and the %d zone(s) first seen after %s (right-truncated tail); common support n = %d",
+                paste(attr(arrival_predictors, "epi_set"), collapse = "+"),
+                sum(!arrival_predictors$in_fit_window), format(FIT_LAST_DAY, "%Y-%m-%d"),
+                arrival_predictor_fits$n_common[1]))
 for (i in seq_len(nrow(arrival_predictor_fits))) with(arrival_predictor_fits[i, ],
-  message(sprintf("[kinematics]   %-24s n=%2d  R2=%.3f  rho=%+.3f", predictor, n, r2, spearman)))
+  message(sprintf("[kinematics]   %-24s n=%2d  R2=%.3f  rho=%+.3f | common n=%2d  R2=%.3f  rho=%+.3f",
+                  predictor, n, r2, spearman, n_common, r2_common, spearman_common)))
 
 weekly_out <- K$weekly %>%
   dplyr::mutate(completeness_est = comp[match(week_start, weeks_all)]) %>%
@@ -1104,7 +1227,8 @@ weekly_out <- K$weekly %>%
                    cog_step_km = round(cog_step_km, 2),
                    cog_speed_km_wk = round(cog_speed_km_wk, 2),
                    cog_bearing_deg = round(cog_bearing_deg, 1),
-                   cog_dist_from_epi_km = round(cog_dist_from_epi_km, 2),
+                   # from the single index zone (cf. arrival_predictors.csv's M+B+R distances)
+                   cog_dist_from_index_zone_km = round(cog_dist_from_epi_km, 2),
                    inv_cog_lon = round(inv_cog_lon, 5), inv_cog_lat = round(inv_cog_lat, 5),
                    inv_cog_speed_km_wk = round(inv_cog_speed_km_wk, 2),
                    inv_cog_bearing_deg = round(inv_cog_bearing_deg, 1),
@@ -1120,16 +1244,18 @@ weekly_out <- K$weekly %>%
                    completeness_est = round(completeness_est, 3), truncated)
 readr::write_csv(weekly_out, file.path(KEY_DIR, "spread_kinematics_weekly.csv"))
 
-# Mean new invasions per week over the fit window, with a 90% bootstrap interval over WEEKS
-# (the independent unit here: each week contributes one count). Published for Panel C of
+# Mean new invasions per week over weeks 1..fit_max (.nz_window()), with a 90% bootstrap
+# interval that resamples WEEKS as if exchangeable. They are not: new_zones trends over the
+# window and is serially correlated, so this interval describes the week-to-week spread
+# around the window mean, not the sampling uncertainty of a stationary invasion rate, and is
+# labelled "week-bootstrap interval" (not a CI) wherever it is shown. Published for Panel C of
 # Figure_spread_kinematics_compact, which must not compute its own reference level.
-.nz_rows <- K$weekly$week >= 1L & !K$weekly$truncated & is.finite(K$weekly$new_zones)
-.nz_vals <- as.numeric(K$weekly$new_zones[.nz_rows])
-.nz_fit_max <- if (any(.nz_rows)) max(K$weekly$week[.nz_rows]) else NA_integer_
-.nz_mean <- if (length(.nz_vals)) mean(.nz_vals) else NA_real_
+.nz_vals <- NZ_PRIMARY$vals
+.nz_fit_max <- NZ_PRIMARY$fit_max
+.nz_mean <- NZ_PRIMARY$mean
 .nz_ci <- if (length(.nz_vals) >= 3L) {
   .old_seed <- if (exists(".Random.seed", envir = globalenv())) get(".Random.seed", envir = globalenv()) else NULL
-  set.seed(RANDOM_SEED_BASE)
+  set_fixed_seed(RANDOM_SEED_BASE)
   .bs <- vapply(seq_len(2000L),
                 function(i) mean(.nz_vals[sample.int(length(.nz_vals), length(.nz_vals), TRUE)]),
                 numeric(1))
@@ -1137,34 +1263,56 @@ readr::write_csv(weekly_out, file.path(KEY_DIR, "spread_kinematics_weekly.csv"))
   unname(stats::quantile(.bs, c(0.05, 0.95), names = FALSE))
 } else c(NA_real_, NA_real_)
 
+#' The geography (named R2 vector) with the largest finite R2; exact ties are named together.
+.best_geo <- function(r2) {
+  r2 <- r2[is.finite(r2)]
+  if (!length(r2)) return("not estimable")
+  paste(names(r2)[r2 == max(r2)], collapse = " = ")
+}
+
+# How stable the envelope verdict is across the onset completions (primary included, as in imp_q()).
+VERDICT_STABILITY <- if (is.null(imp) || !nrow(imp)) "" else
+  sprintf(" (the same verdict class in %d of %d onset completions, primary included)",
+          1L + sum(.verdict_class(imp$envelope_verdict) == .verdict_class(S$envelope_verdict)),
+          nrow(imp) + 1L)
+
 summary_out <- tibble::tribble(
   ~statistic, ~value, ~lo, ~hi, ~unit, ~basis,
   "Radial expansion rate (road)",         S$v_radial_road, ci_road[1], ci_road[2], "km/week",
-    "OLS of road distance from the index zone on invasion week; 95% zone bootstrap",
+    "OLS of road distance from the index zone on invasion week; lo/hi = 90% zone bootstrap",
   "Radial expansion rate (great-circle)", S$v_radial_gc, ci_gc[1], ci_gc[2], "km/week",
-    "OLS of great-circle distance on invasion week; 95% zone bootstrap",
+    "OLS of great-circle distance from the index zone on invasion week; lo/hi = 90% zone bootstrap",
   "Radial expansion rate (road, Theil-Sen)", S$v_radial_road_ts, NA_real_, NA_real_, "km/week",
     "median of pairwise slopes — outlier-resistant check on the OLS road rate above",
   "Radial expansion rate (great-circle, Theil-Sen)", S$v_radial_gc_ts, NA_real_, NA_real_, "km/week",
     "median of pairwise slopes — outlier-resistant check on the OLS great-circle rate",
   "Radial expansion rate (travel time)", S$v_radial_time, NA_real_, NA_real_, "hours/week",
-    sprintf("OLS of OSRM travel time on invasion week; the best-fitting geography of the three (R2 = %.2f vs %.2f road, %.2f great-circle)",
-            S$v_radial_time_r2, S$v_radial_road_r2, S$v_radial_gc_r2),
+    # WHICH geography fits best is DERIVED from the three R2, never typed: the sentence used to
+    # assert travel time won whatever the numbers beside it said.
+    sprintf("OLS of OSRM travel time on invasion week; R2 = %.2f vs %.2f road, %.2f great-circle (best-fitting geography of the three: %s)",
+            S$v_radial_time_r2, S$v_radial_road_r2, S$v_radial_gc_r2,
+            .best_geo(c(`travel time` = S$v_radial_time_r2, `road distance` = S$v_radial_road_r2,
+                        `great-circle` = S$v_radial_gc_r2))),
   "Median-reach growth rate (road)",      S$v_reach_med, NA_real_, NA_real_, "km/week",
     "OLS of the MEDIAN distance of invaded zones on week (bulk expansion of the invaded set)",
   "Case-weighted mean distance trend",    S$v_case_mean, NA_real_, NA_real_, "km/week",
     "OLS of the case-weighted mean distance from the index zone on week",
-  "Envelope: week reaching 90% of final extent", S$week_reach_90pct, NA_real_, NA_real_, "week",
-    "first week in which R_max(t) attains 0.9x its fit-window final value",
-  "Envelope expansion, to 90% of extent", S$v_front_early, NA_real_, NA_real_, "km/week",
-    "R_max at that week divided by that week: how fast the extent was established",
-  "Envelope expansion, after 90% of extent", S$v_front_late, NA_real_, NA_real_, "km/week",
-    "OLS of R_max on week thereafter; ~0 means the extent has SATURATED (no wavefront). It does NOT mean long-range seeding stopped — see the two rows below, which are the statistics that show it did not",
-  "New invasions after saturation, median furthest", S$newmax_med_after, NA_real_, NA_real_, "km",
-    sprintf("median, over the %d post-saturation fit-window weeks with a new invasion, of the FURTHEST zone invaded that week — the recurring long-range seeding the running-maximum envelope hides",
+  # THE ENVELOPE IS THE p90 REACH and the verdict is the DATA's (compute_kinematics(): the
+  # running maximum let one distant zone set the threshold week, the "to 90%" speed and a
+  # post-threshold slope of zero by construction, and the word SATURATED was typed here).
+  "Envelope (p90 reach): week reaching 90% of final value", S$week_p90_reach_90pct, NA_real_, NA_real_, "week",
+    "first fit-window week in which the 90th-percentile road reach of the invaded set, R_p90(t), attains 0.9x its fit-window final value (one distant zone cannot set it, unlike the running maximum)",
+  "Envelope (p90 reach) slope, up to that week", S$v_env_p90_early, NA_real_, NA_real_, "km/week",
+    sprintf("OLS of R_p90 on week over the %d fit-window week(s) up to and including the threshold week: how fast the envelope was established",
+            S$n_weeks_env_early),
+  "Envelope (p90 reach) slope, from that week", S$v_env_p90_late, NA_real_, NA_real_, "km/week",
+    sprintf("OLS of R_p90 on week over the %d fit-window week(s) from the threshold week on. Verdict (post-threshold slope at most a tenth of the establishing slope = saturated): %s%s. A saturated envelope does NOT mean long-range seeding stopped: see the two rows below",
+            S$n_weeks_env_late, S$envelope_verdict, VERDICT_STABILITY),
+  "New invasions after the envelope threshold, median furthest", S$newmax_med_after, NA_real_, NA_real_, "km",
+    sprintf("median, over the %d fit-window weeks after the p90 threshold week with a new invasion, of the FURTHEST zone invaded that week — the long-range seeding an envelope does not show",
             S$n_weeks_after),
-  "New invasions after saturation, furthest", S$newmax_max_after, NA_real_, NA_real_, "km",
-    "single furthest zone invaded in any post-saturation fit-window week",
+  "New invasions after the envelope threshold, furthest", S$newmax_max_after, NA_real_, NA_real_, "km",
+    "single furthest zone invaded in any fit-window week after the p90 threshold week",
   "Leading-edge slope, whole window (road)", S$v_front_road, NA_real_, NA_real_, "km/week",
     "OLS of R_max(t) over the whole fit window; a running max, so this is a window AVERAGE, not a wavefront speed — read it with the two rows above",
   "Leading-edge slope, p90 (road)",       S$v_front_p90_road, NA_real_, NA_real_, "km/week",
@@ -1186,7 +1334,9 @@ summary_out <- tibble::tribble(
   "Dispersion growth rate",               S$v_disp_km_wk, NA_real_, NA_real_, "km/week",
     "OLS of the weekly case standard distance on week",
   "Effective diffusivity",                S$diffusion_km2_wk, NA_real_, NA_real_, "km^2/week",
-    sprintf("slope(SD^2 ~ t)/4 — the isotropic-diffusion reading of the dispersion growth. The SD^2 ~ t fit has R2 = %.2f: a low R2 means the case cloud is not spreading out at all, so this is a null result, NOT a fitted diffusion constant to be quoted on its own.",
+    # The R2 is STATED, not interpreted: the sentence here used to call the row "a null result"
+    # whatever the R2 was (it printed R2 = 0.87 beside it).
+    sprintf("slope(SD^2 ~ t)/4, the isotropic-diffusion reading of the dispersion growth; SD^2 ~ t fit R2 = %.2f (D is meaningful only if SD^2 grows linearly in t)",
             S$diffusion_r2),
   "Invaded-zone accrual rate",            S$accrual_rate_wk, NA_real_, NA_real_, "log-zones/week",
     "OLS of log(cumulative invaded zones) on week",
@@ -1196,7 +1346,7 @@ summary_out <- tibble::tribble(
   # window is weeks 1..fit_max: week 0 is the seeding condition (those zones already had
   # confirmed cases when the series opens), and the truncated tail is incompletely observed.
   "Mean new invasions per week",          .nz_mean, .nz_ci[1], .nz_ci[2], "zones/week",
-    sprintf("mean of new_zones over weeks 1-%d (week 0 = seeding, truncated tail excluded); 90%% week-bootstrap",
+    sprintf("mean of new_zones over weeks 1-%d (week 0 = seeding, truncated tail excluded); lo/hi = 90%% week-bootstrap interval, weeks resampled as exchangeable (the series trends and is serially correlated, so this is the week-to-week spread around the mean, not a CI for a stationary rate)",
             .nz_fit_max),
   "Invaded-zone doubling time",           S$accrual_doubling_wk, NA_real_, NA_real_, "weeks",
     "log(2) / accrual rate",
@@ -1209,23 +1359,56 @@ summary_out <- tibble::tribble(
   "Zones invaded (all weeks)",            S$n_zones_all, NA_real_, NA_real_, "zones",
     "includes the right-truncated tail")
 
-# Imputation-uncertainty columns (5th-95th percentile across independent onset draws).
+# Imputation-uncertainty columns: 5th / 50th / 95th percentile across the onset COMPLETIONS
+# (the primary counted as replicate 0; see imp_q()). `value` is the PRIMARY completion — the
+# one every other module scores — not the median, and `value_basis` says so on every row;
+# imp_med is published beside it so the two can be compared directly. EVERY row has an entry
+# except the centre-of-gravity bearing: an angle, whose linear percentiles are meaningless
+# near the 0/360 wrap. The stopifnot keeps a new summary row from silently going without one.
 imp_map <- c("Radial expansion rate (road)" = "v_radial_road",
              "Radial expansion rate (great-circle)" = "v_radial_gc",
+             "Radial expansion rate (road, Theil-Sen)" = "v_radial_road_ts",
+             "Radial expansion rate (great-circle, Theil-Sen)" = "v_radial_gc_ts",
+             "Radial expansion rate (travel time)" = "v_radial_time",
              "Median-reach growth rate (road)" = "v_reach_med",
+             "Case-weighted mean distance trend" = "v_case_mean",
+             "Envelope (p90 reach): week reaching 90% of final value" = "week_p90_reach_90pct",
+             "Envelope (p90 reach) slope, up to that week" = "v_env_p90_early",
+             "Envelope (p90 reach) slope, from that week" = "v_env_p90_late",
+             "New invasions after the envelope threshold, median furthest" = "newmax_med_after",
+             "New invasions after the envelope threshold, furthest" = "newmax_max_after",
+             "Leading-edge slope, whole window (road)" = "v_front_road",
+             "Leading-edge slope, p90 (road)" = "v_front_p90_road",
              "Case centre-of-gravity speed" = "v_cog_med",
+             "New-invasion centre-of-gravity speed" = "v_invcog_med",
              "Case centre-of-gravity net speed" = "v_cog_net",
+             "Case centre-of-gravity net displacement" = "cog_net_disp_km",
+             "Case centre-of-gravity path length" = "cog_path_km",
+             "Case centre-of-gravity straightness" = "cog_straightness",
              "Dispersion growth rate" = "v_disp_km_wk",
+             "Effective diffusivity" = "diffusion_km2_wk",
+             "Invaded-zone accrual rate" = "accrual_rate_wk",
+             "Mean new invasions per week" = "nz_mean",
              "Invaded-zone doubling time" = "accrual_doubling_wk",
              "Reach at the end of the fit window" = "reach_max_km",
-             "Zones invaded (fit window)" = "n_zones_fit")
+             "Median reach at the end of the fit window" = "reach_med_km",
+             "Zones invaded (fit window)" = "n_zones_fit",
+             "Zones invaded (all weeks)" = "n_zones_all")
+stopifnot(setequal(c(names(imp_map), "Case centre-of-gravity bearing"), summary_out$statistic))
 iq <- t(vapply(summary_out$statistic, function(s)
-  if (s %in% names(imp_map)) imp_q(unname(imp_map[s])) else c(NA_real_, NA_real_),
-  numeric(2)))
+  if (s %in% names(imp_map)) imp_q(unname(imp_map[s])) else c(NA_real_, NA_real_, NA_real_),
+  numeric(3)))
+.n_compl <- if (is.null(imp) || !nrow(imp)) 1L else nrow(imp) + 1L
 summary_out <- summary_out %>%
   dplyr::mutate(value = round(value, 4), lo = round(lo, 4), hi = round(hi, 4),
-                imp_lo = round(iq[, 1], 4), imp_hi = round(iq[, 2], 4)) %>%
-  dplyr::relocate(imp_lo, imp_hi, .after = hi)
+                imp_lo = round(iq[, 1], 4), imp_med = round(iq[, 2], 4),
+                imp_hi = round(iq[, 3], 4),
+                value_basis = sprintf("primary onset completion (ONSET_IMPUTE_SEED %d)%s",
+                                      ONSET_SEED_BASE,
+                                      ifelse(statistic %in% names(imp_map),
+                                             sprintf("; imp_lo/imp_med/imp_hi = 5th/50th/95th percentile over %d completions (primary + %d replicates)",
+                                                     .n_compl, .n_compl - 1L), ""))) %>%
+  dplyr::relocate(imp_lo, imp_med, imp_hi, .after = hi)
 readr::write_csv(summary_out, file.path(KEY_DIR, "spread_kinematics_summary.csv"))
 
 diag_out <- dplyr::bind_rows(
@@ -1239,7 +1422,7 @@ diag_out <- dplyr::bind_rows(
                                    ifelse(primary, " [primary]", "")),
                      spearman = NA_real_, r2 = NA_real_,
                      value = round(v_radial_road, 3),
-                     note = sprintf("v_radial=%.1f v_envelope_ols=%.1f v_cog=%.1f v_disp=%.1f n_zones=%d",
+                     note = sprintf("v_radial=%.1f v_front_rmax_ols=%.1f v_cog=%.1f v_disp=%.1f n_zones=%d",
                                     v_radial_road, v_front_road, v_cog_med, v_disp_km_wk,
                                     n_zones_fit)),
   orig_sens %>%
@@ -1271,18 +1454,19 @@ message("\n", strrep("-", 74))
 message(sprintf("  index zone (epicentre)      %s (%s)", K$epi_zone, K$epi_province))
 message(sprintf("  fit window                  weeks 0-%d of 0-%d (last %d dropped: truncation)",
                 K$fit_max, K$week_max, K$n_trunc))
-message(sprintf("  radial expansion  (road)    %.1f km/wk  [95%% zone bootstrap %.1f, %.1f]",
+message(sprintf("  radial expansion  (road)    %.1f km/wk  [90%% zone bootstrap %.1f, %.1f]",
                 S$v_radial_road, ci_road[1], ci_road[2]))
-message(sprintf("  radial expansion  (gc)      %.1f km/wk  [95%% zone bootstrap %.1f, %.1f]",
+message(sprintf("  radial expansion  (gc)      %.1f km/wk  [90%% zone bootstrap %.1f, %.1f]",
                 S$v_radial_gc, ci_gc[1], ci_gc[2]))
 message(sprintf("  robustness of that rate     Theil-Sen %.1f (road) / %.1f (gc) km/wk; %.1f km/wk dropping %d sitrep-only zone(s)",
                 S$v_radial_road_ts, S$v_radial_gc_ts, nosit_road$slope, nosit_n))
 message(sprintf("  median-reach growth (road)  %.1f km/wk", S$v_reach_med))
-message(sprintf("  envelope                    reached 90%% of its final extent by week %.0f (%.0f km/wk to then, %+.1f km/wk after) -> %s",
-                S$week_reach_90pct, S$v_front_early, S$v_front_late,
-                if (isTRUE(abs(S$v_front_late) < 0.1 * abs(S$v_front_early)))
-                  "SATURATED: no travelling wavefront" else "still expanding"))
-message(sprintf("  ...but seeding CONTINUED     in the %d post-saturation week(s) with a new invasion, the furthest new zone was a median %.0f km out (max %.0f km) — invisible in the running-max envelope",
+# The verdict is the one compute_kinematics() derived from the data (and wrote to the CSV);
+# it is not re-decided, and not typed, here.
+message(sprintf("  envelope (p90 reach)        reached 90%% of its final value by week %.0f (%+.1f km/wk to then over %d wk, %+.1f km/wk after over %d wk) -> %s",
+                S$week_p90_reach_90pct, S$v_env_p90_early, S$n_weeks_env_early,
+                S$v_env_p90_late, S$n_weeks_env_late, S$envelope_verdict))
+message(sprintf("  new invasions after that    in the %d later fit-window week(s) with a new invasion, the furthest new zone was a median %.0f km out (max %.0f km)",
                 S$n_weeks_after, S$newmax_med_after, S$newmax_max_after))
 message(sprintf("  case CoG speed              %.1f km/wk (IQR %.1f-%.1f); net %.1f km/wk, bearing %.0f deg, straightness %.2f",
                 S$v_cog_med, S$v_cog_iqr_lo, S$v_cog_iqr_hi, S$v_cog_net,
@@ -1308,10 +1492,15 @@ if (!is.null(imp) && nrow(imp)) {
   tb <- sort(table(imp$epi_zone), decreasing = TRUE)
   message(sprintf("  onset-imputation replicates %d; index zone stable in %d%% (modal %s)",
                   nrow(imp), round(100 * tb[1] / sum(tb)), names(tb)[1]))
+  # median [5th, 95th] over the completions, primary included as replicate 0 (imp_q())
   message(sprintf("     v_radial %.1f [%.1f, %.1f]   v_cog %.1f [%.1f, %.1f]   max reach %.0f [%.0f, %.0f] km",
-                  stats::median(imp$v_radial_road), imp_q("v_radial_road")[1], imp_q("v_radial_road")[2],
-                  stats::median(imp$v_cog_med), imp_q("v_cog_med")[1], imp_q("v_cog_med")[2],
-                  stats::median(imp$reach_max_km), imp_q("reach_max_km")[1], imp_q("reach_max_km")[2]))
+                  imp_q("v_radial_road")[2], imp_q("v_radial_road")[1], imp_q("v_radial_road")[3],
+                  imp_q("v_cog_med")[2], imp_q("v_cog_med")[1], imp_q("v_cog_med")[3],
+                  imp_q("reach_max_km")[2], imp_q("reach_max_km")[1], imp_q("reach_max_km")[3]))
+  message(sprintf("     envelope verdict %s%s", .verdict_class(S$envelope_verdict), VERDICT_STABILITY))
+  # A guard, not an expected event: load_linelist() floors date_index at OUTBREAK_START and the
+  # grid ends on the analysis week, so on the current line list every completion has the same
+  # grid. If that ever changes, the calendar-anchored fit window keeps the runs comparable.
   if (dplyr::n_distinct(imp$n_weeks) > 1L)
     message(sprintf("     note: onset draws produced %d different week-grid lengths (%s); the fit window is calendar-anchored, so the runs stay comparable",
                     dplyr::n_distinct(imp$n_weeks),
@@ -1320,382 +1509,14 @@ if (!is.null(imp) && nrow(imp)) {
 message(strrep("-", 74), "\n")
 
 # =============================================================================
-# SECTION 6 — figure
+# SECTION 6 — figure (REMOVED)
 # =============================================================================
-W  <- K$weekly
-WF <- W %>% dplyr::filter(!truncated)
-Z  <- K$zones
-
-# Province palette: identity hues for the outbreak provinces, disjoint spares else.
-prov_palette <- function(provs) {
-  provs <- sort(unique(as.character(provs[!is.na(provs)])))
-  provs <- c(intersect(names(PROV_COL), provs), setdiff(provs, names(PROV_COL)))
-  spare <- setdiff(SPARE_COL, unname(PROV_COL)); si <- 1L
-  cols <- setNames(character(length(provs)), provs)
-  for (p in provs) {
-    if (p %in% names(PROV_COL)) cols[p] <- unname(PROV_COL[p])
-    else { cols[p] <- spare[((si - 1L) %% length(spare)) + 1L]; si <- si + 1L }
-  }
-  stopifnot(!anyNA(cols), all(nzchar(cols)))
-  cols
-}
-PCOL <- prov_palette(Z$province)
-Z$province <- factor(Z$province, levels = names(PCOL))
-
-# ggplot transforms the rect bounds with the y scale, so the default +/-Inf bounds
-# become NaN/Inf under a log scale (and warn). Log-scaled panels therefore pass
-# finite bounds that comfortably bracket their data instead.
-trunc_band <- function(ymin = -Inf, ymax = Inf) if (K$n_trunc > 0)
-  # xmax = Inf, NOT week_max + 0.5: a finite bound is data and would push the x scale
-  # out to it, leaving a white strip between the band and the panel edge. Infinite
-  # bounds are excluded from the scale range and drawn flush against the panel.
-  annotate("rect", xmin = K$fit_max + 0.5, xmax = Inf,
-           ymin = ymin, ymax = ymax, fill = "grey55", alpha = 0.10) else NULL
-WK_SCALE <- scale_x_continuous(breaks = scales::breaks_width(2),
-                               expand = expansion(mult = c(0.02, 0.03)))
-SHAPE_TRUNC <- scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 21), guide = "none")
-#' "value [lo, hi] unit" — but with the bracket dropped when the interval is
-#' unavailable (e.g. SPREAD_IMPUTE_REPS=0), so no panel can ever print "[NA, NA]".
-fmt_ci <- function(v, ci, unit, digits = 1) {
-  f <- paste0("%+.", digits, "f")
-  if (any(!is.finite(ci))) sprintf(paste0(f, " %s"), v, unit)
-  else sprintf(paste0(f, " [%.", digits, "f, %.", digits, "f] %s"), v, ci[1], ci[2], unit)
-}
-
-#' In-panel annotation anchored to a corner known to be empty in that panel.
-note <- function(txt, where = c("topleft", "bottomright")) {
-  where <- match.arg(where)
-  if (where == "topleft")
-    annotate("text", x = -Inf, y = Inf, hjust = -0.06, vjust = 1.7,
-             size = 2.5, colour = MUTED, label = txt)
-  else
-    annotate("text", x = Inf, y = -Inf, hjust = 1.05, vjust = -0.9,
-             size = 2.5, colour = MUTED, label = txt)
-}
-
-# ---- Panel A — map ----------------------------------------------------------
-# The invaded set spans ~800 km but the case centre of gravity only ever moves a few
-# tens of km, so at national scale its track collapses to a blob. INSET_HALF_DEG
-# controls a zoom on the origin focus that is drawn into the empty corner of the map
-# as a grob, keeping Panel A a single ggplot (so patchwork still tags it once).
-INSET_HALF_DEG <- 0.85
-
-build_core_inset <- function(shp) {
-  ex <- c(K$epi_ll[1] - INSET_HALF_DEG, K$epi_ll[1] + INSET_HALF_DEG,
-          K$epi_ll[2] - INSET_HALF_DEG, K$epi_ll[2] + INSET_HALF_DEG)
-  cg <- W %>% dplyr::filter(is.finite(cog_lon),
-                            cog_lon > ex[1], cog_lon < ex[2],
-                            cog_lat > ex[3], cog_lat < ex[4])
-  arw <- grid::arrow(length = unit(3, "pt"), type = "closed")
-  ggplot() +
-    geom_sf(data = shp, aes(fill = invasion_week), colour = "white", linewidth = 0.12) +
-    geom_path(data = cg, aes(cog_lon, cog_lat), colour = CASE_COL, linewidth = 0.6,
-              arrow = arw, lineend = "round") +
-    geom_point(data = cg, aes(cog_lon, cog_lat), shape = 21, size = 1.7,
-               fill = CASE_COL, colour = "white", stroke = 0.4) +
-    ggrepel::geom_text_repel(data = cg[c(1, nrow(cg)), ],
-                             aes(cog_lon, cog_lat, label = paste0("wk ", week)),
-                             size = 2.1, colour = INK, seed = 3L, min.segment.length = 0,
-                             segment.colour = FAINT, segment.size = 0.22,
-                             bg.colour = "white", bg.r = 0.14, box.padding = 0.4) +
-    geom_point(data = data.frame(lon = K$epi_ll[1], lat = K$epi_ll[2]),
-               aes(lon, lat), shape = 21, size = 2.6, fill = EPI_COL,
-               colour = "white", stroke = 0.5) +
-    scale_fill_viridis_c(option = "mako", begin = 0.08, end = 0.92,
-                         na.value = "grey92", limits = c(0, max(Z$inv_week)),
-                         guide = "none") +
-    coord_sf(xlim = ex[1:2], ylim = ex[3:4], expand = FALSE) +
-    theme_void() +
-    theme(panel.background = element_rect(fill = "white", colour = "grey45",
-                                          linewidth = 0.4),
-          plot.margin = margin(0, 0, 0, 0))
-}
-
-build_map <- function() {
-  shp <- geo$shp
-  shp$invasion_week <- Z$inv_week[match(shp$Nom, Z$health_zone)]
-  # Crop to the invaded footprint plus a margin, so the epicentre rings and the
-  # centre-of-gravity tracks all sit inside the frame.
-  bb  <- sf::st_bbox(shp[!is.na(shp$invasion_week), ])
-  pad <- 0.3
-  xlim <- c(bb[["xmin"]] - pad, bb[["xmax"]] + pad)
-  ylim <- c(bb[["ymin"]] - pad, bb[["ymax"]] + pad)
-  box <- sf::st_as_sfc(sf::st_bbox(c(xmin = xlim[1], ymin = ylim[1],
-                                     xmax = xlim[2], ymax = ylim[2]),
-                                   crs = sf::st_crs(shp)))
-  keep <- shp[as.vector(sf::st_intersects(shp, box, sparse = FALSE)), ]
-  prov <- keep %>% dplyr::group_by(PROVINCE) %>% dplyr::summarise(.groups = "drop")
-
-  rings <- dplyr::bind_rows(lapply(RINGS_KM, function(km) {
-    p <- geosphere::destPoint(K$epi_ll, b = seq(0, 360, by = 2), d = km * 1000)
-    tibble::tibble(lon = p[, 1], lat = p[, 2], km = km)
-  }))
-  # Ring labels due WEST of the epicentre: the southward radials run through the
-  # labelled southern zones (Goma, Miti Murhesa) and the south-west corner holds the
-  # inset, so west is the only quarter that is empty at every radius. Clipped to the
-  # visible extent and set on a translucent white plate so they stay readable over any fill.
-  rlab <- dplyr::bind_rows(lapply(RINGS_KM, function(km) {
-    p <- geosphere::destPoint(K$epi_ll, b = 260, d = km * 1000)
-    tibble::tibble(lon = p[1, 1], lat = p[1, 2], km = km)
-  })) %>%
-    dplyr::filter(lat > ylim[1], lat < ylim[2], lon > xlim[1], lon < xlim[2]) %>%
-    # The qualifier goes on the SMALLEST ring: its label is the one guaranteed to be
-    # inside the frame, so the straight-line/road distinction is never lost to clipping.
-    dplyr::mutate(lab = ifelse(km == min(km), paste0(km, " km straight-line"),
-                               paste0(km, " km")))
-
-  cg <- W %>% dplyr::filter(is.finite(cog_lon))
-  ig <- W %>% dplyr::filter(is.finite(inv_cog_lon))
-  # Label the index zone plus the FURTHEST invaded zone in each province: one label
-  # per direction of travel, rather than four labels on the same distant cluster.
-  labz <- dplyr::bind_rows(
-    Z %>% dplyr::filter(health_zone == K$epi_zone),
-    Z %>% dplyr::filter(health_zone != K$epi_zone, is.finite(d_road)) %>%
-      dplyr::group_by(province) %>%
-      dplyr::slice_max(d_road, n = 1, with_ties = FALSE) %>%
-      dplyr::ungroup()) %>%
-    dplyr::distinct(health_zone, .keep_all = TRUE)
-  arw <- grid::arrow(length = unit(3.4, "pt"), type = "closed")
-  # Legend for the two tracks, drawn as a manual colour scale on invisible points. The
-  # shared "Centre of gravity" wording lives in the legend TITLE, not in each label:
-  # spelled out per key it overflows the map cell and crowds Panel D's axis title.
-  trk <- tibble::tibble(lon = NA_real_, lat = NA_real_,
-                        track = factor(c("Weekly cases", "New invasions"),
-                                       levels = c("Weekly cases", "New invasions")))
-
-  # Zoom on the origin focus, dropped into the empty south-west corner of the frame,
-  # with a leader box marking the area it magnifies.
-  inset <- ggplot2::ggplotGrob(build_core_inset(keep))
-  iw <- 0.30 * diff(xlim); ih <- iw                       # square, in degrees
-  ibox <- c(xlim[1] + 0.02 * diff(xlim), ylim[1] + 0.02 * diff(ylim))
-  zoombox <- data.frame(
-    xmin = K$epi_ll[1] - INSET_HALF_DEG, xmax = K$epi_ll[1] + INSET_HALF_DEG,
-    ymin = K$epi_ll[2] - INSET_HALF_DEG, ymax = K$epi_ll[2] + INSET_HALF_DEG)
-
-  ggplot() +
-    geom_sf(data = keep, aes(fill = invasion_week), colour = "white", linewidth = 0.09) +
-    geom_sf(data = prov, fill = NA, colour = "grey45", linewidth = 0.28) +
-    geom_path(data = rings, aes(lon, lat, group = km),
-              colour = "grey40", linewidth = 0.24, linetype = "22") +
-    geom_label(data = rlab, aes(lon, lat, label = lab),
-               size = 2.05, colour = MUTED, fill = "white", alpha = 0.7,
-               linewidth = 0, label.padding = unit(1.2, "pt")) +
-    # The new-invasion centre jumps across the frame week to week — that erratic
-    # track IS the finding (no coherent wavefront), so it is drawn, but muted so it
-    # does not overpower the case centre.
-    geom_path(data = ig, aes(inv_cog_lon, inv_cog_lat), colour = INV_COL, linewidth = 0.32,
-              linetype = "31", alpha = 0.65, lineend = "round") +
-    geom_point(data = ig, aes(inv_cog_lon, inv_cog_lat), shape = 23, size = 1.4,
-               fill = "white", colour = INV_COL, stroke = 0.45) +
-    geom_path(data = cg, aes(cog_lon, cog_lat), colour = CASE_COL, linewidth = 0.55,
-              arrow = arw, lineend = "round") +
-    geom_point(data = cg, aes(cog_lon, cog_lat), shape = 21, size = 1.5,
-               fill = CASE_COL, colour = "white", stroke = 0.35) +
-    geom_point(data = trk, aes(lon, lat, colour = track), size = 1.4, na.rm = TRUE) +
-    ggrepel::geom_text_repel(data = labz, aes(lon, lat, label = health_zone),
-                             size = 2.35, colour = INK, seed = 1L, min.segment.length = 0,
-                             segment.colour = FAINT, segment.size = 0.25,
-                             bg.colour = "white", bg.r = 0.13,
-                             box.padding = 0.34, point.padding = 0.2, max.overlaps = 30) +
-    geom_point(data = data.frame(lon = K$epi_ll[1], lat = K$epi_ll[2]),
-               aes(lon, lat), shape = 21, size = 2.8, fill = EPI_COL,
-               colour = "white", stroke = 0.55) +
-    geom_rect(data = zoombox, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
-              fill = NA, colour = "grey45", linewidth = 0.35) +
-    annotation_custom(inset, xmin = ibox[1], xmax = ibox[1] + iw,
-                      ymin = ibox[2], ymax = ibox[2] + ih) +
-    scale_fill_viridis_c(option = "mako", begin = 0.08, end = 0.92, na.value = "grey92",
-                         name = "Week of\nfirst case", breaks = scales::breaks_width(3),
-                         limits = c(0, max(Z$inv_week)),
-                         guide = guide_colourbar(order = 1)) +
-    scale_colour_manual(values = setNames(c(CASE_COL, INV_COL), levels(trk$track)),
-                        name = "Centre of\ngravity", drop = FALSE,
-                        guide = guide_legend(order = 2, ncol = 1,
-                                             override.aes = list(size = 2, shape = 16))) +
-    coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
-    theme_map(9) +
-    theme(legend.box = "vertical", legend.spacing.y = unit(4, "pt"))
-}
-
-# ---- Panel B — reach from the epicentre ------------------------------------
-build_reach <- function() {
-  # Labels kept SHORT: four keys in a two-column legend inside a 3.5-inch panel, and a
-  # long key silently overflows the cell and is clipped. "so far" vs "that week" is what
-  # carries the cumulative/per-week distinction that this panel exists to make.
-  lv <- c("Furthest zone so far", "Furthest new zone that week",
-          "Median zone so far", "Weekly cases, mean")
-  # Blues = the cumulative invaded SET (dark = its outer envelope, light = its middle);
-  # green = the zones newly invaded THAT WEEK, as in Panels A and D; orange = the CASES.
-  RCOL <- setNames(c(EXT_COL, INV_COL, EXT_COL2, CASE_COL), lv)
-  d <- W %>%
-    dplyr::transmute(week, truncated,
-                     `Furthest zone so far`        = reach_max_km,
-                     `Furthest new zone that week` = new_max_km,
-                     `Median zone so far`          = reach_med_km,
-                     `Weekly cases, mean`          = case_mean_km) %>%
-    tidyr::pivot_longer(-c(week, truncated), names_to = "series", values_to = "km") %>%
-    dplyr::filter(is.finite(km)) %>%
-    dplyr::mutate(series = factor(series, levels = lv))
-  # The fitted line is on the MEDIAN series. R_max is a running maximum that
-  # saturates once the long-range seeding events have happened, so fitting a line
-  # to it would advertise a travelling wavefront that the data do not show; the
-  # saturation is annotated instead.
-  fitline <- tibble::tibble(week = WF$week,
-                            km = K$reach_med_intercept + S$v_reach_med * WF$week)
-  ggplot(d, aes(week, km, colour = series)) +
-    trunc_band() +
-    # Two different dashed marks would otherwise be indistinguishable, so they are
-    # separated on BOTH linetype and colour: a DOTTED GREY vertical rule is a time
-    # marker (it belongs to no series), while the fit line takes the colour of the
-    # series it is fitted to, so it can only be read against that series.
-    geom_vline(xintercept = S$week_reach_90pct, colour = FAINT,
-               linewidth = 0.35, linetype = "12") +
-    geom_line(data = fitline, aes(week, km), inherit.aes = FALSE,
-              colour = EXT_COL2, alpha = 0.75, linewidth = 0.4, linetype = "22") +
-    geom_line(aes(group = series), linewidth = 0.5) +
-    geom_point(aes(shape = truncated), size = 1.3, stroke = 0.45, fill = "white") +
-    SHAPE_TRUNC +
-    # Two rows: on one row the third key overflows the cell and crowds Panel C's legend.
-    scale_colour_manual(values = RCOL, name = NULL,
-                        guide = guide_legend(nrow = 2, byrow = TRUE)) +
-    WK_SCALE + expand_limits(y = 0) +
-    # States BOTH halves of the finding, because the flat envelope on its own reads as
-    # "the spread stopped", which the green series shows it did not. The per-week series
-    # sweeps the full height of the panel every other week, so there is NO empty region
-    # to sit in: it goes on a translucent white plate (as the map's ring labels do) and
-    # stays legible wherever a series happens to pass under it.
-    annotate("label", x = 0.15, y = 0.96 * max(d$km, na.rm = TRUE),
-             hjust = 0, vjust = 1, size = 2.45, colour = MUTED,
-             # linewidth, NOT label.size: the latter is deprecated in ggplot2 4.x and is
-             # ignored, leaving a border box on the plate that no other panel has.
-             fill = scales::alpha("white", 0.78), linewidth = 0,
-             label.padding = unit(1.5, "pt"), lineheight = 1.05,
-             label = sprintf(paste0("extent fixed by week %.0f and flat since,\n",
-                                    "but new invasions kept landing a\n",
-                                    "median %.0f km out (max %.0f km).\n",
-                                    "Median zone so far %s"),
-                             S$week_reach_90pct, S$newmax_med_after, S$newmax_max_after,
-                             fmt_ci(S$v_reach_med, imp_q("v_reach_med"), "km/wk"))) +
-    labs(x = "Epidemic week", y = "Road distance from index zone (km)") +
-    theme_pub()
-}
-
-# ---- Panel C — arrival week vs distance -------------------------------------
-build_arrival <- function() {
-  zf <- Z %>% dplyr::filter(is.finite(d_road))
-  fitd <- tibble::tibble(inv_week = seq(0, K$fit_max, by = 0.1)) %>%
-    dplyr::mutate(d_road = K$radial_intercept + S$v_radial_road * inv_week)
-  ggplot(zf, aes(inv_week, d_road)) +
-    trunc_band() +
-    geom_line(data = fitd, colour = "grey35", linewidth = 0.5) +
-    # Invasion weeks are integers, so identically-timed zones would overplot; a small
-    # deterministic horizontal jitter separates them without moving anything a full week.
-    geom_point(aes(fill = province, alpha = in_fit_window),
-               shape = 21, size = 1.9, colour = "white", stroke = 0.3,
-               position = position_jitter(width = 0.16, height = 0, seed = 7L)) +
-    scale_fill_manual(values = PCOL, name = NULL, drop = FALSE,
-                      guide = guide_legend(nrow = 2, byrow = TRUE,
-                                           override.aes = list(size = 2.2, alpha = 1))) +
-    scale_alpha_manual(values = c(`FALSE` = 0.35, `TRUE` = 0.95), guide = "none") +
-    WK_SCALE + expand_limits(y = 0) +
-    # Both R² values, because which GEOGRAPHY orders the arrivals is itself a result:
-    # travel time beats road km, which beats straight-line (full table in the
-    # diagnostics CSV). The bracket is the zone bootstrap, not the onset draws.
-    note(sprintf("%s, 95%% CI\nR² %.2f road · %.2f travel time",
-                 fmt_ci(S$v_radial_road, ci_road, "km/week", digits = 0),
-                 S$v_radial_road_r2, S$v_radial_time_r2), "bottomright") +
-    labs(x = "Week of first confirmed case", y = "Road distance from index zone (km)") +
-    theme_pub()
-}
-
-# ---- Panel D — centre-of-gravity step speed ---------------------------------
-build_cogspeed <- function() {
-  lv <- c("Weekly cases", "Newly invaded zones")
-  CCOL <- setNames(c(CASE_COL, INV_COL), lv)
-  d <- W %>%
-    dplyr::transmute(week, truncated,
-                     `Weekly cases` = cog_speed_km_wk,
-                     `Newly invaded zones` = inv_cog_speed_km_wk) %>%
-    tidyr::pivot_longer(-c(week, truncated), names_to = "series", values_to = "kmwk") %>%
-    dplyr::filter(is.finite(kmwk)) %>%
-    dplyr::mutate(series = factor(series, levels = lv))
-  # Log y: the invasion centre moves 1-2 orders of magnitude faster than the case
-  # centre, so a linear axis flattens the case series onto the baseline.
-  # The band must run the FULL panel height, as it does in every other panel. Two traps:
-  #   * +/-Inf bounds (what the other panels use) are illegal here — log10(-Inf) is NaN.
-  #   * finite bounds do NOT get clipped: annotate("rect") is data, so an overshooting
-  #     rect EXPANDS the y scale and squashes the series into a sliver.
-  # So the window is pinned with coord_cartesian (which really does clip) and the rect
-  # is then free to overshoot it.
-  rng <- range(d$kmwk)
-  ylo <- rng[1] / 1.15; yhi <- rng[2] * 1.15
-  ggplot(d, aes(week, kmwk, colour = series)) +
-    trunc_band(ymin = ylo / 10, ymax = yhi * 10) +
-    geom_hline(yintercept = S$v_cog_med, colour = CASE_COL, linewidth = 0.35, linetype = "22") +
-    geom_hline(yintercept = S$v_invcog_med, colour = INV_COL, linewidth = 0.35, linetype = "22") +
-    geom_line(aes(group = series), linewidth = 0.5) +
-    geom_point(aes(shape = truncated), size = 1.3, stroke = 0.45, fill = "white") +
-    SHAPE_TRUNC +
-    scale_colour_manual(values = CCOL, name = NULL) +
-    WK_SCALE +
-    scale_y_log10(breaks = c(1, 3, 10, 30, 100, 300), labels = c("1","3","10","30","100","300")) +
-    annotation_logticks(sides = "l", colour = FAINT, linewidth = 0.2,
-                        short = unit(1, "pt"), mid = unit(1.6, "pt"), long = unit(2.4, "pt")) +
-    coord_cartesian(ylim = c(ylo, yhi)) +
-    note(sprintf("medians: cases %.0f, invasions %.0f km/week",
-                 S$v_cog_med, S$v_invcog_med)) +
-    labs(x = "Epidemic week", y = "Centre-of-gravity speed (km/week, log scale)") +
-    theme_pub()
-}
-
-# ---- Panel E — dispersion ---------------------------------------------------
-build_disp <- function() {
-  lv <- c("Weekly cases (case-weighted)", "Invaded zones (cumulative)")
-  # NOT grey for the invaded set: grey is this figure's annotation ink (fit lines,
-  # truncation band, time markers), so a grey data series reads as an annotation.
-  DCOL <- setNames(c(CASE_COL, EXT_COL), lv)
-  d <- W %>%
-    dplyr::transmute(week, truncated,
-                     `Weekly cases (case-weighted)` = cog_sd_km,
-                     `Invaded zones (cumulative)`   = invaded_sd_km) %>%
-    tidyr::pivot_longer(-c(week, truncated), names_to = "series", values_to = "km") %>%
-    dplyr::filter(is.finite(km)) %>%
-    dplyr::mutate(series = factor(series, levels = lv))
-  fitline <- tibble::tibble(week = WF$week,
-                            km = K$disp_intercept + S$v_disp_km_wk * WF$week)
-  ggplot(d, aes(week, km, colour = series)) +
-    trunc_band() +
-    # Fitted on the CASE-weighted series only, so it carries that series' colour.
-    geom_line(data = fitline, aes(week, km), inherit.aes = FALSE,
-              colour = CASE_COL, alpha = 0.75, linewidth = 0.4, linetype = "22") +
-    geom_line(aes(group = series), linewidth = 0.5) +
-    geom_point(aes(shape = truncated), size = 1.3, stroke = 0.45, fill = "white") +
-    SHAPE_TRUNC +
-    scale_colour_manual(values = DCOL, name = NULL,
-                        guide = guide_legend(nrow = 2, byrow = TRUE)) +
-    WK_SCALE + expand_limits(y = 0) +
-    # The interval spans zero: the case cloud is not measurably spreading out, and
-    # the fitted line must not be read as growth. Same onset-draw basis as Panel B.
-    note(paste0(fmt_ci(S$v_disp_km_wk, imp_q("v_disp_km_wk"), "km/week"), ", onset draws")) +
-    labs(x = "Epidemic week", y = "Standard distance (km)") +
-    theme_pub()
-}
-
-# Flat wrap_plots (NOT nested patchworks) so tag_levels tags every panel A-E.
-# The map cell is sized ~square to match the study area's own aspect ratio; a taller
-# cell would letterbox the map and waste half the panel.
-design <- "
-AAAABBCC
-AAAABBCC
-AAAADDEE
-AAAADDEE
-"
-fig <- patchwork::wrap_plots(A = build_map(), B = build_reach(), C = build_arrival(),
-                             D = build_cogspeed(), E = build_disp(), design = design) +
-  patchwork::plot_annotation(tag_levels = "A") &
-  theme(plot.tag = element_text(size = 12, face = "bold", colour = INK))
-
-save_dual(fig, "Figure_spread_kinematics", w = 14.0, h = 7.0)
+# This module used to assemble a five-panel `Figure_spread_kinematics`. That stem is not
+# on FIGURE_KEEP, so the whole figure — five panel builders and an inset — was computed on
+# every run and then discarded by the gate. The RETAINED kinematics figure is
+# `Figure_spread_kinematics_compact`, which make_spread_kinematics_compact.R builds from
+# the CSVs written above; Figures 1C and S1 likewise read arrival_predictor{s,_fits}.csv.
+# This module is therefore a pure ESTIMATION step and writes no figure of its own.
 message("[kinematics] done — CSVs in ", KEY_DIR)
 
 }   # end of the script-run guard opened at SECTION 4

@@ -18,7 +18,8 @@ suppressPackageStartupMessages(library(testthat))
 .st <- if (requireNamespace("here", quietly = TRUE)) file.path(here::here(), "spatiotemporal") else "."
 .need <- c(compute_foi = "06_simple_models.R", epinow2_daily_confirmed = "02_epi_params.R",
            .bayes_project_mu = "21_bayesian_renewal.R",
-           linelist_observation_date = "22_daily_reissue.R")
+           linelist_observation_date = "22_daily_reissue.R",
+           load_linelist_vintage = "01_data_prep.R")   # vintage_for_issue() needs its .vintage_memo
 if (!exists("OUT_DIR")) try(suppressMessages(source(file.path(.st, "00_config.R"))), silent = TRUE)
 for (.fn in names(.need))
   if (!exists(.fn, mode = "function"))
@@ -205,14 +206,14 @@ test_that("bayes_rt_week_draws always returns an R: prior when no case, prior af
   tmp <- tempfile("rtdraws_"); on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
 
   # (a) no observable confirmed case -> prior, without attempting a fit
-  r0 <- .with_flags(list(.epinow2_rt_fit = mock), expect_warning(
+  r0 <- .with_flags(list(.epinow2_rt_fit = mock, LFO_TRAINING_SOURCE = "recensor"), expect_warning(
     bayes_rt_week_draws(.synthetic_ll(0L), pmf, lo + 21, lo + 28, cache_dir = tmp,
                         n_prior_draws = 500L), "prior"))
   expect_identical(attr(r0, "source"), "prior"); expect_length(r0, 500L)
   expect_true(all(is.finite(r0) & r0 > 0)); expect_identical(calls, 0L)
 
   # (b) cases observable but the fit fails -> retried once, then prior; nothing cached
-  r1 <- .with_flags(list(.epinow2_rt_fit = mock), expect_warning(
+  r1 <- .with_flags(list(.epinow2_rt_fit = mock, LFO_TRAINING_SOURCE = "recensor"), expect_warning(
     bayes_rt_week_draws(.synthetic_ll(20L), pmf, lo + 14, lo + 21, cache_dir = tmp,
                         n_prior_draws = 500L), "failed twice"))
   expect_identical(attr(r1, "source"), "prior"); expect_identical(calls, 2L)
@@ -249,7 +250,7 @@ test_that("bayes_fill_twin_label maps exactly the composites that have a fill tw
 .grid_flags <- list(INCLUDE_SOURCEFILL_MODELS = TRUE, MOBILITY_SOURCE_FILL = "unmeasured",
                     INCLUDE_OSRM_DIST_MODELS = TRUE, INCLUDE_GEO_COV_MODELS = TRUE,
                     INCLUDE_FULL_COV_MODELS = FALSE, INCLUDE_FLOWSTATIC_MODELS = TRUE,
-                    INCLUDE_TV_BETA_MODELS = TRUE, INCLUDE_SUSPECTED_COV_MODELS = TRUE,
+                    INCLUDE_TV_BETA_MODELS = FALSE, INCLUDE_SUSPECTED_COV_MODELS = TRUE,
                     INCLUDE_COHORT_MODELS = TRUE, INCLUDE_M11_MODELS = FALSE,
                     INCLUDE_LOGIT_SENS_MODELS = FALSE, INCLUDE_M9_MODELS = FALSE,
                     INCLUDE_M15_MODELS = FALSE, INCLUDE_COHORT_SPLIT_MODELS = TRUE,
@@ -258,16 +259,11 @@ test_that("bayes_fill_twin_label maps exactly the composites that have a fill tw
                     # list() on purpose: c(list(...), X = c("a","b")) flattens the vector
                     # into X1/X2 and the flag would never be seen.
                     SPLIT_FAMILIES = c("M8", "M10", "M13", "M14", "M16", "M17"),
-                    # THE TIME-VARYING AND GENERATION-TIME ARMS RIDE ONE BASE MODEL, and by
-                    # default that model is read from outputs/key_outputs/model_selection.json
-                    # — a file the pipeline REWRITES on every run. Left unpinned, this fixture
-                    # would compose a different grid depending on which model the last run
-                    # happened to select, and these tests would pass or fail for reasons that
-                    # have nothing to do with the code under test. Pin the base and the
-                    # process list.
-                    TV_BETA_BASE_MODEL = "Bayes-M14-fill-med",
+                    # The generation-time arms and the time-varying forms are built by run_all.R
+                    # on THIS run's selection (bayes_gt_sensitivity_specs(), bayes_tv_form_specs()),
+                    # not by the grid, so the grid below is composed with gt_arms = FALSE (the
+                    # default) and the tests build the variants explicitly on a pinned spec.
                     INCLUDE_GT_SENSITIVITY_MODELS = TRUE,
-                    TV_BETA_TYPES = c("trend", "week", "rw1", "ar1", "gp"),
                     GT_SENSITIVITY_PROFILES = c("short", "long"))
 # The kernel set a DEFAULT build produces (03_mobility_matrices.R): every fill twin,
 # including M10-fill and the -dist-fill family, plus the origin-split composites. An
@@ -297,50 +293,68 @@ test_that("INCLUDE_UNFILLED_MODELS = FALSE drops exactly the kernels with a buil
   expect_identical(only, keep)
   lab_only <- vapply(only, `[[`, "", "label")
   # Filled twins, the split family and kernels with no twin (M4) all survive.
-  # The time-varying and generation-time arms are variants of the ONE pinned base model
-  # (TV_BETA_BASE_MODEL above), so their labels extend that model's label — they are no
-  # longer one pair per kernel.
-  expect_true(all(c("Bayes-M14-fill-med", "Bayes-M14-fill-med-tvweek",
-                    "Bayes-M14-fill-med-tvrw1", "Bayes-M14-fill-gtshort", "Bayes-M4-med",
-                    "Bayes-M4-dist", "Bayes-M14-dist-fill", "Bayes-M17-dist-fill-med",
+  expect_true(all(c("Bayes-M14-fill-med", "Bayes-M4-med", "Bayes-M4-dist",
+                    "Bayes-M14-dist-fill", "Bayes-M17-dist-fill-med",
                     "Bayes-M13-split-med") %in% lab_only))
   # Unfilled parents are gone, including the road-distance ones.
-  expect_false(any(c("Bayes-M14-med", "Bayes-M8-susp", "Bayes-M14-tvweek",
+  expect_false(any(c("Bayes-M14-med", "Bayes-M8-susp",
                      "Bayes-M14-dist", "Bayes-M17-dist-med") %in% lab_only))
+  # The grid composes neither the retired brms time-varying arms nor any refit arm.
+  expect_true(all(vapply(only, function(x) identical(x$tv %||% "none", "none") &&
+                                           !isTRUE(x$sensitivity), logical(1))))
 })
 
-test_that("the time-varying and generation-time arms are built on ONE base model", {
-  .skip_unless("bayes_default_grid")
+test_that("the time-varying forms and the generation-time arms are built on ONE spec", {
+  .skip_unless("bayes_tv_form_specs")
   mm <- stats::setNames(as.list(seq_along(.all_mobs)), .all_mobs)
   g <- .with_flags(c(.grid_flags, INCLUDE_UNFILLED_MODELS = FALSE), bayes_default_grid(mm))
   lab <- vapply(g, `[[`, "", "label")
-  tv  <- vapply(g, function(x) x$tv %||% "none", "")
-  sen <- vapply(g, function(x) isTRUE(x$sensitivity), logical(1))
+  base <- g[[which(lab == "Bayes-M14-fill-geo")]]
 
-  # Exactly five time-varying specs, one per process, all on the pinned base model.
-  expect_equal(sort(tv[tv != "none"]), sort(c("trend", "week", "rw1", "ar1", "gp")))
-  expect_true(all(vapply(g[tv != "none"], function(x) identical(x$mob, "M14-fill"), logical(1))))
-  expect_true(all(startsWith(lab[tv != "none"], "Bayes-M14-fill-med-tv")))
+  # THE FORMS: one per TV_FORMS entry, the base's kernel, GT and covariates, the Stan engine,
+  # candidates (not sensitivity arms) of stage 2.
+  fs <- bayes_tv_form_specs(base)
+  flab <- vapply(fs, `[[`, "", "label")
+  expect_identical(flab, paste0("Bayes-M14-fill-geo-", names(TV_FORMS)))
+  for (f in fs) {
+    expect_identical(f[c("mob", "gt", "cov", "link")], base[c("mob", "gt", "cov", "link")])
+    expect_true(.spec_is_stan(f)); expect_false(isTRUE(f$sensitivity))
+    expect_identical(f$tv, "none")
+  }
+  expect_identical(unname(vapply(fs, function(f) c(f$use_rw, f$use_frailty), logical(2))),
+                   unname(vapply(TV_FORMS, function(f) c(f$use_rw, f$use_frailty), logical(2))))
+  # A form cannot itself be generalised, and the Stan engine is cloglog-only.
+  expect_error(bayes_tv_form_specs(fs[[1]]), "fixed-beta candidate")
+  expect_error(bayes_tv_form_specs(utils::modifyList(base, list(link = "logit"))), "cloglog-only")
 
-  # tv-trend carries the week_idx covariate (it IS the trend term) and rides the fixed-beta
-  # fitter; the structural processes carry the base model's covariates unchanged.
-  .sp <- function(l) g[[which(lab == l)]]
-  expect_true("week_idx" %in% .sp("Bayes-M14-fill-med-tvtrend")$cov)
-  for (ty in c("week", "rw1", "ar1", "gp"))
-    expect_false("week_idx" %in% .sp(paste0("Bayes-M14-fill-med-tv", ty))$cov)
+  # THE GENERATION-TIME ARMS of a fixed-beta spec and of a form: same kernel and covariates, the
+  # other profiles, marked `sensitivity`; a form's arms keep its engine and switches.
+  ga <- bayes_gt_sensitivity_specs(g[[which(lab == "Bayes-M14-fill-med")]])
+  expect_identical(vapply(ga, `[[`, "", "label"), c("Bayes-M14-fill-gtshort", "Bayes-M14-fill-gtlong"))
+  gf <- bayes_gt_sensitivity_specs(fs[[2]])
+  expect_identical(vapply(gf, `[[`, "", "label"),
+                   paste0("Bayes-M14-fill-geo-", names(TV_FORMS)[2], c("-gtshort", "-gtlong")))
+  expect_true(all(vapply(c(ga, gf), function(x) isTRUE(x$sensitivity), logical(1))))
+  expect_true(all(vapply(gf, .spec_is_stan, logical(1))))
+  expect_identical(vapply(gf, `[[`, "", "gt"), c("short", "long"))
 
-  # Two generation-time arms, on the base kernel, at short and long, MARKED as sensitivity so
-  # best_invasion_model() cannot feature one — selecting among them would make the generation
-  # time a fitted axis.
-  expect_equal(sort(lab[sen]), c("Bayes-M14-fill-gtlong", "Bayes-M14-fill-gtshort"))
-  expect_equal(sort(vapply(g[sen], `[[`, "", "gt")), c("long", "short"))
-  expect_true(all(vapply(g[sen], function(x) identical(x$mob, "M14-fill"), logical(1))))
-  # ... and nothing else is marked.
-  expect_false(any(sen[tv != "none"]))
+  # SELECTION GATES: stage 1 excludes forms and arms; stage 2 excludes only the arms.
+  arms <- c(vapply(ga, `[[`, "", "label"), vapply(gf, `[[`, "", "label"))
+  expect_true(all(grepl(INVASION_SELECTION_EXCLUDE, c(flab, arms))))
+  expect_false(any(grepl(INVASION_SELECTION_EXCLUDE, lab)))
+  expect_true(all(grepl(SENSITIVITY_ARM_REGEX, arms)))
+  expect_false(any(grepl(SENSITIVITY_ARM_REGEX, flab)))
 
-  # Every label the grid can produce must still parse back to its kernel, or the cascade and
-  # the over-folds refit silently fall back to a different matrix.
-  expect_false(any(is.na(vapply(lab, mobility_kernel_from_method, ""))))
+  # Labels resolve back: a form to its spec (never to its fixed-beta parent), an arm to nothing.
+  for (f in fs) expect_identical(bayes_spec_for_label(f$label, g), f)
+  expect_identical(bayes_spec_for_label("Bayes-M14-fill-geo", g), base)
+  expect_null(bayes_spec_for_label(arms[1], g))
+  expect_identical(tv_form_of(c(flab, arms[3], "Bayes-M14-fill-geo")),
+                   c(names(TV_FORMS), names(TV_FORMS)[2], NA))
+
+  # Every label the grid and its variants can produce parses back to its kernel, or the cascade
+  # and the over-folds refit silently fall back to a different matrix.
+  expect_false(any(is.na(vapply(c(lab, flab, arms), mobility_kernel_from_method, ""))))
 })
 
 test_that("with no built fill twin, INCLUDE_UNFILLED_MODELS = FALSE drops nothing and warns", {

@@ -51,37 +51,50 @@
 # Expected imported cases, for the renewal denominator
 # ---------------------------------------------------------------------------
 
-#' Expected imported CONFIRMED cases per zone-week.
-#'
-#' Expected weekly introductions into zone i are delta * beta0 * Lambda_i(w), where Lambda is
-#' the mobility import force the invasion model already uses, delta is the deployed hazard
-#' recalibration factor, and each introduction brings E[n_seed] confirmed cases. Counting
-#' these in the renewal decomposition is what stops a newly invaded zone's IMPORTED cases
-#' being read as local transmission — a large part of the early-window inflation (Bunia's raw
-#' ratio ran 6.1 and 7.6 in weeks 3 and 4 against an eventual 1.0-1.1).
-#'
-#' compute_foi() reads strictly past weeks, so column w is the force acting INTO week w and
-#' carries no contemporaneous information.
-#'
-#' THE KNOWN LIMITATION, stated because it is a modelling decision and not an oversight.
-#' Within a tightly connected cluster the attribution is partly circular: Rwampara's cases
-#' generate import force back into Bunia, so part of what is really one epidemic gets booked
-#' as importation and discounted from Bunia's local R. The capping at `num` bounds this, and
-#' `import_share` reports its size (20.2% of the national denominator on this frame, moving
-#' Bunia 1.11 -> 0.89), but it is not eliminated. Read the zone R's of the epicentre cluster
-#' as local-transmission-net-of-modelled-importation, not as closed-population R's.
-#'
-#' @param delta deployed hazard recalibration factor; beta0 is the RAW coefficient and the
-#'   cascade deploys delta*beta0, so introductions must carry the same factor.
-#' @param n_seed_fun the seeding function actually in force; E[n_seed] is derived from it.
-#' @return zones x weeks matrix of expected imported cases, or NULL when the inputs are
-#'   unavailable (the estimator then degrades to local-only and says so).
+#' The posterior draws of the cascade's seeding hazard, from EITHER engine: a brms fixed-beta
+#' fit (b_Intercept, b_<covariate>) or a time-varying form's Stan fit (21c_frailty_models.R:
+#' b0, beta[k], and the form's process parameters). The one place the cascade reads a fit, so
+#' cascade_prepare() and the import term cannot read the two engines differently.
+#' @param zones_all the cascade's zone spine; needed for the frailty's training exposure C0.
+#' @return list(n_draws, b_int, slopes (n_draws x covariates, named), use_rw, use_frailty,
+#'   uS (the drift at the last training week; 0 without drift), sigma (RW1 innovation SD, or
+#'   NULL), theta (frailty variance, or NULL), C0 (n_draws x zones: each zone's cumulative hazard
+#'   over the training weeks, only with frailty and zones_all; columns in zones_all order), S).
+.cascade_hazard_draws <- function(fit, zones_all = NULL) {
+  if (inherits(fit, "stan_invasion_fit")) {
+    dr <- fit$draws; nd <- nrow(dr)
+    sl <- if (length(fit$feat)) dr[, paste0("beta[", seq_along(fit$feat), "]"), drop = FALSE]
+          else matrix(0, nd, 0)
+    colnames(sl) <- fit$feat
+    C0 <- NULL
+    if (fit$use_frailty && !is.null(zones_all)) {
+      if (!identical(as.character(fit$zones), as.character(zones_all)))
+        stop("[cascade] the frailty fit's zones are not the cascade's zone spine.", call. = FALSE)
+      C0 <- .sf_cum_exposure(fit); colnames(C0) <- zones_all
+    }
+    return(list(n_draws = nd, b_int = dr[, "b0"], slopes = sl, use_rw = fit$use_rw,
+                use_frailty = fit$use_frailty,
+                uS = if (fit$use_rw) dr[, sprintf("u[%d]", fit$S)] else rep(0, nd),
+                sigma = if (fit$use_rw) dr[, "sigma[1]"] else NULL,
+                theta = if (fit$use_frailty) exp(dr[, "lth[1]"]) else NULL, C0 = C0, S = fit$S))
+  }
+  dr <- posterior::as_draws_df(fit)
+  if (!"b_Intercept" %in% names(dr))
+    stop("[cascade] the hazard fit carries no b_Intercept draws.", call. = FALSE)
+  nm <- setdiff(sub("^b_", "", grep("^b_", names(dr), value = TRUE)), "Intercept")
+  sl <- matrix(0, nrow(dr), length(nm), dimnames = list(NULL, nm))
+  for (k in nm) sl[, k] <- dr[[paste0("b_", k)]]
+  list(n_draws = nrow(dr), b_int = dr[["b_Intercept"]], slopes = sl, use_rw = FALSE,
+       use_frailty = FALSE, uS = rep(0, nrow(dr)), sigma = NULL, theta = NULL, C0 = NULL, S = NA)
+}
+
 #' Per-zone import-to-case coefficient beta_i, at the posterior mean.
 #'
 #' The invasion hazard is exp(eta0_i + gamma_dmin z_dmin_i(w) + log Lambda_i), so a
 #' zone-specific conversion from import force to expected introductions is exp(eta0_i).
 #'
-#' NOT THE DEFAULT, and the reason is a measured one. On this frame the fitted log-population
+#' NOT THE DEFAULT, and the reason is a measured one. On the frame where this was measured (log_pop
+#' was then in the covariate set; it was dropped on 2026-09-21) the fitted log-population
 #' coefficient is NEGATIVE (-0.29, 90% CI -0.57 to -0.02): conditional on the mobility force,
 #' a larger zone has a LOWER per-unit invasion hazard. That is what a cloglog link does when
 #' the offset is large — p = 1 - exp(-beta*Lambda) saturates towards 1 for the high-Lambda
@@ -102,15 +115,20 @@
 #' FIRST invasions of susceptible zones, and is applied here to continuing importation into
 #' already-invaded zones. It is the best available estimate of the mobility-to-case
 #' conversion, not a fitted quantity for this use; `import_share` reports how much work it
-#' is doing (6-11% of the national denominator on this frame).
+#' is doing in each run (6-11% of the national denominator on the frame where this was measured).
 cascade_import_beta <- function(fit, design, covariates, zones_all,
                                 cov_spec = CASCADE_COV_SPEC, covariates_on = TRUE) {
-  dr <- tryCatch(posterior::as_draws_df(fit), error = function(e) NULL)
-  if (is.null(dr) || !("b_Intercept" %in% names(dr))) return(NULL)
+  hz <- tryCatch(.cascade_hazard_draws(fit), error = function(e) NULL)
+  if (is.null(hz)) return(NULL)
+  # The conversion at the LAST TRAINING WEEK: exp(b0 + u_S) under RW1 drift (exp(b0) alone is
+  # the level before the first week), exp(b0) otherwise. A zone frailty is not applied: these
+  # are already-invaded zones, whose frailty the model does not track after invasion, so they
+  # take its prior mean, 1 (the convention of the forecast's source projection, 21c).
+  lvl <- hz$b_int + hz$uS
   if (!isTRUE(covariates_on))       # intercept only: the conversion at the covariate mean
-    return(stats::setNames(rep(exp(mean(dr[["b_Intercept"]])), length(zones_all)), zones_all))
-  gm <- function(nm) if (paste0("b_", nm) %in% names(dr) && nm %in% cov_spec)
-                       mean(dr[[paste0("b_", nm)]]) else 0
+    return(stats::setNames(rep(exp(mean(lvl)), length(zones_all)), zones_all))
+  gm <- function(nm) if (nm %in% colnames(hz$slopes) && nm %in% cov_spec)
+                       mean(hz$slopes[, nm]) else 0
   # Standardise with the FIT design's center/scale, exactly as cascade_prepare() does —
   # design$feat is a vector of NAMES, not values, so the raw covariates come from
   # .static_features() and the two paths must not drift apart.
@@ -124,11 +142,36 @@ cascade_import_beta <- function(fit, design, covariates, zones_all,
         !is.finite(s0) || s0 <= 0) return(rep(0, length(zones_all)))
     v <- (as.numeric(raw) - c0) / s0; v[!is.finite(v)] <- 0; v
   }
-  b <- exp(mean(dr[["b_Intercept"]]) + gm("log_pop") * z_of("log_pop") + gm("ccvi") * z_of("ccvi"))
+  b <- exp(mean(lvl) + gm("log_pop") * z_of("log_pop") + gm("ccvi") * z_of("ccvi"))
   b[!is.finite(b)] <- 0
   stats::setNames(pmax(b, 0), zones_all)
 }
 
+#' Expected imported CONFIRMED cases per zone-week.
+#'
+#' Expected weekly introductions into zone i are delta * beta0 * Lambda_i(w), where Lambda is
+#' the mobility import force the invasion model already uses, delta is the deployed hazard
+#' recalibration factor, and each introduction brings E[n_seed] confirmed cases. Counting
+#' these in the renewal decomposition is what stops a newly invaded zone's IMPORTED cases
+#' being read as local transmission — a large part of the early-window inflation (Bunia's raw
+#' ratio ran 6.1 and 7.6 in weeks 3 and 4 against an eventual 1.0-1.1).
+#'
+#' compute_foi() reads strictly past weeks, so column w is the force acting INTO week w and
+#' carries no contemporaneous information.
+#'
+#' THE KNOWN LIMITATION, stated because it is a modelling decision and not an oversight.
+#' Within a tightly connected cluster the attribution is partly circular: Rwampara's cases
+#' generate import force back into Bunia, so part of what is really one epidemic gets booked
+#' as importation and discounted from Bunia's local R. The capping at `num` bounds this, and
+#' `import_share` reports its size for each run (20.2% of the national denominator, moving Bunia
+#' 1.11 -> 0.89, on the frame where this was measured), but it is not eliminated. Read the zone R's of the epicentre cluster
+#' as local-transmission-net-of-modelled-importation, not as closed-population R's.
+#'
+#' @param delta deployed hazard recalibration factor; beta0 is the RAW coefficient and the
+#'   cascade deploys delta*beta0, so introductions must carry the same factor.
+#' @param n_seed_fun the seeding function actually in force; E[n_seed] is derived from it.
+#' @return zones x weeks matrix of expected imported cases, or NULL when the inputs are
+#'   unavailable (the estimator then degrades to local-only and says so).
 cascade_import_cases <- function(zone_week_nc, zones_all, mobility_matrices, gt_pmfs,
                                  kernel = CASCADE_KERNEL, gt = CASCADE_GT, beta0 = NULL,
                                  delta = 1, n_seed_fun = cascade_draw_seed,
@@ -447,7 +490,8 @@ cascade_rt_draws <- function(linelist, gt_pmfs, week_start, issue_date, gt = CAS
   # NAME THE MISSING MODULE rather than letting R report "could not find function" from three
   # frames down. Taking R from EpiNow2 gave cascade_reff() a dependency it never had, and every
   # entry point that builds its own source list must now load 22_daily_reissue.R. When
-  # 44_reff_epinow2_check.R did not, it failed four minutes into a run with an error that named
+  # An entry point that built its own source list without it once failed four minutes into a
+  # run with an error that named
   # neither the cause nor the fix.
   if (!exists("linelist_observation_date", mode = "function"))
     stop("[cascade-rt] linelist_observation_date() is not loaded — source 22_daily_reissue.R. ",
@@ -464,6 +508,14 @@ cascade_rt_draws <- function(linelist, gt_pmfs, week_start, issue_date, gt = CAS
                            issue_date = issue_date, window_weeks = window_weeks)
   src <- attr(d, "source"); wst <- attr(d, "window_start"); edt <- attr(d, "end_date")
   ww  <- attr(d, "window_weeks")
+  # A FALLBACK R IS NOT AN ESTIMATE FOR THIS WINDOW: "prior" is EpiNow2's prior (an R0-scale
+  # quantity) and "carried-forward" an earlier week's posterior. Either is accepted so the run
+  # completes, but it is warned on (not only messaged) and its source travels with the draws
+  # into the calibration record and the report.
+  if (length(src) == 1L && src %in% c("prior", "carried-forward"))
+    warning(sprintf(paste0("[cascade-rt] the R draws for the window ending %s come from the '%s' ",
+                           "fallback, not an EpiNow2 fit of that window: every projection from this ",
+                           "origin transmits on it."), format(as.Date(week_start)), src), call. = FALSE)
   v <- as.numeric(d); v <- v[is.finite(v) & v >= 0]
   if (!length(v))
     stop("[cascade-rt] EpiNow2 returned no usable R draws for the window ending ",
@@ -529,17 +581,16 @@ cascade_draw_R0 <- function(reff, z = NULL, gt_key = NULL) {
   rep(pmin(pmax(R, reff$r_min), reff$r_max), nz)
 }
 
-# R for a freshly-seeded zone i, drawn at seeding time from the province R_eff pool.
+# R for a freshly-seeded zone i: the parameter group's NATIONAL R (there is no province or zone
+# level any more — see cascade_draw_R0()).
 #
-# `seed_r` OVERRIDES that pool with an explicit reproduction number. A zone seeded during
-# the projection inherits its province pool, and for a province with no case history that
-# pool IS the national value — so the urban scenarios otherwise ask "what if a capital is
-# seeded and then behaves like the current national average". That is a premise, not a
-# finding, and CASCADE_SEED_R / CASCADE_SEED_R_SWEEP make it explicit. The pool's own
-# posterior spread is retained around whatever mean is used.
+# `seed_r` OVERRIDES that with an explicit reproduction number. A zone seeded during the
+# projection transmits at the single national R, so the urban scenarios otherwise ask "what if
+# a capital is seeded and then behaves like the current national average". That is a premise,
+# not a finding, and CASCADE_SEED_R / CASCADE_SEED_R_SWEEP make it explicit. The posterior's
+# relative spread is retained around whatever mean is used.
 #
-# `z` supplies the standard normals for pairing, as in cascade_draw_R0(). Note seed_sdlog
-# is a per-zone VECTOR (posterior SD of the province pool), so it is indexed alongside.
+# `z` supplies the standard normals for pairing, as in cascade_draw_R0().
 cascade_draw_R_seed <- function(reff, zone_idx, z = NULL, seed_r = NULL, R_grp = NULL,
                                 gt_key = NULL) {
   n <- length(zone_idx)
@@ -547,9 +598,10 @@ cascade_draw_R_seed <- function(reff, zone_idx, z = NULL, seed_r = NULL, R_grp =
   # `R_grp` is this parameter group's national R — the value every already-infected zone in the
   # same replicate started from. A newly seeded zone gets THAT number, not an independent draw:
   # under one national R there is nothing left to distinguish it, and drawing again would
-  # reintroduce exactly the spurious independence cascade_draw_R0() exists to avoid. It anchors
-  # on the group's starting value rather than the walked one because the walk is a property of
-  # the weeks a zone has already been transmitting through, which a fresh zone has not.
+  # reintroduce exactly the spurious independence cascade_draw_R0() exists to avoid. The value
+  # returned is at the group's REFERENCE level (its starting national R); simulate_cascade()
+  # applies the group's walked national factor to every transmitting zone each week, so a fresh
+  # zone transmits at the CURRENT walked national R, like every other zone in that week.
   # gt_key is threaded through so the FALLBACK draw comes from this group's generation-time grid
   # point too. Without it a seeded zone reached for the central posterior while every other zone
   # in the same replicate used its grid point's R.
@@ -601,10 +653,9 @@ cascade_branch_step <- function(R_vec, own_vec, k_indiv = CASCADE_K_INDIV, u = N
   out  <- integer(length(mu))
   act  <- own_vec > 0 & mu > 0
   if (any(act)) {
-    # NUMERICAL BACKSTOP, not a modelling assumption and not currently live. The only brake
-    # on growth in this layer is within-zone susceptible depletion, which needs BOTH
-    # within-zone depletion, which this suite does not model (removed 2026-09-19); an R above 1
-    # compounds unchecked for the whole horizon. Measured, that does not bite at the
+    # NUMERICAL BACKSTOP, not a modelling assumption and not currently live. This layer has no
+    # brake on growth: within-zone susceptible depletion is not modelled (removed 2026-09-19), so
+    # an R above 1 compounds unchecked for the whole horizon. Measured, that does not bite at the
     # reproduction numbers this analysis sweeps (up to 2.5 over 13 weeks) — no mean came
     # near mu_max — but qnbinom's search degrades badly for very large means, so the cap
     # exists to make a future parameterisation fail loudly instead of hanging. It sits far
@@ -614,8 +665,8 @@ cascade_branch_step <- function(R_vec, own_vec, k_indiv = CASCADE_K_INDIV, u = N
     if (any(big)) {
       warning(sprintf(paste0("[branch] %d zone-week mean(s) exceeded mu_max = %.3g and were ",
                              "capped. The within-zone process has left the regime this model ",
-                             "represents: enable within-zone depletion with a pop_vec, or lower ",
-                             "the reproduction number. The projection is NOT usable as it ",
+                             "represents (it has no within-zone depletion): lower ",
+                             "the reproduction number or the horizon. The projection is NOT usable as it ",
                              "stands."), sum(big), mu_max), call. = FALSE)
       mu[big] <- mu_max
     }
@@ -701,7 +752,7 @@ cascade_reff <- function(zone_week, zones_all, layer, fit, design, delta = 1,
     if (!is.null(.old_seed)) assign(".Random.seed", .old_seed, envir = .GlobalEnv)
     else if (exists(".Random.seed", envir = .GlobalEnv)) rm(".Random.seed", envir = .GlobalEnv)
   }, add = TRUE)
-  set.seed(get0("CASCADE_SEED", ifnotfound = 20260704L) + 7919L)   # distinct from the sim seed
+  set_fixed_seed(get0("CASCADE_SEED", ifnotfound = 20260704L) + 7919L)   # distinct from the sim seed
   imp <- NULL
   if (isTRUE(use_imports)) {
     # WHICH CONVERSION, and why the default changed. It was design$beta0, the intercept-only

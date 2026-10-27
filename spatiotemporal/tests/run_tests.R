@@ -22,6 +22,10 @@ suppressPackageStartupMessages({
 # Load configuration (always required)
 # ---------------------------------------------------------------------------
 source(file.path(here::here(), "spatiotemporal", "00_config.R"))
+# Tests that load the real line list must not write its earliest-sample cache into the
+# published output tree (00_config.R, .earliest_sample_dates()).
+EARLIEST_SAMPLE_CACHE_DIR <- file.path(tempdir(), "earliest_sample_cache")
+dir.create(EARLIEST_SAMPLE_CACHE_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # ---------------------------------------------------------------------------
 # Source the LIVE analysis modules that run_all.R sources (in the same order).
@@ -29,12 +33,11 @@ source(file.path(here::here(), "spatiotemporal", "00_config.R"))
 # (e.g. an optional dependency such as deSolve absent on a CI runner) does not
 # prevent the remaining modules — and their unit tests — from running.
 #
-# NB: scripts 09–14 were retired to spatiotemporal/stale/ and are NEVER sourced.
-# The metric functions that used to live in 11_metrics.R / 12_calibration.R are
-# now provided by the live modules (16_invasion_eval.R: .auc_pr/.log_score/.brier;
-# 04b_epinowcast.R: the WIS `wis_one`; 19_spacetime_eval.R / 20_forecast_detail.R:
-# spatiotemporal skill, detection curve, balanced accuracy). The test suite has
-# been ported to those live equivalents.
+# NB: scripts 09-14 were DELETED, not archived (this note used to point at an archive
+# directory that does not exist). The metric functions that lived in
+# 11_metrics.R / 12_calibration.R are now provided by the live modules — 16_invasion_eval.R
+# (.auc_pr / .log_score / .brier), 19_spacetime_eval.R and 20_forecast_detail.R
+# (spatiotemporal skill, detection curve, balanced accuracy) — and the suite tests those.
 # ---------------------------------------------------------------------------
 
 safe_source <- function(path, label) {
@@ -50,20 +53,17 @@ safe_source <- function(path, label) {
   )
 }
 
-# Live module list — mirrors run_all.R's source order (09–14 deliberately absent).
-live_modules <- c(
-  "01_data_prep.R", "02_epi_params.R", "03_mobility_matrices.R",
-  "04_nowcasting.R", "04b_epinowcast.R", "04c_dhis2_delay_windows.R",
-  "05_baseline_models.R",
-  "06_simple_models.R",
-  "15_workhorse.R", "16_invasion_eval.R", "16b_invasion_recalibration.R", "18_ensemble.R",
-  "19_spacetime_eval.R", "20_forecast_detail.R", "21_bayesian_renewal.R",
-  "17_invasion_viz.R",
-  # Cascade layer: needed by test_cascade_variance.R, which pins the parameter/process
-  # variance split that forms the published reach credible interval. Without these the
-  # tests silently SKIP, which is how a structural regression would go unnoticed.
-  "30_projection_config.R", "31_source_dynamics.R", "32_cascade_simulator.R"
-)
+# THE MODULE LIST COMES FROM 00_config.R (load_pipeline_modules / PIPELINE_MODULES), so the
+# suite cannot test a different module set from the one the pipeline loads. This file used to
+# hand-maintain its own list and it had drifted: 22_daily_reissue.R was missing, which
+# silently SKIPPED every test that needs linelist_observation_date() — the one function whose
+# absence also makes .trunc_fit_asof_cohort() return NULL without a word.
+#
+# `extra` covers what the TESTS need beyond the pipeline layers:
+#   04c  the interval-censored delay fitters (test_dhis2_delay.R, test_delay_strata.R)
+#   17   the viz layer (its scoring-adjacent helpers are asserted on)
+live_modules <- c(unlist(PIPELINE_MODULES[c("data", "model", "cascade")], use.names = FALSE),
+                  "04c_dhis2_delay_windows.R", "17_invasion_viz.R")
 for (m in live_modules) {
   safe_source(file.path(here::here(), "spatiotemporal", m), m)
 }

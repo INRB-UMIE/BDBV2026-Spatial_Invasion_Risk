@@ -5,6 +5,8 @@
 # Tests cover:
 #   - make_gt_pmf()               generation time PMF correctness
 #   - compute_truncation_weights() Exponential-CDF weight computation
+#   - the right-truncation: support (trunc_max), as-of series basis, cached-fit gates,
+#     and the R(t) cache key
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -302,4 +304,185 @@ test_that("Higher rate gives higher weight for same lag (faster reporting)", {
     as.numeric(w_fast) > as.numeric(w_slow),
     info = "Higher reporting rate → higher truncation weight for same lag"
   )
+})
+
+# =============================================================================
+# 3. The right-truncation's SUPPORT, the as-of fit's series basis, the cached-fit gates and the
+#    R(t) cache key (02_epi_params.R section 4b and estimate_rt_epinow2())
+# =============================================================================
+
+.skip_unless_epinow2 <- function() {
+  if (!requireNamespace("EpiNow2", quietly = TRUE)) skip("EpiNow2 not installed")
+}
+# An UNCERTAIN lognormal (the shape estimate_truncation() returns) and a FIXED gamma (the as-of fit).
+.unc_lnorm <- function(ml = 2.10, sl = 0.80, max = 45)
+  EpiNow2::LogNormal(meanlog = EpiNow2::Normal(ml, 0.02), sdlog = EpiNow2::Normal(sl, 0.02), max = max)
+
+test_that(".trunc_support_max is the support EpiNow2 itself uses, on both discretisation paths", {
+  skip_if_missing(".trunc_support_max"); .skip_unless_epinow2()
+  csd <- get0("create_stan_delays", envir = asNamespace("EpiNow2"), inherits = FALSE)
+  if (!is.function(csd)) skip("EpiNow2:::create_stan_delays unavailable")
+  unc <- .unc_lnorm()
+  fix <- EpiNow2::Gamma(shape = 1.3, rate = 0.21, max = 45)
+  su <- csd(trunc = EpiNow2::trunc_opts(unc))
+  sf <- csd(trunc = EpiNow2::trunc_opts(fix))
+  # Uncertain parameters go to Stan parametrically, evaluated on 0..delay_max.
+  expect_equal(su$delay_n_p, 1)
+  expect_equal(.trunc_support_max(unc), as.numeric(su$delay_max))
+  # Fixed parameters go as their discretised pmf, on 0..(length - 1): one day shorter.
+  expect_equal(sf$delay_n_np, 1)
+  expect_equal(.trunc_support_max(fix), as.numeric(sf$delay_np_pmf_length) - 1)
+  expect_equal(.trunc_support_max(unc) - .trunc_support_max(fix), 1)
+})
+
+test_that(".trunc_as_delay_spec carries the support, the moments ON it, and the right label", {
+  skip_if_missing(".trunc_as_delay_spec"); .skip_unless_epinow2()
+  g  <- EpiNow2::Gamma(shape = 1.3, rate = 0.21, max = 46)
+  sp <- .trunc_as_delay_spec(g, "asof")
+  expect_equal(sp$trunc_max, .trunc_support_max(g))
+  b  <- sp$trunc_max + 0.5; Fb <- stats::pgamma(b, 1.3, 0.21)
+  m1 <- stats::integrate(function(x) x * stats::dgamma(x, 1.3, 0.21), 0, b)$value / Fb
+  m2 <- stats::integrate(function(x) x^2 * stats::dgamma(x, 1.3, 0.21), 0, b)$value / Fb
+  expect_equal(sp$mean, m1, tolerance = 1e-7)
+  expect_equal(sp$sd, sqrt(m2 - m1^2), tolerance = 1e-7)
+  expect_equal(sp$rate, 1 / sp$mean)
+  expect_identical(sp$estimator, "lynden_bell_cohort_gamma_asof")
+
+  sl <- .trunc_as_delay_spec(.unc_lnorm(), "extract")
+  expect_identical(sl$family, "lnorm")
+  expect_identical(sl$estimator, "estimate_truncation_extract")
+  pr <- sl$params; b <- sl$trunc_max + 0.5
+  Fb <- stats::plnorm(b, pr[["meanlog"]], pr[["sdlog"]])
+  m1 <- stats::integrate(function(x) x * stats::dlnorm(x, pr[["meanlog"]], pr[["sdlog"]]),
+                         0, b)$value / Fb
+  expect_equal(sl$mean, m1, tolerance = 1e-6)
+  expect_lt(sl$mean, exp(pr[["meanlog"]] + pr[["sdlog"]]^2 / 2))   # conditioned, so shorter
+})
+
+test_that("the nowcast's completeness is EpiNow2's: both renormalise on the same support", {
+  skip_if_missing(".trunc_as_delay_spec"); skip_if_missing("compute_truncation_weights")
+  .skip_unless_epinow2()
+  if (!requireNamespace("primarycensored", quietly = TRUE)) skip("primarycensored not installed")
+  ad <- as.Date("2026-09-14")
+  newest <- function(sp) as.numeric(suppressMessages(compute_truncation_weights(ad - 6, ad, delay = sp)))
+  # Uncertain lognormal: Stan's pmf is primary-censored on 0..delay_max, normalised at delay_max + 1
+  # (EpiNow2's discretised_pmf(), stan/functions/pmfs.stan).
+  sp <- .trunc_as_delay_spec(.unc_lnorm(), "extract"); n <- sp$trunc_max
+  pm <- primarycensored::dprimarycensored(0:n, stats::plnorm, pwindow = 1, swindow = 1, D = n + 1,
+                                          meanlog = sp$params[["meanlog"]], sdlog = sp$params[["sdlog"]])
+  ref <- mean(cumsum(pm)[1:7])
+  unnorm <- mean(delay_cdf(sp, 0:6 + 0.5))            # the parametric CDF without its support
+  expect_lt(abs(newest(sp) / ref - 1), 0.005)          # left: the F(L + 0.5) midpoint convention
+  expect_lt(abs(newest(sp) / ref - 1), abs(unnorm / ref - 1))
+  # Fixed gamma: EpiNow2 uses the discretised pmf itself.
+  g  <- EpiNow2::Gamma(shape = 1.3, rate = 0.21, max = 46)
+  pg <- EpiNow2::get_pmf(EpiNow2::discretise(g))
+  expect_lt(abs(newest(.trunc_as_delay_spec(g, "asof")) / mean(cumsum(pg)[1:7]) - 1), 0.002)
+})
+
+test_that("the as-of fit measures from date_index of USABLE recorded onsets, not the raw onset", {
+  skip_if_missing(".trunc_fit_asof_cohort"); .skip_unless_epinow2()
+  set.seed(7L)
+  end <- as.Date("2026-09-07"); start <- end - 120L
+  n <- 4000L
+  ons <- start + sample(0:120, n, replace = TRUE, prob = exp(0.02 * (0:120)))
+  obs <- ons + round(stats::rgamma(n, shape = 1.2, rate = 0.15))
+  vis <- obs <= end
+  ll <- data.frame(confirmed = TRUE,
+                   date_of_symptom_onset = as.character(ons[vis]),
+                   date_of_sample_collection = as.character(obs[vis]),
+                   date_index = ons[vis], onset_usable = TRUE, stringsAsFactors = FALSE)
+  # .trunc_fit_asof_cohort() reads the observation date through linelist_observation_date();
+  # stub it to the sample column.
+  old_fn <- if (exists("linelist_observation_date", envir = globalenv()))
+    get("linelist_observation_date", envir = globalenv()) else NULL
+  on.exit({ if (!is.null(old_fn)) assign("linelist_observation_date", old_fn, envir = globalenv())
+            else rm("linelist_observation_date", envir = globalenv()) }, add = TRUE)
+  assign("linelist_observation_date",
+         function(ll, end, caller = "test") as.Date(ll$date_of_sample_collection),
+         envir = globalenv())
+  fit <- function(x) .trunc_as_delay_spec(
+    suppressMessages(suppressWarnings(.trunc_fit_asof_cohort(x, end, start))), "asof")
+  base <- fit(ll)
+  expect_false(is.null(base))
+  # EpiNow2 is handed the support the curve was estimated on, 0..TRUNC_MAX_DAYS.
+  expect_equal(base$trunc_max, as.numeric(get0("TRUNC_MAX_DAYS", ifnotfound = 45L)))
+  # The raw onset column is NOT read: moving it changes nothing.
+  ll2 <- ll; ll2$date_of_symptom_onset <- as.character(as.Date(ll$date_of_symptom_onset) + 2L)
+  expect_identical(fit(ll2)$params, base$params)
+  # Records without a usable recorded onset (an imputed date_index) are left out.
+  junk <- ll[seq_len(300L), ]
+  junk$onset_usable <- FALSE
+  junk$date_index <- as.Date(junk$date_of_sample_collection) - 40L
+  expect_identical(fit(rbind(ll, junk))$params, base$params)
+  # Without the loader's columns the fit refuses rather than reading the raw onset.
+  expect_null(suppressMessages(.trunc_fit_asof_cohort(ll[, c("confirmed", "date_of_symptom_onset",
+                                                             "date_of_sample_collection")], end, start)))
+})
+
+test_that("a CACHED extract fit is re-gated by .trunc_sanity(), not served unchecked", {
+  skip_if_missing(".trunc_fit"); skip_if_missing(".trunc_fingerprint"); .skip_unless_epinow2()
+  tmp <- tempfile("trunc_cache_"); dir.create(tmp)
+  had_od  <- exists("OUT_DIAGNOSTICS", envir = globalenv(), inherits = FALSE)
+  old_od  <- if (had_od) get("OUT_DIAGNOSTICS", envir = globalenv()) else NULL
+  had_rng <- exists("TRUNC_MEAN_RANGE", envir = globalenv(), inherits = FALSE)
+  old_rng <- if (had_rng) get("TRUNC_MEAN_RANGE", envir = globalenv()) else NULL
+  on.exit({
+    if (had_od) assign("OUT_DIAGNOSTICS", old_od, envir = globalenv())
+    else rm("OUT_DIAGNOSTICS", envir = globalenv())
+    if (had_rng) assign("TRUNC_MEAN_RANGE", old_rng, envir = globalenv())
+    else if (exists("TRUNC_MEAN_RANGE", envir = globalenv(), inherits = FALSE))
+      rm("TRUNC_MEAN_RANGE", envir = globalenv())
+    unlink(tmp, recursive = TRUE)
+  }, add = TRUE)
+  assign("OUT_DIAGNOSTICS", tmp, envir = globalenv())
+  panel <- list(
+    data.frame(date = seq(as.Date("2026-07-01"), as.Date("2026-08-01"), by = "day"), confirm = 3L),
+    data.frame(date = seq(as.Date("2026-07-01"), as.Date("2026-08-08"), by = "day"), confirm = 3L))
+  # The cache path exactly as .trunc_fit() derives it. Checked before .trunc_fit() is called, so
+  # a mismatch fails here instead of letting a cache miss start a Stan fit.
+  key  <- substr(rlang::hash(.trunc_fingerprint(panel, "extract")), 1L, 16L)
+  path <- file.path(tmp, sprintf("epinow2_truncation_extract_%s.rds", key))
+  d <- .unc_lnorm(2.0, 0.7)
+  saveRDS(d, path)
+  stopifnot(file.exists(path))
+  assign("TRUNC_MEAN_RANGE", c(4, 25), envir = globalenv())
+  expect_identical(suppressMessages(.trunc_fit(panel, "extract")), d)
+  assign("TRUNC_MEAN_RANGE", c(20, 25), envir = globalenv())      # gate tightened after caching
+  expect_warning(r <- suppressMessages(.trunc_fit(panel, "extract")), "REFUSED")
+  expect_null(r)
+})
+
+test_that("the R(t) cache key carries the Stan seed, and ONE GT support for key and fit", {
+  skip_if_missing("estimate_rt_epinow2")
+  if (!isTRUE(get0(".HAVE_EPINOW2", ifnotfound = FALSE))) skip("EpiNow2 not installed")
+  # No fit runs: the truncation is stubbed, the fit refuses, and file.exists() (which the cache
+  # lookup calls once) records the path it is asked about. Every stub is restored on exit.
+  nms <- c("epinow2_truncation", ".epinow2_rt_fit", "RANDOM_SEED", "file.exists")
+  had <- vapply(nms, function(nm) exists(nm, envir = globalenv(), inherits = FALSE), logical(1))
+  old <- lapply(nms[had], function(nm) get(nm, envir = globalenv())); names(old) <- nms[had]
+  on.exit(for (nm in nms) {
+    if (had[[nm]]) assign(nm, old[[nm]], envir = globalenv())
+    else if (exists(nm, envir = globalenv(), inherits = FALSE)) rm(list = nm, envir = globalenv())
+  }, add = TRUE)
+  seen <- character(0)
+  assign("epinow2_truncation", function(...) EpiNow2::Gamma(shape = 1.3, rate = 0.21, max = 46),
+         envir = globalenv())
+  assign(".epinow2_rt_fit", function(...) stop("no fit in tests"), envir = globalenv())
+  assign("file.exists", function(...) { seen <<- c(seen, ..1); FALSE }, envir = globalenv())
+  cases <- data.frame(date = seq(as.Date("2026-08-01"), by = "day", length.out = 30L), confirm = 5L)
+  p <- GT_PROFILES$medium
+  run <- function(seed, gtp) {
+    assign("RANDOM_SEED", seed, envir = globalenv())
+    suppressWarnings(suppressMessages(estimate_rt_epinow2(cases, "medium", gtp, as.Date("2026-09-01"))))
+  }
+  expect_null(run(1L, p))
+  expect_null(run(2L, p))
+  expect_length(seen, 2L)
+  expect_true(grepl("_s1_", seen[1], fixed = TRUE))
+  expect_true(grepl("_s2_", seen[2], fixed = TRUE))
+  expect_false(identical(seen[1], seen[2]))
+  # Omitting max_tau keys the profile's support, which is the support the fit uses.
+  run(1L, p[c("mean", "sd")])
+  expect_identical(seen[3], seen[1])
 })

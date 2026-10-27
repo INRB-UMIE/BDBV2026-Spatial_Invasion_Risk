@@ -2,98 +2,215 @@
 # 33b_cascade_calibration.R — CALIBRATION of the 13-week invasion cascade
 # BDBV 2026 DRC · Spatiotemporal Invasion Forecast Suite
 #
-# WHY THIS FILE EXISTS
-# --------------------
-# The cascade has exactly two free level parameters:
+# WHAT THIS FILE DOES — the procedure cascade_calibrate() runs, in order
+# ----------------------------------------------------------------------
+# The cascade has ONE fitted level parameter, delta, a multiplier on the per-week seeding hazard
+# (mu -> delta * mu, i.e. p -> 1 - (1 - p)^delta). Frontier saturation psi
+# (sat = exp(-psi * max(f_inv - f_inv0, 0))) is NOT fitted: it is held at CASCADE_PSI (0, so sat
+# is identically 1; 30_projection_config.R) because it was not identifiable on this outbreak (see
+# cascade_fit_delta_oos()). cascade_fit_psi_oos() is kept for sensitivity sweeps only.
 #
-#   delta  a multiplier on the per-week seeding hazard,  mu -> delta * mu
-#   psi    frontier saturation,  sat = exp(-psi * max(f_inv - f_inv0, 0))
+#   1. Short-horizon factor (`delta_prior`). cascade_fit_delta() (30_projection_config.R) reads
+#      the prequential maximum-likelihood h = 1 hazard-scale factor that
+#      16b_invasion_recalibration.R fits for the cascade's hazard, cascade_hazard_label() =
+#      Bayes-<kernel>-geo[-<form suffix>] (the featured form's, falling back to its fixed-beta
+#      parent), with its zone-clustered bootstrap interval and se_log, and falls back
+#      with a warning at each step when that row is missing. The projection does NOT run on it
+#      unless step 4 fails. It is used as: the hazard scale of the import term in each origin's
+#      conjugate R diagnostic (`delta_imp`); the reference of the week-1 transfer check (step 3);
+#      and the source of `se_log`, the spread delta is drawn with (step 5).
 #
-# Both were previously fitted against targets that are NOT the quantity the
-# cascade claims to produce, and the result was visibly broken:
+#   2. Origins (cascade_calibration_origins()). Cutoffs `cutoffs_from_end` weeks before the last
+#      week of the record, skipping any inside the ascertainment burn-in (CASCADE_CALIB_MIN_WEEKS),
+#      any with no settled outcome window, and any with fewer than 3 training events. At each,
+#      the training counts, the hazard (rolling as-of design) and the national EpiNow2 R are
+#      rebuilt as of that origin (LEAKAGE, below); the realised outcomes at h = 1 and h = K are
+#      read from the FINAL record, each horizon only once its window is SETTLED
+#      (LFO_RELIABLE_EVAL_AGE_DAYS). "Held-out" means held out from each origin's TRAINING and
+#      nothing more: step 4 fits delta to these same outcomes.
 #
-#   * delta = 1 / calibration_in_large of a DIFFERENT model (the 1-week Bayesian
-#     model) at h=1, by the MOMENT estimator, clamped to [0.2, 1.0]. The moment
-#     estimator is the one 16b_invasion_recalibration.R documents as the worse of
-#     the two on this frame (a rare-event mean is dominated by the many near-zero
-#     cells), and the clamp cannot represent delta > 1 at all, so an UNDER-running
-#     cascade could never be corrected — it would silently sit on the boundary.
+#   3. Week-1 transfer check (cascade_delta_h1_refit()) — a DIAGNOSTIC that sets nothing. One week
+#      is simulated from each origin at delta = 1 (psi is irrelevant at h = 1: no zone has been
+#      seeded yet, so sat = 1) and the factor that calibrates those week-1 probabilities to the
+#      realised week-1 invasions is fitted with 16b's own estimator and zone-clustered bootstrap
+#      (not attempted below 10 week-1 events). It is recorded against BOTH references:
+#      `h1_refit_ratio_short` (to the step-1 factor; warned beyond `transfer_tol`) and
+#      `h1_refit_ratio_deployed` (to the factor step 4 deploys). The two differ whenever the
+#      one-week and K-week levels do, so neither may be quoted as the other.
 #
-#   * psi fitted so the modelled cumulative count at week 8 matched
-#     "mean weekly new invasions over the last 6 weeks x 8" — a constant-rate
-#     extrapolation of the recent observed pace. That is an assumption about the
-#     very dynamics the cascade exists to project, and it is biased low because
-#     only ONE week was dropped for reporting truncation while the onset->sample
-#     delay alone has a mean near 8 days and a 99th percentile near 6 weeks.
-#     In the 2026-09-07 run the fit was CENSORED at psi = 0 with converged=FALSE,
-#     i.e. psi was not identified at all, and run_cascade.R warned that the
-#     13-week layer was "NOT fit for publication" — and then published it.
+#   4. delta, THE ONE FITTED PARAMETER (cascade_fit_delta_oos()). Geometric bisection over
+#      RECAL_BAND for the delta at which the cascade's pooled expected number of new invasions over
+#      the K-week window (K = 6 by default), across the origins with a settled K-week outcome,
+#      equals the number observed; psi held at CASCADE_PSI. Pooled deviance and AUC-PR skill are
+#      recorded along the search path; the returned bracket is numerical width, not uncertainty.
+#      This LEVEL CALIBRATION IS IN-SAMPLE: delta is fitted to exactly the outcomes it is later
+#      re-scored against. If no delta can be fitted the step-1 factor is returned unchanged, which
+#      run_cascade.R treats as a FAILED calibration and stops on.
 #
-# The evidence that settles the design was already being computed and thrown away.
-# cascade_backtest(), the only genuinely out-of-sample check, reported at K = 6
-# weeks over three origins:
+#   5. Uncertainty. The count-match solver produces no standard error, so `delta_info$se_log`
+#      stays the step-1 factor's zone-clustered bootstrap SE (an approximation, stated where it is
+#      set). run_cascade.R passes it as delta_sd_log, and simulate_cascade() draws delta per
+#      posterior-parameter group on it for the published scenario products.
+#
+#   6. Residual check, NOT validation (cascade_calibration_report()). The origins are re-simulated
+#      at the fitted delta, at an OFFSET seed. The pooled COUNT ratio is ~1 by construction (step
+#      4); only the rank/discrimination columns (AUC-PR skill, rank of truth) are something delta
+#      was not fitted to. cascade_backtest() in run_cascade.R reuses these origins and this K, so
+#      its count ratio is in-sample too (`level_in_sample`). Nothing in this file is an
+#      out-of-sample check of the cascade's LEVEL.
+#
+# HISTORY — why it is built this way. Until 2026-09-11 delta was 1 / calibration-in-the-large of
+# the 1-week Bayesian model by the MOMENT estimator, clamped to [0.2, 1.0] (the worse of 16b's two
+# estimators on this frame, and a clamp that could not correct an UNDER-running cascade), and psi
+# was fitted so the week-8 cumulative count matched "mean weekly new invasions over the last 6
+# weeks x 8" — a constant-pace extrapolation, biased low by reporting truncation. In the
+# 2026-09-07 run that psi fit was CENSORED at 0 with converged = FALSE and the layer was published
+# anyway. At the time delta was not fitted to the backtest's K-week counts, and cascade_backtest()
+# reported, at K = 6 over three origins:
 #
 #     origin        predicted new   observed new   ratio   AUC-PR skill
 #     2026-06-23        26.7            14         1.90        17.6x
 #     2026-06-30        23.8            14         1.70        17.5x
 #     2026-07-07        24.3            13         1.87        17.1x
 #
-# So the cascade RANKS well and its LEVEL is ~1.8x too high at its own horizon,
-# and nothing in the calibration path ever saw that.
+# i.e. good ranking and a level ~1.8x too high. A two-stage design followed (delta at h = 1 from
+# 16b, psi fitted to the realised K-week count); psi then proved unidentifiable (censored at a
+# bound, or far from its own root, while deviance and AUC-PR kept improving to the search
+# ceiling), so it was fixed at 0 and delta alone is now fitted at K (step 4). That buys a
+# multi-week level at the price of the week-1 tie to the short-horizon model, which step 3 reports.
 #
-# THE DESIGN: calibrate each parameter at the horizon where it is IDENTIFIED,
-# against REALISED out-of-sample outcomes, and propagate the uncertainty.
-#
-#   Stage A (delta, identified at h = 1). At the first simulated week the
-#     saturation term is exactly 1 by construction: f_inv == f_inv0 before any new
-#     zone is seeded, so sat = exp(-psi * 0) = 1 for every psi. delta is therefore
-#     the ONLY free level parameter at h = 1, and the cascade's week-1 hazard is
-#     the SAME object as the short-horizon Bayesian model's h = 1 hazard (both are
-#     beta_i * Lambda_i on observed history). delta is taken from the maximum-
-#     likelihood hazard-scale factor 16b already fits prequentially for that exact
-#     model — same transform family (mu -> delta*mu is p -> 1-(1-p)^delta), same
-#     wide search band, with a zone-clustered bootstrap interval — instead of the
-#     moment estimator. cascade_delta_h1_refit() then re-fits it from the CASCADE's
-#     OWN week-1 probabilities against realised week-1 invasions on held-out
-#     origins, so the transfer between the two implementations is verified rather
-#     than assumed.
-#
-#   Stage B (psi, identified by the multi-week SHAPE). psi is fitted so the
-#     cascade's expected number of new invasions over a K-week held-out window
-#     matches the number that ACTUALLY occurred in that window, pooled over
-#     origins. Same monotone bisection as before (sat is decreasing in psi, so the
-#     modelled count is monotone non-increasing and the root is unique), same
-#     boundary diagnostics — only the target changes, from an extrapolation to an
-#     observation. The pooled Bernoulli deviance and AUC-PR skill are recorded
-#     along the psi path so the count-match can be checked against a proper score.
-#
-#   Stage C (uncertainty). delta is a fitted nuisance with a genuine interval, and
-#     it is the parameter the reach LEVEL is most sensitive to. It is drawn per
-#     posterior-parameter group inside the Monte Carlo (simulate_cascade's
-#     delta_sd_log), exactly as (beta0, gamma) and R_eff already are, so the reach
-#     credible intervals stop understating the calibration uncertainty.
-#
-#   Stage D (residual check, NOT validation — see cascade_calibration_report()). The pooled
-#   COUNT is the quantity delta was fitted to, so its residual is in-sample by construction;
-#   only the rank/discrimination columns are out-of-sample. cascade_calibration_report() re-runs the held-out
-#     origins under the FITTED (delta, psi) and reports predicted vs observed
-#     counts, the pooled count ratio, reliability and AUC-PR skill, with explicit
-#     machine-readable pass/fail flags.
-#
-# LEAKAGE. Every origin is reconstructed as-of its own cutoff: training counts are
-# re-aggregated from the line list censored to cutoff + 6 (reaggregate_asof) and
-# nowcast as of that date, the hazard and R_eff are refit on those counts only, and
-# the OUTCOME is read from the final record. The evaluation set is the intersection
-# of "at risk as known at the cutoff" and "at risk in the final record", so a zone
-# already invaded but not yet reported is neither scored as a false alarm nor
-# counted as an event.
+# LEAKAGE. Every origin is reconstructed as-of its own cutoff: training counts are what was
+# knowable at cutoff + 6, through the LFO's own dispatcher (asof_counts_source(): the archived
+# snapshot of that date when one exists, else the line list re-censored to that date), nowcast
+# with the matching truncation; the hazard is refit on those counts only, with the validated
+# model's rolling as-of design (cascade_invasion_design()); R_eff is refit at that issue date;
+# and the OUTCOME is read from the final record. If that as-of reconstruction fails (or no line
+# list is passed) the origin falls back to the FINAL-COUNT SLICE, which carries cases reported
+# after the origin; this is warned and recorded per origin as `training_source = "final_slice"`.
+# Outcomes are used only once SETTLED (LFO_RELIABLE_EVAL_AGE_DAYS), because delta is fitted to
+# them. The evaluation set is the intersection of "at risk as known at the cutoff" and "at risk
+# in the final record", so a zone already invaded but not yet reported is neither scored as a
+# false alarm nor counted as an event.
 #
 # Sourced after 30/31/32/33 and after 16b_invasion_recalibration.R (fit_invasion_delta,
 # bootstrap_invasion_delta, RECAL_BAND).
 # =============================================================================
 
-if (!exists("%||%"))
-  `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
+# (`%||%` is defined once, in 00_config.R. A stray `if (!exists("%||%"))` left here by the
+# 2026-09-28 consolidation swallowed the next expression -- the definition of
+# cascade_calibration_origins() -- whenever %||% already existed, i.e. always.)
+
+# ---------------------------------------------------------------------------
+# The hazard design, built the way the VALIDATED short-horizon model builds its own
+# ---------------------------------------------------------------------------
+
+#' The as-of ("asof" regime) truncation the validated model's rolling predictors and per-fold
+#' nowcasts use (run_all.R's `.trunc_asof`): onset -> OBSERVATION, the delay that truncates a
+#' re-censored origin. Disk-cached by epinow2_truncation(), so resolving it again is cheap.
+#' @return a delay spec, or NULL (with a warning) when it cannot be resolved.
+cascade_asof_truncation <- function(linelist) {
+  if (is.null(linelist) || !exists("epinow2_truncation", mode = "function") ||
+      !exists(".trunc_as_delay_spec", mode = "function")) return(NULL)
+  tryCatch(.trunc_as_delay_spec(epinow2_truncation(regime = "asof", ll = linelist), "asof"),
+           error = function(e) {
+             warning(sprintf(paste0("[cascade] as-of truncation unavailable (%s): the cascade's ",
+                                    "re-censored origins fall back to the onset->sample delay and ",
+                                    "its hazard designs lose their rolling as-of predictors."),
+                             conditionMessage(e)), call. = FALSE)
+             NULL })
+}
+
+#' Build the cascade's invasion-hazard design EXACTLY as the validated model builds its own.
+#'
+#' WHY THIS EXISTS. The validated short-horizon model (make_bayes_lfo_model() and the deployed
+#' fit_bayes_suite(), 21_bayesian_renewal.R) builds every design with ROLLING AS-OF PREDICTORS:
+#' each training transition's import force comes from the counts that were known at that
+#' transition, nowcast with the regime's truncation, instead of from one fully-revised matrix.
+#' The cascade used to refit its hazard on the shared matrix, which puts beta0 on a different
+#' scale (calibrated against complete-week lambdas while the forecast's lambda carries the
+#' nowcast inflation — the ~2x artefact build_invasion_design() documents). Any delta carried
+#' between the two models — 16b's short-horizon factor, the import term's delta_imp — was then
+#' a factor for a different intercept. Same gate as the validated model:
+#' ROLLING_PREDICTORS on, a line list, and a truncation.
+#'
+#' @param trunc_delay the as-of truncation (cascade_asof_truncation()).
+#' @return build_invasion_design()'s list, plus `rolling_predictors` (logical).
+cascade_invasion_design <- function(zone_week_nc, layer, kernel = CASCADE_KERNEL,
+                                    gt = CASCADE_GT, linelist = layer$ll, trunc_delay = NULL) {
+  .want <- isTRUE(get0("ROLLING_PREDICTORS", ifnotfound = TRUE))
+  .roll_on <- .want && !is.null(linelist) && !is.null(trunc_delay)
+  if (.want && !.roll_on)
+    warning(sprintf(paste0("[cascade] ROLLING_PREDICTORS is on but %s is missing, so the %s hazard ",
+                           "is refit on the shared count matrix — NOT the design the validated ",
+                           "short-horizon model uses. Its intercept, and any delta transferred to ",
+                           "it, are on a different scale."),
+                    if (is.null(linelist)) "the line list" else "the as-of truncation", kernel),
+            call. = FALSE)
+  des <- build_invasion_design(zone_week_nc, layer$mobility_matrices, layer$gt_pmfs,
+           layer$covariates, layer$osrm_mat, layer$zones_all, mob = kernel, gt = gt,
+           rolling_ll    = if (.roll_on) linelist else NULL,
+           rolling_delay = if (.roll_on) trunc_delay else NULL)
+  des$rolling_predictors <- .roll_on
+  des
+}
+
+#' Fit the cascade's seeding hazard on a cascade design: fixed beta (brms), or the featured
+#' model's time-varying FORM (CASCADE_FORM, 30_projection_config.R; the Stan engine of
+#' 21c_frailty_models.R) with the same covariates. The ONE entry point for every cascade fit --
+#' production, the calibration origins, the kernel sensitivity and the overdispersion sweep -- so
+#' the hazard that is calibrated is the hazard that is deployed.
+#' @param design cascade_invasion_design() output for `zone_week_nc`.
+#' @param trunc_delay the as-of truncation the design's rolling predictors used.
+#' @return a brmsfit or a stan_invasion_fit, or NULL when the fit fails (a form's failure is
+#'   warned, as a brms failure is logged by the brms fitter).
+cascade_fit_hazard <- function(design, zone_week_nc, layer, kernel = CASCADE_KERNEL,
+                               gt = CASCADE_GT, linelist = layer$ll, trunc_delay = NULL,
+                               iter = 2000L, cov_spec = CASCADE_COV_SPEC,
+                               form = CASCADE_FORM) {
+  if (identical(form, "fixed"))
+    return(fit_bayes_renewal(design, cov_spec = cov_spec, iter = iter, chains = 2L))
+  sw <- Filter(function(x) identical(x$form, form), get0("TV_FORMS", ifnotfound = list()))
+  if (length(sw) != 1L) stop(sprintf("[cascade] unknown hazard form '%s'.", form), call. = FALSE)
+  # The forms are defined on the rolling as-of design (their exposure IS the as-of import force).
+  if (!isTRUE(design$rolling_predictors) || is.null(linelist) || is.null(trunc_delay))
+    stop(sprintf(paste0("[cascade] the featured form '%s' needs the rolling as-of design (a line ",
+                        "list and the as-of truncation); refusing to fit it on another design."),
+                 form), call. = FALSE)
+  # Never below the forms' validated back-test effort (TV_FORM_ITER): the walk adds a parameter
+  # per week, and the calibration origins pass the lighter brms back-test effort.
+  iter <- max(as.integer(iter), as.integer(get0("TV_FORM_ITER", ifnotfound = 1000L)))
+  tryCatch({
+    feat <- intersect(cov_spec, design$feat)
+    ex <- invasion_exposure(zone_week_nc, linelist, layer$zones_all, layer$mobility_matrices,
+                            layer$gt_pmfs, layer$covariates, layer$osrm_mat, kernel, gt, feat,
+                            design$center, design$scale, trunc_delay)
+    fit <- stan_invasion_fit(design, ex, layer$zones_all, cov_spec, sw[[1]]$use_rw, sw[[1]]$use_frailty,
+                             iter = iter, label = sprintf("cascade %s %s", kernel, form))
+    # Convergence is checked, not assumed: these fits are not otherwise inspected.
+    if (!is.null(fit) && ((fit$diag$rhat_max > 1.05) %in% TRUE || (fit$diag$n_divergent > 0) %in% TRUE))
+      warning(sprintf(paste0("[cascade] the %s hazard fit on %s did not converge cleanly: R-hat max ",
+                             "%.3f, %d divergent transition(s)."), form, kernel,
+                      fit$diag$rhat_max, as.integer(fit$diag$n_divergent)), call. = FALSE)
+    fit
+  }, error = function(e) {
+    warning(sprintf("[cascade] the %s hazard fit on %s failed: %s", form, kernel,
+                    conditionMessage(e)), call. = FALSE)
+    NULL })
+}
+
+#' delta_info for the SHORT-HORIZON factor (16b), with every attribute it carries.
+#'
+#' Shared by cascade_calibrate() and run_cascade.R's deliberately-uncalibrated path, so the two
+#' cannot drift. The fallback there used to keep only `estimator`, which silently set the
+#' projection's delta_sd_log to 0 although the factor carries a zone-clustered bootstrap SE.
+cascade_short_horizon_delta_info <- function(delta) {
+  list(delta = as.numeric(delta), estimator = attr(delta, "estimator") %||% NA_character_,
+       lo = attr(delta, "lo") %||% NA_real_, hi = attr(delta, "hi") %||% NA_real_,
+       se_log = attr(delta, "se_log") %||% NA_real_,
+       cal_in_large = attr(delta, "cal_in_large") %||% NA_real_,
+       boundary_hit = attr(delta, "boundary_hit") %||% NA,
+       source = attr(delta, "source") %||% NA_character_)
+}
 
 # ---------------------------------------------------------------------------
 # Held-out origin construction (shared by calibration AND the backtest)
@@ -111,9 +228,14 @@ if (!exists("%||%"))
 #' @param cutoffs_from_end origins expressed as "this many weeks before the last".
 #' @param truth_horizons horizons (weeks) at which realised outcomes are recorded.
 #' @param min_eval_age_days a truth window is recorded only once it has been closed for
-#'   this many days, so the outcome is reporting-complete. Applied PER HORIZON: an
-#'   origin whose 1-week window is complete but whose K-week window is not still
-#'   contributes its 1-week outcome (`complete_horizons` records which were kept).
+#'   this many days. Defaults to LFO_RELIABLE_EVAL_AGE_DAYS (00_config.R), the age at which
+#'   the suite treats an invasion count as SETTLED and the one its own recalibration factor is
+#'   trained on: delta is FITTED to these counts, so they must be settled, not merely admitted
+#'   (it was 10 d, under the p90 onset->confirmation delay, so the most recent windows were
+#'   still filling and pulled delta down). Settled is not "complete": a late confirmation can
+#'   still arrive. Applied PER HORIZON: an origin whose 1-week window is settled but whose
+#'   K-week window is not still contributes its 1-week outcome (`complete_horizons` records
+#'   which were kept).
 #' @param linelist the line list, for the as-of reconstruction. Without it the
 #'   origins train on the FINAL revised counts (a revision leak) and the function
 #'   says so loudly.
@@ -122,7 +244,8 @@ if (!exists("%||%"))
 cascade_calibration_origins <- function(layer, zone_province = NULL,
                                         cutoffs_from_end = c(12L, 11L, 10L, 9L, 8L),
                                         truth_horizons = c(1L, 6L),
-                                        min_eval_age_days = 10L,
+                                        min_eval_age_days = get0("LFO_RELIABLE_EVAL_AGE_DAYS",
+                                                                 ifnotfound = 25L),
                                         min_weeks_from_start = get0("CASCADE_CALIB_MIN_WEEKS",
                                                                    ifnotfound = 7L),
                                         # The deployed hazard scale the import term in each
@@ -163,14 +286,9 @@ cascade_calibration_origins <- function(layer, zone_province = NULL,
   # over-correct every calibration origin and bias `delta` low. Resolved ONCE outside the
   # loop: the fit is disk-cached, but re-resolving per origin would still re-read and re-hash
   # it. NULL falls through to apply_nowcast_correction()'s own resolver, which warns.
-  .trunc_calib <- tryCatch({
-    if (!is.null(linelist) && exists("epinow2_truncation") && exists(".trunc_as_delay_spec"))
-      .trunc_as_delay_spec(epinow2_truncation(regime = "asof", ll = linelist), "asof") else NULL
-  }, error = function(e) {
-    warning(sprintf(paste0("[cascade_calib] as-of truncation unavailable (%s); origins fall back ",
-                           "to the onset->sample delay, which UNDER-corrects their recent weeks ",
-                           "and biases delta HIGH."), conditionMessage(e)), call. = FALSE)
-    NULL })
+  # It is ALSO the rolling-predictor delay for every origin's hazard design
+  # (cascade_invasion_design()), exactly as run_all.R passes its .trunc_asof to the LFO.
+  .trunc_calib <- cascade_asof_truncation(linelist)
   if (!is.null(.trunc_calib))
     message(sprintf("[cascade_calib] as-of truncation: %s (mean %.2f d, sd %.2f d, %s)",
                     .trunc_calib$family, .trunc_calib$mean, .trunc_calib$sd, .trunc_calib$estimator))
@@ -196,7 +314,7 @@ cascade_calibration_origins <- function(layer, zone_province = NULL,
     }
     # PER-HORIZON completeness, not one gate on the longest window. A truth window is
     # usable only once it has both elapsed within the record AND been closed long enough
-    # to be reporting-complete. Gating on the LONGEST horizon alone threw away origins
+    # to be SETTLED (min_eval_age_days). Gating on the LONGEST horizon alone threw away origins
     # whose 1-week outcome was perfectly usable, which is what starved the delta transfer
     # check of events (5 across two origins, below the 10-event floor). This mirrors the
     # per-horizon guard run_invasion_lfo() applies to its folds.
@@ -207,7 +325,7 @@ cascade_calibration_origins <- function(layer, zone_province = NULL,
     }, as.integer(truth_horizons))
     if (!length(hs_ok)) {
       message(sprintf(paste0("[cascade_calib] origin %s skipped: no truth window is both within ",
-                             "the record and reporting-complete."), format(cutoff_date)))
+                             "the record and settled (min_eval_age_days)."), format(cutoff_date)))
       next
     }
 
@@ -226,32 +344,55 @@ cascade_calibration_origins <- function(layer, zone_province = NULL,
     # was absorbing a regime the deployment never presents: the published 13-week invasion
     # projection over-projected. The identical +7 -> +6 correction was made in the LFO on
     # 2026-09-19 and never propagated here.
-    zw_c <- NULL
+    #
+    # THE SAME DISPATCHER THE LFO USES (asof_counts_source(), 22_daily_reissue.R), so an origin's
+    # training counts are what was knowable at it in exactly the sense run_invasion_lfo()
+    # means: the archived snapshot of that date, nowcast with the truncation estimable on that
+    # date, when the archive supports it (LFO_TRAINING_SOURCE = "vintage"); otherwise the final
+    # line list re-censored to cutoff + 6 and nowcast with the shared as-of truncation. This
+    # block used to re-censor unconditionally, so on a vintage run the cascade calibrated on a
+    # different information state from the folds 16b's short-horizon factor was fitted on.
+    zw_c <- NULL; .src_c <- list(source = "final_slice", vintage_date = as.Date(NA),
+                                 why = "no line list")
     if (!is.null(linelist) && exists("reaggregate_asof") && exists("apply_nowcast_correction")) {
       zw_c <- tryCatch({
-        raw <- reaggregate_asof(linelist, zones_all, cutoff_date + 6,
-                                week_spine = weeks_sorted[weeks_sorted <= cutoff_date])
-        raw <- raw[raw$week_start <= cutoff_date, , drop = FALSE]
-        apply_nowcast_correction(raw, analysis_date = cutoff_date + 6, delay = .trunc_calib)
+        .wk_c <- weeks_sorted[weeks_sorted <= cutoff_date]
+        src <- if (exists("asof_counts_source", mode = "function"))
+                 asof_counts_source(linelist, zones_all, cutoff_date + 6, week_spine = .wk_c,
+                                    delay_recensor = .trunc_calib)
+               else list(raw = reaggregate_asof(linelist, zones_all, cutoff_date + 6,
+                                                 week_spine = .wk_c),
+                         delay = .trunc_calib, nowcast_date = cutoff_date + 6,
+                         source = "recensor", vintage_date = as.Date(NA),
+                         why = "22_daily_reissue.R not loaded")
+        raw <- src$raw[src$raw$week_start <= cutoff_date, , drop = FALSE]
+        .src_c <- src[c("source", "vintage_date", "why")]
+        apply_nowcast_correction(raw, analysis_date = src$nowcast_date, delay = src$delay)
       }, error = function(e) {
         warning(sprintf(paste0("[cascade_calib] origin %s: as-of reconstruction failed (%s); this ",
                                "origin falls back to the revision-leaky final-count slice."),
                         format(cutoff_date), conditionMessage(e)), call. = FALSE)
         NULL })
     }
-    if (is.null(zw_c))
+    if (is.null(zw_c)) {
       zw_c <- layer$zone_week_nc[layer$zone_week_nc$week_start <= cutoff_date, , drop = FALSE]
+      .src_c <- list(source = "final_slice", vintage_date = as.Date(NA),
+                     why = if (is.null(linelist)) "no line list" else "as-of reconstruction failed")
+    }
 
     # ---- hazard + source dynamics refit on that frame ONLY ------------------
-    dz <- tryCatch(build_invasion_design(zw_c, layer$mobility_matrices, layer$gt_pmfs,
-             layer$covariates, layer$osrm_mat, zones_all, mob = kernel, gt = gt),
+    # With the validated model's design (rolling as-of predictors), so the origin's intercept
+    # is on the scale delta is fitted for and deployed on (cascade_invasion_design()).
+    dz <- tryCatch(cascade_invasion_design(zw_c, layer, kernel = kernel, gt = gt,
+                                           linelist = linelist, trunc_delay = .trunc_calib),
              error = function(e) NULL)
     if (is.null(dz) || dz$n_events < 3L) {
       message(sprintf("[cascade_calib] origin %s skipped: design unavailable or < 3 training events.",
                       format(cutoff_date)))
       next
     }
-    fz <- fit_bayes_renewal(dz, cov_spec = CASCADE_COV_SPEC, iter = iter_fit, chains = 2L)
+    fz <- cascade_fit_hazard(dz, zw_c, layer, kernel = kernel, gt = gt, linelist = linelist,
+                             trunc_delay = .trunc_calib, iter = iter_fit)
     if (is.null(fz)) {
       message(sprintf("[cascade_calib] origin %s skipped: hazard fit failed.", format(cutoff_date)))
       next
@@ -288,7 +429,7 @@ cascade_calibration_origins <- function(layer, zone_province = NULL,
 
     origins[[length(origins) + 1L]] <- list(
       # Carried on the origin so every simulation driven from it — the delta h=1 refit, the
-      # psi search, the out-of-sample report — runs the SAME model as production. Indexed by
+      # K-week delta search, the residual report — runs the SAME model as production. Indexed by
       # zone name inside simulate_cascade(), so the full national vector is correct for every
       # origin.
       # NOT "with within-zone depletion engaged": pop_vec only ARMS depletion. Whether it
@@ -300,9 +441,13 @@ cascade_calibration_origins <- function(layer, zone_province = NULL,
       # R_nat at this origin, kept so the burn-in rule is auditable rather than asserted:
       # measured on the 14-week frame, the national estimate ran 10.6 / 8.5 / 4.3 / 2.9 at
       # weeks 4 / 5 / 6 / 7 and only reached the published EVD range (1.5-2.5) from week 8.
-      R_nat = rz$R_nat, n_with_cases = rz$n_with_cases,
+      R_nat = rz$R_nat, rt_source = rz$rt_source %||% NA_character_, n_with_cases = rz$n_with_cases,
       n_prior_dominated = rz$n_prior_dominated, import_share = rz$import_share,
       cutoff_date = cutoff_date, Ccol = Ccol, prep = prep_c,
+      # Where this origin's training counts came from (asof_counts_source()), and whether its
+      # hazard was refit on the validated model's rolling design — auditable per origin.
+      training_source = .src_c$source, vintage_date = as.Date(.src_c$vintage_date),
+      rolling_predictors = isTRUE(dz$rolling_predictors),
       eval_zones = zones_all[eval_idx], eval_idx = eval_idx,
       truth = truth, complete_horizons = hs_ok, n_atrisk = length(eval_idx),
       n_events = vapply(truth, sum, integer(1)),
@@ -311,7 +456,7 @@ cascade_calibration_origins <- function(layer, zone_province = NULL,
 
   if (!length(origins)) {
     warning("[cascade_calib] no usable held-out origins; the cascade cannot be calibrated ",
-            "out-of-sample on this snapshot.", call. = FALSE)
+            "on this snapshot.", call. = FALSE)
     return(list())
   }
   .ev <- function(o, H) { k <- as.character(H)
@@ -363,9 +508,8 @@ cascade_calibration_origins <- function(layer, zone_province = NULL,
 .cascade_pool_po <- function(origins, H, delta, psi, n_mc, seed, pop_vec = NULL) {
   scP <- CASCADE_SCENARIOS[[CASCADE_SCENARIO_PRIMARY]]
   parts <- lapply(origins, function(o) {
-    # pop_vec must match the production run: psi is fitted here and DEPLOYED there, so
-    # fitting it against a simulator with within-zone depletion switched off would calibrate
-    # one model and ship another.
+    # pop_vec is threaded for symmetry with production; within-zone depletion is modelled in
+    # neither (removed 2026-09-19), so it is inert, and psi is fixed at 0 (not fitted).
     sim <- simulate_cascade(o$prep, scP, n_mc = n_mc, horizon = as.integer(H),
                             delta = delta, psi = psi, seed = seed,
                             pop_vec = pop_vec %||% o$pop_vec)
@@ -386,7 +530,7 @@ cascade_calibration_origins <- function(layer, zone_province = NULL,
 }
 
 # ---------------------------------------------------------------------------
-# Stage A verification — refit delta from the cascade's OWN week-1 hazard
+# Step 3 (header) — week-1 transfer check: refit delta from the cascade's OWN week-1 hazard
 # ---------------------------------------------------------------------------
 
 #' Maximum-likelihood hazard-scale factor for the cascade at h = 1.
@@ -436,10 +580,11 @@ cascade_delta_h1_refit <- function(origins, n_mc = 600L, seed = CASCADE_SEED,
 }
 
 # ---------------------------------------------------------------------------
-# Stage B — psi against REALISED multi-week outcomes
+# RETIRED (sensitivity sweeps only) — psi against REALISED multi-week outcomes
 # ---------------------------------------------------------------------------
 
-#' Fit the frontier-saturation parameter to out-of-sample invasion counts.
+#' Fit the frontier-saturation parameter to the realised K-week invasion counts at the
+#' held-out origins (IN-SAMPLE for those counts, exactly as for delta; retired, kept for sweeps).
 #'
 #' The modelled quantity is the cascade's expected number of new invasions among
 #' the held-out evaluation zones over the K-week window; the target is the number
@@ -477,7 +622,7 @@ cascade_fit_psi_oos <- function(origins, delta, K = 6L,
   # because one origin is too recent would throw away the whole calibration.
   has_K  <- vapply(origins, function(o) key %in% names(o$truth), logical(1))
   if (!any(has_K)) {
-    warning(sprintf(paste0("[cascade_calib] no held-out origin carries a reporting-complete ",
+    warning(sprintf(paste0("[cascade_calib] no held-out origin carries a settled ",
                            "%d-week outcome; psi cannot be fitted and is left at its default."), K),
             call. = FALSE)
     return(NULL)
@@ -625,7 +770,7 @@ cascade_fit_psi_oos <- function(origins, delta, K = 6L,
                                     0.1 * max(abs(psi_hat), 1e-9)),
        n_mc = n_mc, n_origins = length(origins),
        curve = curve_df,
-       note = sprintf(paste0("psi=%.2f (%s%s) from OUT-OF-SAMPLE counts: modelled %.1f vs %.0f ",
+       note = sprintf(paste0("psi=%.2f (%s%s) fitted to the held-out-origin counts: modelled %.1f vs %.0f ",
                              "observed new zones over %d held-out %d-week window(s); ",
                              "deviance-optimal psi=%.2f (deviance %.0f there vs %.0f at the count match)"),
                       psi_hat, if (converged) "converged" else "NOT converged",
@@ -634,10 +779,18 @@ cascade_fit_psi_oos <- function(origins, delta, K = 6L,
 }
 
 # ---------------------------------------------------------------------------
-# Stage B' — delta against REALISED multi-week outcomes (psi retired)
+# Step 4 (header) — delta against REALISED K-week outcomes (psi retired)
 # ---------------------------------------------------------------------------
 
-#' Fit the hazard scale factor to out-of-sample K-week invasion counts.
+#' Fit the hazard scale factor to the realised K-week invasion counts at the held-out origins.
+#'
+#' WHAT "held-out" AND "_oos" MEAN HERE, and what they do not. Each origin's hazard and R are
+#' trained only on data as known at that origin (cascade_calibration_origins(); an origin whose
+#' as-of reconstruction failed falls back to the final-count slice and is recorded as such in
+#' `training_source`), so its K-week window is held out from THAT training. delta itself is
+#' FITTED to those windows' outcomes: the level it produces is calibrated IN-SAMPLE on them, and
+#' re-scoring the pooled count on the same origins (cascade_calibration_report(), the backtest)
+#' cannot test it. The "_oos" in this function's name, and in `delta_oos`, is historical.
 #'
 #' WHY THIS REPLACED THE (delta at h=1, psi at K) PAIR. psi was not identifiable on this
 #' outbreak: across runs it came back censored at a bound, or at a value 30% from its own root,
@@ -648,11 +801,14 @@ cascade_fit_psi_oos <- function(origins, delta, K = 6L,
 #' saturation) and ONE parameter is fitted, at the horizon the projection is actually read at.
 #'
 #' WHAT IS GIVEN UP, stated plainly. With delta fitted at h=1 the cascade's first week was
-#' exactly the validated short-horizon hazard, and the h=1 consistency gate was true by
-#' construction. Fitting delta at K instead buys a correct multi-week LEVEL at the cost of that
-#' exact tie, so the h=1 gate becomes a real test rather than an identity, and
-#' cascade_delta_h1_refit() is retained to report what delta the same data would give at h=1.
-#' A large gap between the two is a statement about the model, and belongs in the report.
+#' exactly the recalibrated short-horizon hazard. Fitting delta at K instead buys a multi-week
+#' LEVEL matched to the K-week count at the cost of that tie. The h=1 consistency gate does NOT
+#' test the level either way: its level ratio is ~delta for ANY delta (the cascade and the raw
+#' short-horizon model share one fit), so it is a plumbing check, not calibration
+#' (cascade_consistency_gate()). The real one-week level check is cascade_delta_h1_refit(),
+#' which refits delta from the cascade's own week-1 probabilities against REALISED week-1
+#' invasions at held-out origins. A large gap between that and the K-week delta is a statement
+#' about the model, and belongs in the report.
 #'
 #' MONOTONICITY RUNS THE OPPOSITE WAY FROM psi, and this is the one thing a reader of both
 #' solvers must not conflate: the per-week hazard is mu = delta * exp(eta) * sat, so the modelled
@@ -663,7 +819,8 @@ cascade_fit_psi_oos <- function(origins, delta, K = 6L,
 #' end up when the midpoint still under-predicts — the mirror of cascade_fit_psi_oos().
 #'
 #' Bisection is GEOMETRIC, not arithmetic: delta is a multiplicative scale factor, its band
-#' (RECAL_BAND) spans 0.01-5 and its uncertainty is reported as se_log, so equal steps in log
+#' (RECAL_BAND) spans four orders of magnitude either side of 1 and its uncertainty is reported as
+#' se_log, so equal steps in log
 #' delta are the natural ones. An arithmetic midpoint would spend nearly every refinement in the
 #' upper half of the band.
 #'
@@ -684,7 +841,7 @@ cascade_fit_delta_oos <- function(origins, K = 6L, psi = 0,
                                                    ifnotfound = 0.01)) {
   if (!length(origins)) return(NULL)
   K <- as.integer(K); key <- as.character(K)
-  band <- get0("RECAL_BAND", ifnotfound = c(0.01, 5.0))
+  band <- get0("RECAL_BAND", ifnotfound = c(1e-4, 1e4))   # the 00_config.R value
   if (is.null(delta_lo)) delta_lo <- band[1]
   if (is.null(delta_hi)) delta_hi <- band[2]
   stopifnot(delta_lo > 0, delta_hi > delta_lo)
@@ -693,9 +850,10 @@ cascade_fit_delta_oos <- function(origins, K = 6L, psi = 0,
   # one. Select the origins that do rather than aborting on the most recent.
   has_K <- vapply(origins, function(o) key %in% names(o$truth), logical(1))
   if (!any(has_K)) {
-    warning(sprintf(paste0("[cascade_calib] no held-out origin carries a reporting-complete ",
-                           "%d-week outcome; delta cannot be fitted out of sample and the ",
-                           "short-horizon factor is used unchanged."), K), call. = FALSE)
+    warning(sprintf(paste0("[cascade_calib] no held-out origin carries a settled ",
+                           "%d-week outcome; delta cannot be fitted on the K-week windows and ",
+                           "cascade_calibrate() falls back to the short-horizon factor."), K),
+            call. = FALSE)
     return(NULL)
   }
   if (!all(has_K))
@@ -706,8 +864,8 @@ cascade_fit_delta_oos <- function(origins, K = 6L, psi = 0,
   target <- sum(vapply(origins, function(o) sum(o$truth[[key]]), numeric(1)))
   if (target <= 0) {
     warning("[cascade_calib] zero realised invasions across the held-out windows; delta is not ",
-            "identifiable out of sample and the short-horizon factor is used unchanged.",
-            call. = FALSE)
+            "identifiable from the K-week counts and cascade_calibrate() falls back to the ",
+            "short-horizon factor.", call. = FALSE)
     return(NULL)
   }
 
@@ -821,7 +979,7 @@ cascade_fit_delta_oos <- function(origins, K = 6L, psi = 0,
        criteria_disagree = isTRUE(is.finite(d_dev) &&
                                     abs(log(d_dev / max(delta_hat, 1e-12))) > 0.1),
        n_mc = n_mc, n_origins = length(origins), curve = curve_df,
-       note = sprintf(paste0("delta=%.3f (%s%s) from OUT-OF-SAMPLE counts at psi=%g: modelled %.1f ",
+       note = sprintf(paste0("delta=%.3f (%s%s) from HELD-OUT-ORIGIN counts at psi=%g: modelled %.1f ",
                              "vs %.0f observed new zones over %d held-out %d-week window(s); ",
                              "deviance-optimal delta=%.3f (deviance %.0f there vs %.0f at the count match)"),
                      delta_hat, if (converged) "converged" else "NOT converged",
@@ -830,10 +988,12 @@ cascade_fit_delta_oos <- function(origins, K = 6L, psi = 0,
 }
 
 # ---------------------------------------------------------------------------
-# Stage D — verification under the FITTED parameters
+# Step 6 (header) — residual check under the FITTED delta (count in-sample)
 # ---------------------------------------------------------------------------
 
-#' Out-of-sample calibration report for the fitted cascade.
+#' Residual check of the fitted cascade on the calibration origins. The pooled COUNT is
+#' IN-SAMPLE for delta (delta was fitted to it); only the rank/discrimination columns are not
+#' what delta was fitted to. See the note above `resid_ok` below.
 #'
 #' @return list(per_origin, pooled, reliability, pass, note)
 cascade_calibration_report <- function(origins, delta, psi, K = 6L,
@@ -890,9 +1050,12 @@ cascade_calibration_report <- function(origins, delta, psi, K = 6L,
   #
   # What IS informative, and is retained: (a) the count residual as a NUMBER, computed at an
   # INDEPENDENT Monte-Carlo seed so it at least carries MC error rather than being bit-identical;
-  # (b) the rank/discrimination columns (AUC-PR skill, rank-of-truth), which delta cannot affect
-  # at all — delta is a monotone transform of the hazard, so it leaves every ranking untouched.
-  # Those are genuinely out-of-sample. The field is named for what it is.
+  # (b) the rank/discrimination columns (AUC-PR skill, rank-of-truth), which delta was NOT
+  # fitted to. Stated precisely: at one week delta is a monotone transform of every zone's
+  # hazard and cannot reorder them; over K weeks it can, but only second-order, through the
+  # cascade (a zone reached in two hops gains more from a larger delta than one reached in one).
+  # The search chose delta to match the COUNT, never to improve a ranking, so these columns are
+  # the out-of-sample part of the check. The field is named for what it is.
   resid_ok <- is.finite(pooled$count_ratio) && abs(pooled$count_ratio - 1) <= count_tol
   if (!resid_ok)
     warning(sprintf(paste0("[cascade_calib] IN-SAMPLE level residual at K=%d is outside tolerance: ",
@@ -908,7 +1071,7 @@ cascade_calibration_report <- function(origins, delta, psi, K = 6L,
        count_residual_ok = resid_ok, count_tol = count_tol,
        note = sprintf(paste0("K=%d: predicted %.1f vs observed %.0f new zones (ratio %.2f, tol +/-%.0f%%) %s ",
                              "[IN-SAMPLE for delta: delta was fitted to match this count]; ",
-                             "AUC-PR skill %.1fx [out-of-sample: delta cannot change a ranking]"),
+                             "AUC-PR skill %.1fx [not fitted to: delta was chosen on the count]"),
                       K, pooled$predicted_new, pooled$observed_new, pooled$count_ratio,
                       100 * count_tol, if (resid_ok) "OK" else "OFF", pooled$auc_pr_skill))
 }
@@ -920,7 +1083,7 @@ cascade_calibration_report <- function(origins, delta, psi, K = 6L,
 #' Calibrate the cascade end to end and return the parameters to simulate with.
 #'
 #' @param K held-out window length (weeks) used to FIT delta and to verify.
-#' @param n_mc_* Monte-Carlo sizes for the h=1 delta refit and the out-of-sample
+#' @param n_mc_* Monte-Carlo sizes for the h=1 delta refit and the K-week delta
 #'   search. The verification size DEFAULTS TO the search size and should stay tied to it:
 #'   both pool the same origins at the same delta and psi, so an equal Monte-Carlo size keeps
 #'   the search's `modelled_cum_at_delta` and the verification's `predicted_new` comparable.
@@ -953,39 +1116,48 @@ cascade_calibrate <- function(layer, zone_province = NULL, K = 6L,
   # delta comes from the prequential maximum-likelihood factor 16b fits for the
   # cascade's own covariate-bearing model; cascade_fit_delta() carries the
   # fallbacks and the diagnostics.
-  delta <- cascade_fit_delta(cov_model = paste0("Bayes-", kernel, "-geo"))
-  delta_info <- list(
-    delta = as.numeric(delta), estimator = attr(delta, "estimator") %||% NA_character_,
-    lo = attr(delta, "lo") %||% NA_real_, hi = attr(delta, "hi") %||% NA_real_,
-    se_log = attr(delta, "se_log") %||% NA_real_,
-    cal_in_large = attr(delta, "cal_in_large") %||% NA_real_,
-    boundary_hit = attr(delta, "boundary_hit") %||% NA,
-    source = attr(delta, "source") %||% NA_character_)
+  delta <- cascade_fit_delta(cov_model = cascade_hazard_label(kernel))
+  delta_info <- cascade_short_horizon_delta_info(delta)
 
   origins <- cascade_calibration_origins(
     layer, zone_province = zone_province, cutoffs_from_end = cutoffs_from_end,
     truth_horizons = unique(c(1L, K)), kernel = kernel, gt = gt,
     iter_fit = iter_fit, linelist = layer$ll, delta_imp = as.numeric(delta))
+  # No origins means NO calibration: delta_oos is NULL, which run_cascade.R treats as a failed
+  # calibration (fatal unless CASCADE_CALIBRATE=0 was set deliberately). delta_prior is carried
+  # so the record is complete either way.
   if (!length(origins))
     return(list(delta = delta, delta_info = delta_info, psi = CASCADE_PSI,
-                psi_fit = NULL, report = NULL, origins = list(), h1_refit = NULL,
+                psi_fit = NULL, delta_oos = NULL, delta_prior = as.numeric(delta),
+                report = NULL, origins = list(), h1_refit = NULL,
                 note = "no held-out origins; delta from 16b, psi at its configured default"))
 
   # Verify the delta transfer: refit it from the cascade's OWN week-1 hazard
   # against realised week-1 invasions. A large disagreement means the two
   # implementations do not share a level and delta is not transferable.
+  #
+  # TWO RATIOS, EACH NAMED FOR ITS REFERENCE. At this point `delta` is still 16b's SHORT-HORIZON
+  # factor; the K-week fit below replaces it. A single `h1_refit_ratio` used to be stored here,
+  # i.e. h1 / short-horizon factor, and 36_report.R printed it as the ratio "to the K-week factor"
+  # and "to the deployed delta" — a different number whenever the two factors differ. The ratio
+  # to the short-horizon factor is stored now (`h1_refit_ratio_short`); the ratio to the DEPLOYED
+  # factor (`h1_refit_ratio_deployed`) is stored only once that factor is final, below. The
+  # ambiguous `h1_refit_ratio` is no longer written.
   h1 <- cascade_delta_h1_refit(origins, n_mc = n_mc_delta, seed = seed)
   if (!is.null(h1) && is.finite(h1$delta) && is.finite(as.numeric(delta))) {
-    ratio <- h1$delta / as.numeric(delta)
-    if (abs(ratio - 1) > transfer_tol)
+    ratio_short <- h1$delta / as.numeric(delta)
+    if (abs(ratio_short - 1) > transfer_tol)
       warning(sprintf(paste0("[cascade_calib] delta TRANSFER check: 16b's short-horizon factor is ",
                              "%.3f but refitting from the cascade's own week-1 hazard on the held-out ",
                              "origins gives %.3f (ratio %.2f, tolerance +/-%.0f%%). The two ",
-                             "implementations do not share a level at h=1; the short-horizon factor ",
-                             "is used, but the discrepancy is real and is recorded."),
-                     as.numeric(delta), h1$delta, ratio, 100 * transfer_tol), call. = FALSE)
-    delta_info$h1_refit_delta <- h1$delta
-    delta_info$h1_refit_ratio <- ratio
+                             "implementations do not share a level at h=1. Neither value is the one ",
+                             "projected with: delta is next fitted on the %d-week counts and that ",
+                             "factor is deployed (the short-horizon factor is carried only if that fit ",
+                             "fails). The discrepancy is real and is recorded."),
+                     as.numeric(delta), h1$delta, ratio_short, 100 * transfer_tol, K),
+              call. = FALSE)
+    delta_info$h1_refit_delta       <- h1$delta
+    delta_info$h1_refit_ratio_short <- ratio_short
     delta_info$h1_refit_lo    <- h1$lo
     delta_info$h1_refit_hi    <- h1$hi
     delta_info$h1_refit_n_events <- h1$n_events
@@ -1005,7 +1177,7 @@ cascade_calibrate <- function(layer, zone_province = NULL, K = 6L,
     delta_info$delta_short_horizon <- as.numeric(delta_prior)
     delta_info$delta_oos           <- delta_oos$delta
     # delta / lo / hi MUST follow the estimator label. They held the 16b SHORT-HORIZON values
-    # while $estimator was overwritten to claim the K-week out-of-sample fit, so
+    # while $estimator was overwritten to claim the K-week fit, so
     # cascade_calibration.json reported delta_info$delta = 0.430 [0.311, 0.601] for an estimator
     # that in fact returned 0.389. Rename the prior's interval rather than reuse it: an interval
     # from a different estimator on a different horizon does not describe this point estimate.
@@ -1015,7 +1187,13 @@ cascade_calibrate <- function(layer, zone_province = NULL, K = 6L,
     delta_info$lo                  <- NA_real_
     delta_info$hi                  <- NA_real_
     delta_info$delta_oos_ratio     <- delta_oos$delta / max(as.numeric(delta_prior), 1e-12)
-    delta_info$estimator           <- sprintf("out-of-sample %d-week count match", K)
+    delta_info$estimator           <- sprintf("%d-week count match at held-out origins", K)
+    # PROVENANCE follows the estimate: `source` and `cal_in_large` described the short-horizon
+    # prior's row (16b), so beside the K-week delta they read as its provenance. Kept, renamed.
+    delta_info$delta_prior_source       <- delta_info$source
+    delta_info$delta_prior_cal_in_large <- delta_info$cal_in_large
+    delta_info$source                   <- "cascade_fit_delta_oos (33b)"
+    delta_info$cal_in_large             <- NA_real_
     # The bracket is NUMERICAL width, not statistical uncertainty: the Monte-Carlo component of
     # the search dominates it by roughly an order of magnitude (measured for the psi solver on
     # the same frames), so it must never be quoted as delta's precision.
@@ -1031,16 +1209,23 @@ cascade_calibrate <- function(layer, zone_province = NULL, K = 6L,
     delta_info$bracket_hi <- delta_oos$bracket_hi
     delta_info$boundary_hit <- delta_oos$boundary_hit
     if (isTRUE(delta_oos$boundary_hit))
-      warning(sprintf(paste0("[cascade_calib] delta is CENSORED at its %s bound (%.3f). The ",
-                             "13-week level is NOT supported out of sample and the layer is not ",
-                             "fit for publication until this is resolved."),
-                      delta_oos$boundary_side, delta), call. = FALSE)
+      warning(sprintf(paste0("[cascade_calib] delta is CENSORED at its %s bound (%.3f): the band, ",
+                             "not the %d-week calibration windows, set it, so the 13-week level is ",
+                             "NOT supported by the calibration and the layer is not fit for ",
+                             "publication until this is resolved."),
+                      delta_oos$boundary_side, delta, K), call. = FALSE)
   } else {
-    warning(sprintf(paste0("[cascade_calib] delta could not be fitted out of sample at K=%d; the ",
-                           "short-horizon factor %.3f is used unchanged and the 13-week LEVEL is ",
-                           "therefore uncalibrated at the horizon it is read at."),
+    warning(sprintf(paste0("[cascade_calib] delta could not be fitted on the %d-week calibration ",
+                           "windows; the short-horizon factor %.3f is returned unchanged and the ",
+                           "13-week LEVEL is therefore uncalibrated at the horizon it is read at."),
                     K, as.numeric(delta_prior)), call. = FALSE)
   }
+  # The week-1 refit against the DEPLOYED factor, computed only now that `delta` is final: the
+  # K-week factor when that fit succeeded, else the short-horizon factor carried in its place
+  # (identical to h1_refit_ratio_short in that case). See the note at the week-1 refit above.
+  if (is.finite(delta_info[["h1_refit_delta"]] %||% NA_real_) && is.finite(as.numeric(delta)) &&
+      as.numeric(delta) > 0)
+    delta_info$h1_refit_ratio_deployed <- delta_info[["h1_refit_delta"]] / as.numeric(delta)
   psi_fit <- NULL   # retired: psi is no longer fitted (cascade_fit_psi_oos remains for sweeps)
 
   # INDEPENDENT SEED. With the search's own seed this call reproduces the bisection's objective
@@ -1055,20 +1240,27 @@ cascade_calibrate <- function(layer, zone_province = NULL, K = 6L,
   # values each origin was calibrated on are auditable artifacts rather than log lines.
   origin_diag <- tryCatch(dplyr::bind_rows(lapply(origins, function(o) tibble::tibble(
       cutoff_date = o$cutoff_date, week_index = o$Ccol, R_nat = o$R_nat,
+      rt_source = o$rt_source %||% NA_character_,
       n_with_cases = o$n_with_cases, n_prior_dominated = o$n_prior_dominated,
       import_share = o$import_share, n_atrisk = o$n_atrisk,
       horizons = paste(o$complete_horizons, collapse = "/"),
-      events = paste(o$n_events, collapse = "/")))), error = function(e) NULL)
+      events = paste(o$n_events, collapse = "/"),
+      training_source = o$training_source %||% NA_character_,
+      vintage_date = as.Date(o$vintage_date %||% NA),
+      rolling_predictors = isTRUE(o$rolling_predictors)))), error = function(e) NULL)
 
   list(delta = delta, delta_info = delta_info, psi = psi, psi_fit = psi_fit,
        delta_oos = delta_oos, delta_prior = as.numeric(delta_prior),
        report = report, origins = origins, h1_refit = h1,
        origin_diagnostics = origin_diag,
+       # TRUE only when every origin's hazard was refit on the validated model's rolling design.
+       rolling_predictors = length(origins) > 0L &&
+         all(vapply(origins, function(o) isTRUE(o$rolling_predictors), logical(1))),
        min_weeks_from_start = get0("CASCADE_CALIB_MIN_WEEKS", ifnotfound = 7L),
        note = sprintf("delta=%.3f (%s%s) | short-horizon delta=%.3f%s | psi=%g (FIXED, not fitted) | %s",
                       as.numeric(delta),
-                      if (is.null(delta_oos)) "short-horizon factor, OOS fit unavailable"
-                      else sprintf("OOS %d-week count match, %s", K,
+                      if (is.null(delta_oos)) "short-horizon factor, K-week fit unavailable"
+                      else sprintf("held-out %d-week count match, %s", K,
                                    if (isTRUE(delta_oos$converged)) "converged" else "NOT converged"),
                       if (!is.null(delta_oos) && isTRUE(delta_oos$boundary_hit))
                         sprintf(", CENSORED at the %s bound", delta_oos$boundary_side) else "",
@@ -1076,8 +1268,8 @@ cascade_calibrate <- function(layer, zone_province = NULL, K = 6L,
                       if (!is.null(h1) && is.finite(h1$delta))
                         sprintf(", week-1 refit %.3f", h1$delta) else "",
                       psi,
-                      if (is.null(report)) "no verification" else report$note))
+                      if (is.null(report)) "no residual check" else report$note))
 }
 
-message("[33b] cascade calibration loaded — ONE fitted parameter: delta on out-of-sample K-week ",
-        "counts (psi retired, fixed at 0).")
+message("[33b] cascade calibration loaded — ONE fitted parameter: delta, fitted to the realised ",
+        "K-week counts at as-of origins (an in-sample level fit; psi retired, fixed at 0).")

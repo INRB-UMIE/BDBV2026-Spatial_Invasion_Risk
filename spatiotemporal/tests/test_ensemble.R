@@ -70,6 +70,44 @@ test_that("ensemble_forecasts: carry columns take the first NON-NA value", {
                info = "a leading NA outcome must not make the ensemble row unscorable")
 })
 
+test_that("ensemble_forecasts: the round's training provenance carries through", {
+  skip_if_missing("ensemble_forecasts")
+  # training_source / training_fallback / vintage_date are one value per fold, shared by every
+  # member. They were not carry columns, so ensemble rows came back NA and
+  # invasion_delta_stability() reported an empty training source for the ensembles.
+  fc <- data.frame(health_zone = rep("A", 3), horizon = rep(1L, 3), fold_id = 1L,
+                   method = c("m1", "m2", "m3"), p_invasion = c(0.1, 0.2, 0.3),
+                   training_source = "vintage", training_fallback = NA_character_,
+                   vintage_date = as.Date("2026-08-01"), stringsAsFactors = FALSE)
+  out <- ensemble_forecasts(fc, members = c("m1", "m2", "m3"), combine = "mean",
+                            label = "E", min_members = 2L)
+  expect_identical(out$training_source, "vintage")
+  expect_true(is.na(out$training_fallback))
+  expect_identical(out$vintage_date, as.Date("2026-08-01"))
+})
+
+test_that("ensemble_forecasts: a pool with a rank-only member is not a probability", {
+  skip_if_missing("ensemble_forecasts")
+  base <- data.frame(health_zone = rep("A", 3), horizon = rep(1L, 3),
+                     method = c("m1", "m2", "m3"), p_invasion = c(0.1, 0.2, 0.3),
+                     stringsAsFactors = FALSE)
+  mixed <- base; mixed$prob_calibrated <- c(TRUE, FALSE, NA)
+  out <- ensemble_forecasts(mixed, members = c("m1", "m2", "m3"), combine = "mean",
+                            label = "E", min_members = 2L)
+  expect_identical(out$prob_calibrated, FALSE)
+  allcal <- base; allcal$prob_calibrated <- c(NA, TRUE, NA)
+  out <- ensemble_forecasts(allcal, members = c("m1", "m2", "m3"), combine = "mean",
+                            label = "E", min_members = 2L)
+  expect_identical(out$prob_calibrated, TRUE)
+  undeclared <- base; undeclared$prob_calibrated <- NA
+  out <- ensemble_forecasts(undeclared, members = c("m1", "m2", "m3"), combine = "mean",
+                            label = "E", min_members = 2L)
+  expect_true(is.na(out$prob_calibrated))      # absent = calibrated, as every consumer reads it
+  out <- ensemble_forecasts(base, members = c("m1", "m2", "m3"), combine = "mean",
+                            label = "E", min_members = 2L)
+  expect_false("prob_calibrated" %in% names(out))  # no column invented when no member has one
+})
+
 test_that("append_ensembles is a no-op when fewer than two members are present", {
   skip_if_missing("append_ensembles")
   fc <- data.frame(health_zone = "A", horizon = 1L, method = "m1", p_invasion = 0.1,

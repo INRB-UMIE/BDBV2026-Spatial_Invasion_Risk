@@ -5,17 +5,20 @@
 #
 # The nowcast used to be driven by the onset->SAMPLE delay (~7.7 d). The series
 # it corrects is truncated by onset->APPEARANCE-IN-EXTRACT (~11.4 d measured
-# against 54 archived vintages). Wrong leg, one direction: the most recent week
-# — the week every forecast is issued FROM — was inflated 2.63x where 5.92x is
-# right. epinow2_truncation() (02_epi_params.R section 4b) fits the right leg,
-# per regime, and every pipeline caller now passes it explicitly.
+# against 54 archived vintages in September). Wrong leg, one direction: the most
+# recent week — the week every forecast is issued FROM — was under-corrected.
+# epinow2_truncation() (02_epi_params.R section 4b) fits the right leg, per
+# regime, and every pipeline caller now passes it explicitly. (The first extract
+# fit, 2026-09-21, asked for 5.92x on that week and was later found to
+# over-correct; the fixture below keeps its moments as a deep-correction case.)
 #
-# These tests pin the three things that can silently undo that:
+# These tests pin the things that can silently undo that:
 #   1. the adapter that turns a fitted EpiNow2 dist into a delay spec,
-#   2. the multiplier cap, which was a fixed 5x and so would have CLIPPED the
-#      5.92x correction to 5x — defeating the fix at exactly the week it was
+#   2. the multiplier cap, which was a fixed 5x and so would have CLIPPED a
+#      correction above 5x — defeating the fix at exactly the week it was
 #      meant to fix, behind a warning,
-#   3. the wrong-leg fallback staying loud.
+#   3. the wrong-leg fallback staying loud,
+#   4. the renormalisation of a spec that carries its support bound (trunc_max).
 # =============================================================================
 
 .skip_unless <- function(fn) if (!exists(fn, mode = "function")) testthat::skip(paste0(fn, "() unavailable"))
@@ -65,7 +68,7 @@ test_that("the multiplier cap is derived from the delay and does NOT clip the fi
   # are stable weeks), plus the anchor week that needs the deep correction.
   # THE ANCHOR WEEK STARTS AT ad - 6, NOT AT ad. The weekly grid is anchored so the final
   # week ENDS on the analysis date (00_config.R WEEK_ANCHOR); a week starting ON ad has mean
-  # lag ad - (ad + 3) = -3 and is dropped as a future week, leaving trunc_weight NA. Getting
+  # lag ad - (ad + 3) = -3, so its corrected counts are suppressed (confirmed_nc NA). Getting
   # this wrong is how the first draft of this test "passed" nothing.
   ad    <- as.Date("2026-09-14")
   weeks <- seq(ad - 6 - 7 * 11, ad - 6, by = "week")
@@ -84,29 +87,27 @@ test_that("the multiplier cap is derived from the delay and does NOT clip the fi
   expect_true(is.finite(anchor$trunc_weight))
   realised <- as.numeric(anchor$confirmed_nc / anchor$confirmed)
   implied  <- as.numeric(1 / anchor$trunc_weight)
-  # THE POINT OF THIS TEST. Under the fitted truncation the anchor week needs ~5.9x.
+  # THE POINT OF THIS TEST. Under this fixture the anchor week needs ~5.9x.
   # The retired fixed 5x cap would have clipped it; the delay-derived cap must not.
   expect_true(implied > 5,
               info = "fixture should need MORE than the retired 5x cap, else this proves nothing")
   expect_equal(realised, implied, tolerance = 1e-6,
                info = "the anchor-week correction was clipped by the multiplier cap")
-  # The live value, pinned: this fixture carries the fitted extract-regime moments, and the
-  # deployed anchor week measured 0.1688 -> 5.923x on 2026-09-21.
+  # The fixture's value, pinned: it carries the moments of the 2026-09-21 extract fit, under
+  # which the deployed anchor week measured 0.1688 -> 5.923x (not a current value).
   expect_equal(as.numeric(anchor$trunc_weight), 0.168829, tolerance = 1e-5)
   expect_equal(as.numeric(realised), 5.923152, tolerance = 1e-5)
 })
 
 test_that("no admissible week is EVER clipped, at any depth the grid can reach", {
   .skip_unless("apply_nowcast_correction")
-  # A week survives only if lag_days = ad - (week_start + 3) is both > 0 and >= min_lag_days,
-  # so with min_lag_days = 0 the deepest reachable week starts at ad - 4 (lag 1), not ad - 3
-  # (lag 0, suppressed as future). The live grid is week-aligned and only ever reaches ad - 6,
-  # but an unaligned origin reaches deeper and that is where clipping would first appear —
-  # the retired fixed 5x cap was justified by a "4.577x deepest reachable" figure computed
-  # under the retired delay, which the fitted truncation invalidates.
+  # A week survives only if it starts on or before ad and lag_days = ad - (week_start + 3) >=
+  # min_lag_days, so with min_lag_days = 0 the deepest reachable week starts at ad - 3 (lag 0).
+  # The live grid is week-aligned and only ever reaches ad - 6, but an unaligned origin reaches
+  # deeper and that is where clipping would first appear.
   ad <- as.Date("2026-09-14")
   d  <- .trunc_fixture()
-  for (off in c(6L, 5L, 4L)) {
+  for (off in c(6L, 5L, 4L, 3L)) {
     last  <- ad - off
     weeks <- seq(last - 7 * 11, last, by = "week")
     zw <- tibble::tibble(
@@ -127,8 +128,8 @@ test_that("no admissible week is EVER clipped, at any depth the grid can reach",
 test_that("the cap is loose enough for the deepest week but still catches a pathological weight", {
   .skip_unless("compute_truncation_weights")
   d <- .trunc_fixture()
-  # The deepest admissible week contributes lags 0..4 over a denominator of 7.
-  w_deepest <- sum(delay_cdf(d, seq(0L, 4L) + 0.5)) / 7
+  # The deepest admissible week (starting ad - 3) contributes lags 0..3 over a denominator of 7.
+  w_deepest <- sum(delay_cdf(d, seq(0L, 3L) + 0.5)) / 7
   cap <- max(5, ceiling(1.5 / w_deepest))
   expect_true(cap > 1 / w_deepest, info = "the cap must not bind on the deepest legitimate week")
   # ...and must still be far below what the 1e-6 weight floor in compute_truncation_weights()
@@ -136,15 +137,52 @@ test_that("the cap is loose enough for the deepest week but still catches a path
   expect_true(cap < 1e6)
 })
 
-test_that("the delay-derived cap reproduces the historic 4.577x bound on the retired delay", {
-  .skip_unless("compute_truncation_weights"); .skip_unless("effective_onset_sample_delay")
-  dly <- tryCatch(effective_onset_sample_delay(), error = function(e) NULL)
-  if (is.null(dly) || !is.finite(dly$mean)) testthat::skip("delay params unavailable")
-  # 04_nowcasting.R documented "the deepest reachable non-suppressed multiplier is 4.577x"
-  # under the onset->sample delay. Recomputing it from the depth formula is an independent
-  # check that the formula identifies the right week: get the depth wrong by one day and
-  # this lands on 3.384x (ad-5) or 6.0x+ (ad-3), not 4.577x.
-  expect_equal(7 / sum(delay_cdf(dly, seq(0L, 4L) + 0.5)), 4.577, tolerance = 2e-3)
+test_that("the deepest admissible week starts at ad - 3; a week starting at ad - 2 is suppressed", {
+  .skip_unless("apply_nowcast_correction")
+  ad <- as.Date("2026-09-14")
+  d  <- .trunc_fixture()
+  last  <- ad - 2L
+  weeks <- seq(last - 7 * 11, last, by = "week")
+  zw <- tibble::tibble(health_zone = "Bunia", week_start = weeks,
+                       confirmed = 10L, suspected = 10L)
+  out <- suppressWarnings(suppressMessages(
+    apply_nowcast_correction(zw, analysis_date = ad, min_lag_days = 0, delay = d)))
+  expect_true(is.na(out$confirmed_nc[out$week_start == last]))
+  expect_true(all(is.finite(out$confirmed_nc[out$week_start < last])))
+  # ...and the suppression is REPORTED: the week has a weight but a negative mean-day lag, which
+  # the old `lag_col > 0` condition left out of the count, so it was suppressed silently.
+  expect_true(is.finite(out$trunc_weight[out$week_start == last]))
+  expect_message(suppressWarnings(
+    apply_nowcast_correction(zw, analysis_date = ad, min_lag_days = 0, delay = d)),
+    "1 zone-week rows suppressed")
+})
+
+test_that("a spec carrying trunc_max is renormalised on [0, trunc_max], once", {
+  .skip_unless("compute_truncation_weights"); .skip_unless(".nowcast_cdf")
+  ad <- as.Date("2026-09-14")
+  d  <- .trunc_fixture()
+  dm <- d; dm$trunc_max <- 45
+  wk <- seq(ad - 6 - 7 * 9, ad - 6, by = "week")
+  w0 <- suppressMessages(compute_truncation_weights(wk, ad, delay = d))
+  w1 <- suppressMessages(compute_truncation_weights(wk, ad, delay = dm))
+  Fz <- stats::plnorm(45.5, 2.0280, 0.7150)            # CDF at the support's upper edge
+  # per onset DAY: min(F(L + 0.5) / F(45.5), 1), then the 7-day mean (a week straddling the
+  # bound has some days capped at 1, so this is not min(w0 / F(45.5), 1))
+  want <- vapply(wk, function(w) mean(pmin(stats::plnorm(as.numeric(ad - (w + 0:6)) + 0.5,
+                                                         2.0280, 0.7150) / Fz, 1)), numeric(1))
+  expect_equal(as.numeric(w1), want, tolerance = 1e-12)
+  expect_true(all(as.numeric(w1) >= as.numeric(w0)))
+  # a week older than the bound is complete under the conditional distribution
+  expect_equal(as.numeric(suppressMessages(compute_truncation_weights(ad - 60, ad, delay = dm))), 1)
+  # an attribute works like an element; no bound leaves delay_cdf() untouched
+  da <- d; attr(da, "trunc_max") <- 45
+  expect_equal(as.numeric(suppressMessages(compute_truncation_weights(wk, ad, delay = da))), as.numeric(w1))
+  expect_identical(.nowcast_cdf(d, 0:50 + 0.5), delay_cdf(d, 0:50 + 0.5))
+  # the cap is sized on the SAME renormalised CDF, so it still never clips the anchor week
+  zw <- tibble::tibble(health_zone = "Bunia", week_start = wk, confirmed = 10L, suspected = 10L)
+  out <- suppressWarnings(suppressMessages(
+    apply_nowcast_correction(zw, analysis_date = ad, min_lag_days = 0, delay = dm)))
+  expect_equal(as.numeric(out$confirmed_nc), as.numeric(10 / out$trunc_weight), tolerance = 1e-9)
 })
 
 test_that("omitting `delay` warns that it is the wrong leg", {
@@ -181,22 +219,25 @@ test_that("the regime is part of the EXTRACT cache key, so two panels cannot ali
   expect_true(grepl("negbin", .trunc_fingerprint(panel, "extract"), fixed = TRUE))
 })
 
-test_that("the as-of cohort fit reproduces the completeness it was measured from", {
+test_that("the as-of fit recovers the TRUE completeness of a known delay under growth", {
   .skip_unless(".trunc_fit_asof_cohort")
-  # Synthetic line list with a KNOWN delay, right-truncated the way the real one is: a record
-  # is present only once its observation date has arrived. The cohort estimator must be immune
-  # to that truncation by construction — for lag L it only ever uses onsets at least L days
-  # old, for which "observed within L days?" is fully determined.
+  # Synthetic line list with a KNOWN delay, right-truncated the way the real one is (a record is
+  # present only once its observation date has arrived), on a GROWING epidemic (0.03/d), which is
+  # where a plain cohort share over-states completeness: recent onsets are represented only by
+  # their short delays.
   set.seed(11L)
   end <- as.Date("2026-09-07"); start <- end - 120L
   n <- 6000L
-  ons <- start + sample(0:120, n, replace = TRUE)
+  ons <- start + sample(0:120, n, replace = TRUE, prob = exp(0.03 * (0:120)))
   dly <- stats::rgamma(n, shape = 1.05, rate = 0.11)
   obs <- ons + round(dly)
   vis <- obs <= end & obs >= ons
+  # date_index / onset_usable are the loader's columns the as-of fit reads (every onset here is
+  # a usable recorded one, so date_index is the onset itself).
   ll <- data.frame(confirmed = TRUE,
                    date_of_symptom_onset = as.character(ons[vis]),
                    date_of_sample_collection = as.character(obs[vis]),
+                   date_index = ons[vis], onset_usable = TRUE,
                    stringsAsFactors = FALSE)
   # .trunc_fit_asof_cohort() reads the observation date through linelist_observation_date();
   # stub it to the sample column, which is what it resolves to for 100% of confirmed records.
@@ -213,19 +254,19 @@ test_that("the as-of cohort fit reproduces the completeness it was measured from
   sp <- .trunc_as_delay_spec(d, "asof")
   expect_identical(sp$family, "gamma")
 
-  # The measured anchor-week completeness, computed the same cohort way, with NO model.
+  # The TRUE anchor-week completeness of the generating delay (rounded to days, support 0..45,
+  # renormalised as the model's pmf is).
+  mx <- get0("TRUNC_MAX_DAYS", ifnotfound = 45L)
+  truth <- mean(stats::pgamma(0:6 + 0.5, 1.05, 0.11)) / stats::pgamma(mx + 0.5, 1.05, 0.11)
+  fitted_w <- suppressMessages(compute_truncation_weights(end - 6, end, delay = sp))
+  expect_equal(as.numeric(fitted_w), truth, tolerance = 0.03)
+  # ...and it must beat the plain cohort share P(delay <= L | onset <= end - L), which ignores
+  # the truncation and over-states completeness under growth.
   o  <- as.Date(ll$date_of_symptom_onset)
   dl <- as.numeric(as.Date(ll$date_of_sample_collection) - o)
-  measured <- mean(vapply(0:6, function(L) mean(dl[o <= end - L] <= L), numeric(1)))
-  fitted_w <- suppressMessages(compute_truncation_weights(end - 6, end, delay = sp))
-  # Within 5%: the gamma must track what was measured, not merely be plausible. On the live
-  # line list this agreement is -1.24% (0.2902 fitted vs 0.2939 measured).
-  expect_equal(as.numeric(fitted_w), measured, tolerance = 0.05)
-
-  # ...and it must beat the naive estimate that ignores truncation, which is the failure mode
-  # this estimator exists to avoid.
-  naive <- mean(vapply(0:6, function(L) mean(dl <= L), numeric(1)))
-  expect_true(abs(fitted_w - measured) < abs(naive - measured))
+  cohort <- mean(vapply(0:6, function(L) mean(dl[o <= end - L] <= L), numeric(1)))
+  expect_true(cohort > truth)
+  expect_true(abs(fitted_w - truth) < abs(cohort - truth))
 })
 
 test_that("the as-of regime needs no archive and no Stan", {

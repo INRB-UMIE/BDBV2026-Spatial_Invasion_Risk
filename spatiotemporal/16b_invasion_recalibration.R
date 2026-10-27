@@ -12,10 +12,27 @@
 # ranking is highly informative. That is the textbook signature of a well-ordered,
 # badly-scaled forecast, and it is fixable with ONE parameter.
 #
-# WHAT. A single hazard-scale multiplier delta per (method, horizon):
+# WHAT. A single hazard-scale multiplier delta PER MODEL (2026-10-14; it was per model x horizon):
 #
 #     mu~_i = -log(1 - p_i)                       (cumulative hazard implied by p_i)
 #     p_i(delta) = 1 - exp(-delta * mu~_i) = 1 - (1 - p_i)^delta
+#
+# THE RULE, in full (2026-10-14):
+#   * fitted on the model's 1-WEEK forecasts and outcomes only;
+#   * only from rounds AFTER the ascertainment burn-in (invasion_is_burnin(), 00_config.R);
+#   * only from rounds whose 1-week outcome window had been closed for at least
+#     LFO_RELIABLE_EVAL_AGE_DAYS (25) days on the date of the forecast being corrected -- the
+#     pipeline's definition of a SETTLED outcome, already used for the deployed factor;
+#   * Jeffreys-penalised ML (below), ~ (invasions + 1/2) / sum of forecast hazards;
+#   * the SAME delta is applied to the 1-week and 2-week cumulative hazards, so
+#     P(within 2 weeks) >= P(within 1 week) holds in every posterior draw. Separate per-horizon
+#     factors broke that: 7,382 recalibrated back-test rows (22 models, post-burn-in) had
+#     P(2 wk) < P(1 wk) on the 2026-10-09 frame;
+#   * in the live forecast delta is drawn per posterior draw from Gamma(invasions + 1/2,
+#     rate = (invasions + 1/2) / delta), whose mean is the fitted delta, so the published
+#     intervals carry its uncertainty (21_bayesian_renewal.R, .scale_invasion_draws()).
+# The back-test ("prequential") delta replays exactly this rule at each historical forecast
+# date, so it never uses an outcome that was not yet settled at that date.
 #
 # Three properties make this the right family here, and each is relied on downstream:
 #   (1) IDENTITY AT delta = 1. p_i(1) == p_i exactly, so "recalibrated" and "raw"
@@ -78,29 +95,26 @@
 # TWO DELTAS, DELIBERATELY. Fitting delta on the same rows it is scored on is
 # optimistically biased, and the bias is LARGEST for the worst-calibrated models —
 # so in-sample recalibration would systematically reward models that needed the most
-# fixing. (Verified: with in-sample delta the featured-model pick flips; with the
-# prequential delta below it does not.) Hence:
-#   * delta_preq  — PREQUENTIAL, fitted only on folds whose outcome window had
-#                   CLOSED before the target fold's cutoff. Used for every reported
-#                   score and for model selection.
-#   * delta_pooled— fitted on all folds. Used ONLY to recalibrate the live forecast,
-#                   where "all folds" is genuinely the whole past.
+# fixing. Hence:
+#   * delta_preq  — PREQUENTIAL, fitted only on post-burn-in folds whose 1-week outcome was
+#                   SETTLED (>= LFO_RELIABLE_EVAL_AGE_DAYS) by the target fold's issue date,
+#                   on the shared support. Used for every reported score and for model
+#                   selection.
+#   * delta_pooled— fitted on every settled, post-burn-in fold. Used ONLY to recalibrate the
+#                   live forecast, where those folds are genuinely the whole usable past.
 #
-# CAUSALITY OF THE PREQUENTIAL SPLIT. A fold with cutoff C' has outcome window
-# (C', C' + 7h], whose last week ENDS at C' + 7h + 6. To recalibrate a forecast issued at
-# cutoff C for horizon h we may therefore only use folds with C' + 7h + 6 <= C. Using
-# fold_id < k for both horizons — the obvious implementation — leaks a week of future
-# outcome into the h=2 delta; using C' + 7h <= C (the rule until 2026-09-19) still admitted
-# a fold whose final outcome week had only just begun.
-#
-# A KNOWN, QUANTIFIED LIMITATION, stated rather than silently patched. This is CALENDAR
-# causality. run_invasion_lfo() additionally refuses to SCORE an outcome week until
-# `min_eval_age_days` (25) after it ends, because late-reported onsets keep arriving — by
-# that stricter standard the delta is still using outcomes that were not yet reliably
-# observed. Applying it here is not free: measured on the shipped 12 weekly folds, the number
-# of target folds retaining at least 3 training folds falls from 9 to 4 at h=1 and from 8 to 3
-# at h=2, i.e. most folds would lose their delta entirely and fall back to delta = 1. The
-# calendar rule is therefore applied and the reliability gap is disclosed here.
+# CAUSALITY OF THE PREQUENTIAL SPLIT (2026-10-14). A fold with cutoff C' has a 1-week outcome
+# window whose last day is C' + 13. A forecast at cutoff C is issued on C + 6. A training fold is
+# usable only if (C + 6) - (C' + 14) >= LFO_RELIABLE_EVAL_AGE_DAYS, i.e. its outcome had been
+# SETTLED for 25 days by the issue date; with weekly folds that is C' <= C - 35. The previous
+# rule (C' + 13 <= C) admitted folds whose outcome week had ended only 7 days before the issue
+# date and scored them with their FINAL outcomes -- invasions that had mostly not yet been
+# confirmed at the time, i.e. look-ahead. The cost of the stricter rule was measured on the
+# 2026-10-09 frame (22 Bayesian models, post-burn-in): mean log score x1000 22.31 (h=1) / 38.14
+# (h=2) under the 25-day rule against 21.98 / 37.28 under a 13-day rule, with both better than
+# no recalibration in 43 and 42 of 44 model x horizon rows. The 25-day rule is used because it
+# is the same settledness the deployed factor has always required: the prequential delta then
+# replays deployment exactly.
 #
 # CLUSTERING. The point estimate treats zone-weeks as independent (a quasi-likelihood
 # M-estimator; the estimating equation is unbiased regardless of correlation), but the
@@ -118,7 +132,6 @@
 source(file.path(here::here(), "spatiotemporal", "00_config.R"))
 suppressPackageStartupMessages({ library(dplyr) })
 
-if (!exists("%||%")) `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 
 # ---------------------------------------------------------------------------
 # Tunables (overridable from 00_config.R / the environment)
@@ -198,14 +211,16 @@ recalibrate_invasion_p <- function(p, delta) {
 #'     delta_hat = (events + 1/2) / sum_i u_i,
 #'
 #' i.e. exactly "add half an invasion" on the hazard scale -- the classical Jeffreys-corrected
-#' rate ratio. (The plain MLE is events / sum_i u_i, which is 0 when events = 0.) The
-#' correction is negligible once the pool is large: on the deployment fit, with 29 and 54
-#' events, it moves delta by under 2%. One estimator therefore serves both the prequential and
-#' the pooled fits, with no gates and no special cases.
+#' rate ratio. (The plain MLE is events / sum_i u_i, which is 0 when events = 0.) In that limit
+#' the correction multiplies delta by (events + 1/2) / events, i.e. a relative change of
+#' 1 / (2 * events), so it is negligible once the pool holds a few dozen invasions. One
+#' estimator therefore serves both the prequential and the pooled fits, with no gates and no
+#' special cases.
 #'
-#' Unimodality was checked numerically on all 338 real training pools (every method x horizon x
-#' fold) over delta in [1e-4, 1e4]: one sign change in the first difference in every case, and
-#' optimize() agreed with a 4,001-point grid search everywhere. optimize() is therefore safe.
+#' UNIMODALITY. l(theta) is concave: the binomial cloglog log-likelihood is concave in the
+#' linear predictor, and theta enters every linear predictor additively (log lambda_i =
+#' log u_i + theta). The penalty 0.5 * log I(theta) tends to 0.5 * theta + const in the
+#' rare-event limit, so l* is concave there too, and optimize() on the bracket is safe.
 #'
 #' @param p numeric predicted probabilities (at-risk rows only).
 #' @param y 0/1 realised outcomes, same length.
@@ -283,7 +298,7 @@ bootstrap_invasion_delta <- function(p, y, zone, band = RECAL_BAND,
   # one we created rather than leaving a seeded generator behind — otherwise calling
   # this function would silently change every subsequent random draw in the session.
   old <- if (exists(".Random.seed", envir = .GlobalEnv)) get(".Random.seed", envir = .GlobalEnv) else NULL
-  set.seed(seed)
+  set_fixed_seed(seed)
   on.exit({
     if (!is.null(old)) assign(".Random.seed", old, envir = .GlobalEnv)
     else if (exists(".Random.seed", envir = .GlobalEnv)) rm(".Random.seed", envir = .GlobalEnv)
@@ -364,37 +379,46 @@ bootstrap_invasion_delta <- function(p, y, zone, band = RECAL_BAND,
   stats::setNames(as.Date("2020-01-06") + 7L * (seq_along(fid) - 1L), as.character(fid))
 }
 
-#' Prequential recalibration factors for one (method, horizon) slice.
+#' Prequential recalibration factors: the deployment rule replayed at each forecast date.
 #'
-#' For each fold k with cutoff C, delta is fitted on every fold whose h-week outcome
-#' window had already CLOSED at C (cutoff' + 7h <= C). Folds with too little training
-#' signal get delta = 1 — no recalibration — which keeps the scoring support identical
-#' to the raw one and mirrors what a live system would do before delta is estimable.
+#' For each fold k with cutoff C (issued on C + 6), delta is fitted on the `fit` rows of every
+#' fold j that is (a) NOT in the ascertainment burn-in and (b) SETTLED at the issue date:
+#' (C + 6) - (C_j + 7h + 7) >= `settled_days`, with h the horizon of the TRAINING rows (1 in
+#' the pipeline). Folds with nothing usable get delta = 1 (no recalibration), which mirrors what
+#' a live system holds before delta is estimable. The same per-fold delta is then applied to
+#' every horizon of that fold by the caller.
 #'
-#' @param d one (method, horizon) slice of lfo_results, already .recal_scorable()d.
-#' @param horizon integer forecast horizon in weeks (drives the causality lag).
-#' @return data.frame(fold_id, delta_preq, delta_estimable, n_train_events, n_train_folds)
-prequential_invasion_delta <- function(d, horizon, band = RECAL_BAND,
-                                       min_folds = RECAL_MIN_FOLDS, fit = NULL) {
+#' @param d the rows that define WHICH folds need a delta and their cutoffs (any horizon).
+#' @param horizon horizon of the TRAINING rows in `fit` (drives the settledness lag).
+#' @param fit the training rows (default `d`); the pipeline passes the 1-week rows.
+#' @param settled_days outcome age (days after the window closes) at which it counts as known.
+#' @param burnin_fn function(cutoff) -> TRUE for burn-in rounds (excluded from training).
+#'   Ignored when `d` has no `cutoff` column (the fold_id spacing fallback has no real dates).
+#' @return data.frame(fold_id, delta_preq, delta_estimable, delta_at_band, n_train_events,
+#'   n_train_folds, n_train_hazard)
+prequential_invasion_delta <- function(d, horizon = 1L, band = RECAL_BAND,
+                                       min_folds = RECAL_MIN_FOLDS, fit = NULL,
+                                       settled_days = get0("LFO_RELIABLE_EVAL_AGE_DAYS",
+                                                           ifnotfound = 25L),
+                                       burnin_fn = get0("invasion_is_burnin", mode = "function",
+                                                        ifnotfound = NULL)) {
   # `d` defines WHICH FOLDS need a delta and their cutoffs; `fit` (default: `d`) supplies the
-  # rows the delta is TRAINED on. They differ when the caller restricts training to the shared
-  # (fold x zone) support: every fold must still come back with a delta -- including one
-  # outside that support, whose rows would otherwise be left NA and drag the whole method's
-  # recalibrated block out of the evaluation -- while no method trains on cells its
-  # competitors were denied.
+  # rows the delta is TRAINED on. They differ when the caller restricts training to the 1-week
+  # rows on the shared (fold x zone) support: every fold must still come back with a delta --
+  # including one outside that support -- while no method trains on cells its competitors were
+  # denied.
   if (is.null(fit)) fit <- d
   cuts <- .recal_fold_cutoffs(d)
   fid  <- as.integer(names(cuts))
-  # A fold at cutoff C' has outcome window (C', C' + 7h]; the LAST outcome week STARTS at
-  # C' + 7h and ENDS at C' + 7h + 6. The rule used to be `cuts + 7h <= C`, which admitted a
-  # fold whose final outcome week had only just begun — so the h=1 delta at fold k was fitted
-  # partly on the week that starts on fold k's own cutoff. The +6 closes the window properly
-  # and makes this block's "outcome window had CLOSED" claim true.
-  lag_days <- 7L * as.integer(horizon) + 6L
+  # Burn-in needs REAL dates: the fold_id-spacing fallback calendar is synthetic.
+  .real_dates <- "cutoff" %in% names(d) && !anyNA(suppressWarnings(as.Date(d$cutoff)))
+  in_burnin <- if (.real_dates && is.function(burnin_fn)) burnin_fn(cuts) else rep(FALSE, length(cuts))
   out <- lapply(seq_along(fid), function(i) {
-    k <- fid[i]; C <- cuts[i]
-    # STRICTLY causal: only folds whose outcome window had fully ELAPSED by this cutoff.
-    usable <- fid[cuts + lag_days <= C]
+    k <- fid[i]; issue <- cuts[i] + 6L
+    # SETTLED, not merely closed: the outcome window ended at least `settled_days` before the
+    # issue date, so its invasions had been confirmed when this forecast was made.
+    settled <- as.numeric(issue - (cuts + 7L * as.integer(horizon) + 7L)) >= settled_days
+    usable  <- fid[settled & !in_burnin]
     tr <- fit[fit$fold_id %in% usable, , drop = FALSE]
     n_ev <- sum(tr$is_new_invasion == 1L, na.rm = TRUE)
     # FITTED AS SOON AS THERE IS ANYTHING TO FIT. The penalised estimate exists for any pool
@@ -422,7 +446,9 @@ prequential_invasion_delta <- function(d, horizon, band = RECAL_BAND,
                delta_estimable = .usable_dl,
                delta_at_band = .dfit$at_band,
                n_train_events = n_ev,
-               n_train_folds = length(usable))
+               n_train_folds = length(usable),
+               n_train_hazard = if (nrow(tr)) sum(-log1p(-pmin(pmax(tr$p_invasion, 0), 1 - 1e-12)))
+                                else 0)
   })
   dplyr::bind_rows(out)
 }
@@ -478,7 +504,9 @@ prequential_invasion_delta <- function(d, horizon, band = RECAL_BAND,
 #' @param lfo_results the LFO prediction frame.
 #' @return the same frame with the five columns added (row order preserved).
 attach_invasion_recalibration <- function(lfo_results, band = RECAL_BAND,
-                                          min_folds = RECAL_MIN_FOLDS) {
+                                          min_folds = RECAL_MIN_FOLDS,
+                                          burnin_fn = get0("invasion_is_burnin", mode = "function",
+                                                           ifnotfound = NULL)) {
   stopifnot(all(c("method", "horizon", "fold_id", "p_invasion", "is_new_invasion")
                 %in% names(lfo_results)))
   d <- lfo_results
@@ -516,26 +544,35 @@ attach_invasion_recalibration <- function(lfo_results, band = RECAL_BAND,
             "prequential delta is fitted on each method's NATIVE rows. Methods reaching ",
             "further back then train their delta on evidence the others never saw.",
             call. = FALSE)
-  keys <- unique(sc[, c("method", "horizon")])
-  parts <- lapply(seq_len(nrow(keys)), function(i) {
-    m <- keys$method[i]; h <- keys$horizon[i]
-    # %in% rather than == : a NA in method/horizon would make == yield NA and pull in
-    # phantom all-NA rows through `[`.
-    s <- sc[sc$method %in% m & sc$horizon %in% h, , drop = FALSE]
+  # ONE DELTA PER METHOD (2026-10-14): fitted on the method's 1-WEEK rows (shared cells) and
+  # applied to EVERY horizon of the same fold, so P(<= 2 wk) >= P(<= 1 wk) holds row by row.
+  methods <- unique(sc$method)
+  parts <- lapply(methods, function(m) {
+    # %in% rather than == : a NA in method would make == yield NA and pull in phantom rows.
+    s  <- sc[sc$method %in% m, , drop = FALSE]                 # every horizon: the rows to adjust
+    s1 <- s[s$horizon %in% 1L, , drop = FALSE]                 # the 1-week rows: the training pool
     # Fit on the shared cells; ATTACH to all of this method's scorable rows, so a row outside
     # the shared support still carries the delta of the fold it belongs to rather than NA.
-    cl <- .cells[[as.character(h)]]
+    cl <- .cells[["1"]]
     s_fit <- if (length(cl))
-      s[paste(s$fold_id, s$health_zone, sep = "\r") %in% cl, , drop = FALSE] else s
-    if (!nrow(s_fit)) s_fit <- s
-    dl <- prequential_invasion_delta(s, horizon = h, band = band, min_folds = min_folds,
-                                     fit = s_fit)
+      s1[paste(s1$fold_id, s1$health_zone, sep = "\r") %in% cl, , drop = FALSE] else s1
+    if (!nrow(s_fit)) s_fit <- s1
+    dl <- if (nrow(s1)) {
+      prequential_invasion_delta(s, horizon = 1L, band = band, min_folds = min_folds, fit = s_fit,
+                                 burnin_fn = burnin_fn)
+    } else {
+      warning(sprintf("[recal] %s has no 1-week rows to fit delta on; it is left unrecalibrated.", m),
+              call. = FALSE)
+      data.frame(fold_id = sort(unique(s$fold_id)), delta_preq = 1, delta_estimable = FALSE,
+                 n_train_events = 0L, n_train_folds = 0L)
+    }
     s <- dplyr::left_join(s, dl, by = "fold_id")
-    # delta_preq is now a per-ROW column (it varies by fold), so the transform is a
+    # delta_preq is a per-ROW column (it varies by fold), so the transform is a
     # single vectorised call — no split/reassemble, hence no row-order hazard.
     s$p_recal <- recalibrate_invasion_p(s$p_invasion, s$delta_preq)
     s[, c(".row", "delta_preq", "delta_estimable", "n_train_events", "n_train_folds", "p_recal")]
   })
+  keys <- unique(sc[, c("method", "horizon")])
   add <- dplyr::bind_rows(parts)
   d <- dplyr::left_join(d, add, by = ".row")
   d$.row <- NULL
@@ -559,13 +596,15 @@ attach_invasion_recalibration <- function(lfo_results, band = RECAL_BAND,
 
 #' Pooled (deployment) recalibration factors, with zone-clustered 90% intervals.
 #'
-#' Fitted on ALL folds — appropriate ONLY for recalibrating a live forecast, where
-#' every fold really is in the past. Never use these for scoring: see the module
-#' header on in-sample optimism.
+#' ONE factor per method, fitted on its 1-week rows (shared support) from settled, post-burn-in folds and
+#' reported on one row per horizon with the SAME value (fit_horizon = 1), so every consumer that
+#' reads a (method, horizon) table -- the live suite, the cascade's cascade_fit_delta() -- keeps
+#' working and receives the single factor. Appropriate ONLY for recalibrating a live forecast.
+#' Never use these for scoring: see the module header on in-sample optimism.
 #'
-#' @return tibble(method, horizon, delta, delta_lo, delta_hi, se_log_delta,
-#'   n_rows, n_events, n_folds, n_boot_used, cal_in_large, delta_moment,
-#'   delta_preq_final, boundary_hit)
+#' @return tibble(method, horizon, fit_horizon, delta, delta_lo, delta_hi, se_log_delta,
+#'   n_rows, n_events, sum_hazard, n_folds, n_boot_used, cal_in_large, delta_moment,
+#'   delta_preq_final, gamma_shape, gamma_rate, boundary_hit)
 invasion_delta_table <- function(lfo_results, band = RECAL_BAND,
                                  min_folds = RECAL_MIN_FOLDS,
                                  n_boot = RECAL_N_BOOT,
@@ -583,7 +622,9 @@ invasion_delta_table <- function(lfo_results, band = RECAL_BAND,
                                  # `eval_reliable`; when that column is absent (an older LFO
                                  # frame) every row is used, reproducing the previous behaviour.
                                  # Set FALSE to fit on every scored round.
-                                 reliable_only = TRUE) {
+                                 reliable_only = TRUE,
+                                 burnin_fn = get0("invasion_is_burnin", mode = "function",
+                                                  ifnotfound = NULL)) {
   sc <- .recal_scorable(lfo_results)
   if (!nrow(sc)) return(tibble::tibble())
   # `sc_all` keeps EVERY scored round. The restriction below applies ONLY to the pooled
@@ -592,6 +633,17 @@ invasion_delta_table <- function(lfo_results, band = RECAL_BAND,
   # `delta_preq_final` must remain the value in force at the LAST round, not the last
   # settled one.
   sc_all <- sc
+  # THE TRAINING POOL (2026-10-14): 1-WEEK rows, post-burn-in rounds, settled outcomes. The same
+  # factor is then reported for -- and applied to -- every horizon of the method.
+  sc <- sc[sc$horizon %in% 1L, , drop = FALSE]
+  if ("cutoff" %in% names(sc) && is.function(burnin_fn)) {
+    .bi <- burnin_fn(sc$cutoff)
+    if (any(.bi))
+      message(sprintf("[recal] deployment delta excludes %d burn-in round(s) (week index < %d).",
+                      dplyr::n_distinct(sc$fold_id[.bi]),
+                      as.integer(get0("ASCERTAINMENT_BURNIN_WEEKS", ifnotfound = 7L))))
+    sc <- sc[!.bi, , drop = FALSE]
+  }
   if (isTRUE(reliable_only) && "eval_reliable" %in% names(sc)) {
     n_all <- nrow(sc)
     sc_r  <- sc[sc$eval_reliable %in% TRUE, , drop = FALSE]
@@ -601,21 +653,35 @@ invasion_delta_table <- function(lfo_results, band = RECAL_BAND,
     if (nrow(sc_r) && sum(sc_r$is_new_invasion, na.rm = TRUE) > 0) {
       if (nrow(sc_r) < n_all)
         message(sprintf(paste0("[recal] deployment delta fitted on SETTLED rounds only: ",
-                               "%d of %d scorable rows (%d of %d rounds)."),
+                               "%d of %d scorable 1-week rows (%d of %d rounds)."),
                         nrow(sc_r), n_all, dplyr::n_distinct(sc_r$fold_id),
                         dplyr::n_distinct(sc$fold_id)))
       sc <- sc_r
     } else {
       warning("[recal] no settled round carries an invasion; the deployment delta is fitted ",
-              "on ALL scored rounds, including right-truncated ones.", call. = FALSE)
+              "on ALL scored post-burn-in rounds, including right-truncated ones.", call. = FALSE)
     }
   }
-  keys <- unique(sc[, c("method", "horizon")])
-  rows <- lapply(seq_len(nrow(keys)), function(i) {
-    m <- keys$method[i]; h <- keys$horizon[i]
-    # %in% rather than == : a NA in method/horizon would make == yield NA and pull in
-    # phantom all-NA rows through `[`.
-    s <- sc[sc$method %in% m & sc$horizon %in% h, , drop = FALSE]
+  methods <- unique(sc_all$method)
+  .cells1 <- if (exists("invasion_common_cells", mode = "function"))
+    tryCatch(invasion_common_cells(lfo_results, 1L), error = function(e) NULL) else NULL
+  rows <- lapply(methods, function(m) {
+    # %in% rather than == : a NA in method would make == yield NA and pull in phantom rows.
+    s <- sc[sc$method %in% m, , drop = FALSE]
+    # ON THE SHARED (fold x zone) SUPPORT, like delta_preq and the stability diagnostic, so the
+    # deployed factor is fitted on the same cells every method is scored on. A method with no
+    # rows on that support keeps its native rows (and says so).
+    if (!is.null(.cells1) && nrow(s)) {
+      .on <- paste(s$fold_id, s$health_zone, sep = "\r") %in% .cells1
+      if (any(.on)) s <- s[.on, , drop = FALSE]
+      else warning(sprintf("[recal] %s has no 1-week rows on the shared support; its deployment delta uses its native rows.", m),
+                   call. = FALSE)
+    }
+    hs <- sort(unique(sc_all$horizon[sc_all$method %in% m]))
+    if (!nrow(s)) {
+      warning(sprintf("[recal] %s has no usable 1-week rows; no deployment delta.", m), call. = FALSE)
+      return(NULL)
+    }
     y <- as.integer(s$is_new_invasion); p <- s$p_invasion
     d  <- fit_invasion_delta(p, y, band = band)
     ci <- if (is.finite(d) && "health_zone" %in% names(s))
@@ -624,21 +690,34 @@ invasion_delta_table <- function(lfo_results, band = RECAL_BAND,
           else list(lo = NA_real_, hi = NA_real_, n_boot_used = 0L, se_log = NA_real_)
     base <- mean(y)
     cil  <- if (base > 0) mean(p) / base else NA_real_
-    # delta_preq_final = the delta a live system would have been carrying at the LAST
-    # fold, i.e. the prequential value actually in force at the end of the record. Fitted
-    # from sc_all (every scored round), NOT from the settled-round restriction above — the
-    # restriction governs the DEPLOYED factor, and applying it here would silently redefine
-    # "the last fold" as "the last settled fold".
-    s_pq <- sc_all[sc_all$method %in% m & sc_all$horizon %in% h, , drop = FALSE]
-    pq <- prequential_invasion_delta(s_pq, horizon = h, band = band, min_folds = min_folds)
+    # delta_preq_final = the delta a live system would have been carrying at the LAST fold,
+    # i.e. the prequential value in force at the end of the record, under the same rule.
+    # Trained on the SHARED 1-week zone-rounds, exactly as attach_invasion_recalibration() trains
+    # delta_preq, so this is the last value of THAT trace (it used to be fitted on the method's
+    # native rows, which can extend beyond the shared support).
+    s_pq <- sc_all[sc_all$method %in% m, , drop = FALSE]
+    .fit1 <- s_pq[s_pq$horizon %in% 1L, , drop = FALSE]
+    if (!is.null(.cells1))
+      .fit1 <- .fit1[paste(.fit1$fold_id, .fit1$health_zone, sep = "\r") %in% .cells1, , drop = FALSE]
+    pq <- prequential_invasion_delta(s_pq, horizon = 1L, band = band, min_folds = min_folds,
+                                     fit = .fit1, burnin_fn = burnin_fn)
+    # GAMMA PARAMETERS FOR THE LIVE DRAWS. Under the Jeffreys prior on log(delta) the
+    # rare-event posterior of delta is Gamma(events + 1/2, sum of hazards); the rate is set so
+    # the mean equals the fitted delta exactly (the Bernoulli fit and its Poisson limit
+    # (E + 1/2) / sum(hazard) differ by about 1-3% on these pools).
+    .shape <- sum(y) + 0.5
     tibble::tibble(
-      method = m, horizon = h,
+      method = m, horizon = hs, fit_horizon = 1L,
       delta = d, delta_lo = ci$lo, delta_hi = ci$hi, se_log_delta = ci$se_log,
-      n_rows = nrow(s), n_events = sum(y), n_folds = dplyr::n_distinct(s$fold_id),
+      n_rows = nrow(s), n_events = sum(y),
+      sum_hazard = sum(-log1p(-pmin(pmax(p, 0), 1 - 1e-12))),
+      n_folds = dplyr::n_distinct(s$fold_id),
       n_boot_used = ci$n_boot_used,
       cal_in_large = cil,
       delta_moment = if (is.finite(cil) && cil > 0) 1 / cil else NA_real_,
       delta_preq_final = pq$delta_preq[which.max(pq$fold_id)],
+      gamma_shape = .shape,
+      gamma_rate  = if (is.finite(d) && d > 0) .shape / d else NA_real_,
       boundary_hit = is.finite(d) &&
         (abs(log(d) - log(band[1])) < 1e-4 || abs(log(d) - log(band[2])) < 1e-4))
   })
@@ -652,6 +731,15 @@ invasion_delta_table <- function(lfo_results, band = RECAL_BAND,
 #' is the whole question. Then asks, per (method, horizon), whether the per-fold values differ
 #' by more than their own sampling error.
 #'
+#' THE POOL IS THE DEPLOYED ONE. The deployment delta (invasion_delta_table) is trained on
+#' post-burn-in rounds whose outcomes are settled (`eval_reliable`), so the folds tested here
+#' are exactly those: a burn-in round is excluded from training by design, and an unsettled
+#' round is missing confirmations, so either would show up as "drift" the deployed factor never
+#' sees. Rows are further restricted to the shared (fold x zone) support so that every method is
+#' diagnosed on the same cells. The deployed factor is fitted on the 1-WEEK rows only; the
+#' h = 1 summary therefore speaks to the deployed pool, while the h = 2 summary asks the
+#' separate question of whether the 2-week offset is itself stable.
+#'
 #' WHY IT MATTERS. delta is an intercept shift on the cloglog scale and beta_0 is the
 #' intercept, so a per-fold delta IS a time-varying beta_0 fitted post hoc. This diagnostic is
 #' therefore the direct evidence on two questions at once:
@@ -664,22 +752,31 @@ invasion_delta_table <- function(lfo_results, band = RECAL_BAND,
 #'   Q   = sum w_k (y_k - ybar)^2,  w_k = 1/se_k^2      (Cochran; chi-sq on n_folds - 1 df)
 #'   tau2= max(0, (Q - (k-1)) / (sum w - sum w^2 / sum w))   genuine between-fold variance
 #'   I2  = max(0, (Q - (k-1)) / Q)                            share NOT from sampling noise
-#' se(log delta) comes from the observed information I(theta) = sum lambda^2 e^-lambda /
-#' (1 - e^-lambda), evaluated at the fitted value.
+#' se(log delta) comes from the EXPECTED (Fisher) information of theta = log delta,
+#' I(theta) = sum lambda^2 e^-lambda / (1 - e^-lambda) with lambda = delta * u, evaluated at the
+#' fitted value (it does not depend on the outcomes, so it is not the observed information).
 #'
-#' NOT TESTED HERE, AND WHY. The obvious mechanistic covariate -- the anchor-week nowcast
-#' multiplier -- is CONSTANT across folds by construction (2.6308 on the shipped run): every
-#' fold's anchor week sits at the same lag from its own cutoff, and the as-of delay fit is
-#' shared across folds, so the multiplier cannot vary and cannot be regressed on. The
-#' covariates used instead are ones that genuinely move with epidemic phase: the fold index
-#' (a trend test) and the fold's at-risk count (epidemic extent -- the zone set shrinks as
-#' zones are invaded; a property of the fold design, not of the predictions or the outcome,
-#' so the regression is not circular).
+#' COVARIATES. Two quantities that move with epidemic phase are regressed on: the fold index (a
+#' trend test) and the fold's at-risk count (epidemic extent -- the zone set shrinks as zones
+#' are invaded; a property of the fold design, not of the predictions or the outcome, so the
+#' regression is not circular). The nowcast multiplier applied to each round is NOT carried in
+#' the LFO frame and is not tested; the round's `training_source` (archived snapshot vs
+#' re-censored final line list) is reported per fold, so a shift between the two regimes is
+#' visible in the per-fold table.
 #'
+#' @param burnin_fn function(cutoff) -> TRUE for burn-in rounds (excluded, as in training).
 #' @return list(per_fold = tibble, summary = tibble). Written to CSV by run_all.R and READ by
 #'   the figure; no plotting code recomputes any of it.
-invasion_delta_stability <- function(lfo_results, band = RECAL_BAND) {
+invasion_delta_stability <- function(lfo_results, band = RECAL_BAND,
+                                     burnin_fn = get0("invasion_is_burnin", mode = "function",
+                                                      ifnotfound = NULL)) {
   sc <- .recal_scorable(lfo_results)
+  if (!nrow(sc)) return(list(per_fold = tibble::tibble(), summary = tibble::tibble()))
+  # The deployed training pool: post-burn-in rounds with settled outcomes (see invasion_delta_table).
+  if ("cutoff" %in% names(sc) && is.function(burnin_fn))
+    sc <- sc[!burnin_fn(sc$cutoff), , drop = FALSE]
+  if ("eval_reliable" %in% names(sc))
+    sc <- sc[sc$eval_reliable %in% TRUE, , drop = FALSE]
   if (!nrow(sc)) return(list(per_fold = tibble::tibble(), summary = tibble::tibble()))
   # Restrict to the shared support, for the same reason the prequential fit does: a method
   # reaching further back would otherwise be diagnosed on cells its competitors never saw.
@@ -696,10 +793,11 @@ invasion_delta_stability <- function(lfo_results, band = RECAL_BAND) {
   # EPIDEMIC EXTENT. `was_active_before` is hard-coded FALSE in the LFO frame -- already-
   # affected zones are dropped upstream rather than flagged -- so counting it gives nothing.
   # The AT-RISK count per fold is the usable proxy: the zone set shrinks monotonically as
-  # zones are invaded (492 -> 464 across the eleven h=1 folds), so it is a monotone transform
-  # of extent, and it is a property of the fold DESIGN rather than of the model's predictions
-  # or the outcome, so regressing delta on it is not circular.
+  # zones are invaded, so it is a monotone transform of extent, and it is a property of the
+  # fold DESIGN rather than of the model's predictions or the outcome, so regressing delta on
+  # it is not circular.
 
+  .z90 <- stats::qnorm(0.95)
   .one <- function(d) {                      # delta + se(log delta) on ONE fold's rows
     y <- as.integer(d$is_new_invasion)
     u <- -log1p(-pmin(pmax(d$p_invasion, 0), 1 - 1e-12))
@@ -719,10 +817,15 @@ invasion_delta_stability <- function(lfo_results, band = RECAL_BAND) {
                    cutoff = as.Date(vapply(fid, function(k) {
                      cc <- unique(as.Date(s$cutoff[s$fold_id == k])); cc <- cc[!is.na(cc)]
                      if (length(cc)) as.character(min(cc)) else NA_character_ }, character(1))),
+                   training_source = if ("training_source" %in% names(s))
+                     vapply(fid, function(k) paste(sort(unique(as.character(
+                       s$training_source[s$fold_id == k]))), collapse = "+"), character(1))
+                     else NA_character_,
                    n_atrisk = as.integer(vapply(fid, function(k) sum(s$fold_id == k), integer(1))),
                    n_events = as.integer(v[, 3]), expected = v[, 4],
                    delta = v[, 1], se_log = v[, 2],
-                   lo = v[, 1] * exp(-1.96 * v[, 2]), hi = v[, 1] * exp(1.96 * v[, 2]))
+                   # 90% Wald interval on log delta: the pipeline's interval convention.
+                   lo = v[, 1] * exp(-.z90 * v[, 2]), hi = v[, 1] * exp(.z90 * v[, 2]))
   }))
 
 
@@ -747,8 +850,8 @@ invasion_delta_stability <- function(lfo_results, band = RECAL_BAND) {
     st <- .slope(seq_len(k)); sa <- .slope(as.numeric(z$n_atrisk))
     tibble::tibble(
       method = m, horizon = h, n_folds = k,
-      pooled_delta = exp(mu), pooled_lo = exp(mu - 1.96 * se_mu),
-      pooled_hi = exp(mu + 1.96 * se_mu),
+      pooled_delta = exp(mu), pooled_lo = exp(mu - .z90 * se_mu),
+      pooled_hi = exp(mu + .z90 * se_mu),
       tau2 = tau2, I2 = max(0, (Q - (k - 1)) / Q),
       Q = Q, Q_df = k - 1L, Q_p = stats::pchisq(Q, k - 1L, lower.tail = FALSE),
       trend_slope = st[1], trend_p = st[2],

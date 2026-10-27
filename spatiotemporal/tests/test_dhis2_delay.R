@@ -7,7 +7,10 @@
 #   - .fit_all_censored() recovers a known gamma from synthetic delays
 #   - estimate_dhis2_onset_sample_delay() windows + fits + summarises
 #   - write_onset_sample_long() emits the pipeline long format WITHOUT a `rate`
-#     name collision (Exp-rate summary vs the family's native `rate`)
+#     name collision (Exp-rate summary vs the family's native `rate`), keeps or drops an
+#     earlier EpiDist fit by the same-records rule, writes selected_param_* of the selected
+#     family, and persists EpiDist convergence diagnostics
+#   - build_dhis2_delay_populations() shares the estimator's window; 04d's ECDF gap
 # All tests use SYNTHETIC data (seeded) so they are fast and deterministic.
 # =============================================================================
 
@@ -117,11 +120,17 @@ test_that("the delay resolver is a truncation-corrected fit and .draw_dhis2_dela
   skip_if(!identical(dp$source, "data"), "no fitted delay params on disk")
   # ASSERT THE TRUNCATION CORRECTION, which the test name claims and nothing checked. Stripping
   # the epidist_* rows from the params CSV leaves source == "data" and silently falls back to
-  # the interval-censored MLE (6.832 d vs the corrected 7.667 d) — the exact 0.84 d bias this
-  # whole change removed — and every other assertion here still passed.
+  # the interval-censored MLE — the bias this whole change removed — and every other assertion
+  # here still passed.
   expect_identical(dp$estimator, "epidist_marginal",
                    info = "the resolver must be the truncation-corrected EpiDist marginal")
-  expect_gt(dp$mean, 7.0)   # the truncated MLE sits near 6.8; the corrected fit near 7.7
+  # Relative to the SAME file's windowed MLE, not a fixed number of days: a fixed threshold
+  # goes stale with every snapshot (and with the sample-date rule). Correcting the right-
+  # truncation the windowed MLE still carries moves the mean UP.
+  tab <- utils::read.csv(DELAY_PARAMS_PATH, colClasses = "character")
+  mle <- suppressWarnings(as.numeric(tab$value[tab$quantity == "implied_mean_fit"][1]))
+  skip_if(!is.finite(mle), "params file carries no MLE row")
+  expect_gt(dp$mean, mle)
   expect_true(is.finite(dp$mean) && dp$mean > 0)
   set.seed(1)
   d <- .draw_dhis2_delay(dp, 2e5)
@@ -131,70 +140,219 @@ test_that("the delay resolver is a truncation-corrected fit and .draw_dhis2_dela
                info = "draws must reproduce the resolver's SD")
 })
 
-test_that("load_linelist() imputes onsets FROM the shared resolver, not the truncated pool", {
-  skip_if_missing("load_linelist"); skip_if_missing("effective_onset_sample_delay")
-  dp <- effective_onset_sample_delay()
-  skip_if(!identical(dp$source, "data"), "no fitted delay params on disk")
-  ll <- suppressWarnings(suppressMessages(load_linelist()))
-  skip_if(!("onset_imputed" %in% names(ll)) || !any(ll$onset_imputed %in% TRUE),
-          "no imputed onsets in this snapshot")
-  # The realised gap between an imputed onset and its own sample date IS the drawn delay.
-  imp <- ll[ll$onset_imputed %in% TRUE & !is.na(ll$date_index) &
-            !is.na(ll$date_of_sample_collection), ]
-  gap <- as.numeric(imp$date_of_sample_collection - imp$date_index)
-  gap <- gap[is.finite(gap) & gap >= 0]
-  skip_if(length(gap) < 100, "too few imputed onsets to test the distribution")
-  # Must track the RESOLVER, not the right-truncated empirical pool (~6.8 d). The clamp at
-  # DELAY_MAX_PLAUSIBLE_DAYS and rounding to whole days cost a little, hence the tolerance.
-  #
-  # UNDER THE GROWTH TILT THE TARGET IS NOT THE MARGINAL MEAN. ONSET_MODE = "growth_impute"
-  # (the default) importance-resamples the resolver's draws with weights exp(-r*Delta), so the
-  # realised mean delay is deliberately SHORTER than the marginal when the epidemic is growing
-  # (r > 0) and longer when it is shrinking. Asserting equality with dp$mean would forbid the
-  # very correction the mode exists to apply. What must still hold is that the draw comes from
-  # the RESOLVER: the tilt reweights a gamma with mean ~7.7 d, it does not switch to the
-  # truncated empirical pool, so the realised mean stays far from that pool's ~6.8 d unless the
-  # tilt is large — and the direction must match the sign of r.
-  .mode <- get0("ONSET_MODE", ifnotfound = "impute")
-  if (identical(.mode, "growth_impute")) {
-    # Wide band: the tilt's size depends on r, which moves with the data.
-    expect_equal(mean(gap), dp$mean, tolerance = 0.35,
-                 info = sprintf("growth-tilted gap mean %.2f d has drifted far from the resolver's %.2f d",
-                                mean(gap), dp$mean))
-  } else {
-    expect_equal(mean(gap), dp$mean, tolerance = 0.12,
-                 info = sprintf("imputed-onset gap mean %.2f d must track the resolver's %.2f d, not the truncated pool",
-                                mean(gap), dp$mean))
-  }
-  expect_gt(mean(gap), 6.9)
+test_that("load_linelist() imputes missing onsets from same-class, same-week donor intervals", {
+  # Since 2026-10-15 a missing onset is the sample date minus an interval drawn from the
+  # recorded (sample - onset) intervals of CONFIRMED records sampled in the SAME week
+  # (.impute_onset_delays(), 01_data_prep.R). On the real line list, in weeks whose own donors
+  # suffice (no borrowing) and late enough that no draw can hit the outbreak floor, the mean
+  # imputed gap must equal the recipient-weighted donor mean up to sampling error. Aggregates
+  # only: nothing record-level is printed.
+  skip_if_missing("load_linelist")
+  skip_if(!identical(get0("ONSET_MODE", ifnotfound = "impute"), "impute"), "complete-case mode")
+  ll <- tryCatch(suppressWarnings(suppressMessages(load_linelist())), error = function(e) NULL)
+  skip_if(is.null(ll) || !any(ll$onset_imputed %in% TRUE), "line list unavailable")
+  s    <- ll$date_of_sample_collection
+  wk   <- as.character(lubridate::floor_date(s, "week", week_start = get0("WEEK_ANCHOR", ifnotfound = 1L)))
+  conf <- ll$confirmed %in% TRUE
+  don  <- conf & ll$onset_usable %in% TRUE & !(ll$onset_imputed %in% TRUE) & !is.na(s)
+  rec  <- conf & ll$onset_imputed %in% TRUE & !is.na(s) & !is.na(ll$date_index)
+  ivl  <- pmax(as.integer(s[don] - ll$date_index[don]), 0L)
+  gap  <- as.integer(s[rec] - ll$date_index[rec])
+  expect_true(all(gap >= 0L))
+  expect_true(all(gap <= max(ivl)))
+  dw <- split(ivl, wk[don]); rw <- split(gap, wk[rec])
+  ok <- intersect(names(dw)[lengths(dw) >= get0("ONSET_DONOR_MIN", ifnotfound = 20L)], names(rw))
+  ok <- ok[as.Date(ok) >= OUTBREAK_START + get0("DELAY_MAX_PLAUSIBLE_DAYS", ifnotfound = 60L)]
+  skip_if(length(ok) < 3L, "too few donor-rich weeks")
+  n  <- sum(lengths(rw[ok]))
+  E  <- sum(vapply(ok, function(w) length(rw[[w]]) * mean(dw[[w]]), 0)) / n
+  V  <- sum(vapply(ok, function(w) length(rw[[w]]) * stats::var(dw[[w]]), 0)) / n^2
+  expect_lt(abs(mean(unlist(rw[ok])) - E), 4 * sqrt(V))
 })
 
-test_that("the growth tilt moves imputed onsets in the direction of the growth rate", {
-  skip_if_missing("load_linelist")
-  .old <- get0("ONSET_MODE", envir = globalenv(), ifnotfound = NULL)
-  on.exit(if (is.null(.old)) suppressWarnings(rm("ONSET_MODE", envir = globalenv()))
-          else assign("ONSET_MODE", .old, envir = globalenv()), add = TRUE)
-  .gap <- function(mode) {
-    assign("ONSET_MODE", mode, envir = globalenv())
-    ll <- tryCatch(suppressWarnings(suppressMessages(load_linelist())), error = function(e) NULL)
-    if (is.null(ll) || !any(ll$onset_imputed %in% TRUE)) return(NA_real_)
-    i <- ll[ll$onset_imputed %in% TRUE & !is.na(ll$date_index) &
-              !is.na(ll$date_of_sample_collection), ]
-    g <- as.numeric(i$date_of_sample_collection - i$date_index)
-    mean(g[is.finite(g) & g >= 0])
-  }
-  g_flat <- .gap("impute"); g_tilt <- .gap("growth_impute")
-  skip_if(!is.finite(g_flat) || !is.finite(g_tilt), "line list unavailable")
-  # The BDBV 2026 record is growing, so the tilt must SHORTEN the imputed delay — i.e. move
-  # imputed onsets LATER, toward their sample date. This is the whole point of the correction
-  # (Lison et al. 2024): epidemic processes are not time-reversible, and the untilted backward
-  # draw pushes onsets systematically too early while incidence rises.
-  #
-  # This guard caught two real defects. (1) The growth rate was fitted through the
-  # right-truncated tail of the sample-date series, reading the reporting lag as a decline.
-  # (2) More seriously, the weekly binning ran FORWARD from min(date), leaving a partial final
-  # bin that held ~23 cases against ~1,800 in the preceding full week — which alone produced
-  # r = -0.033/day for a growing epidemic and inverted the correction. Both are fixed in
-  # .estimate_growth_rate(); if either regresses, g_tilt goes ABOVE g_flat and this fails.
-  expect_lt(g_tilt, g_flat)
+test_that("the CANONICAL delay file is refused when it names another snapshot; an explicit file is not", {
+  skip_if_missing(".load_dhis2_delay_params")
+  cur <- tryCatch(jsonlite::fromJSON(LINELIST_JSON)$folder, error = function(e) NA_character_)
+  skip_if(is.na(cur), "no current snapshot pointer")
+  tmp <- tempfile(fileext = ".csv"); on.exit(unlink(tmp), add = TRUE)
+  utils::write.csv(data.frame(quantity = c("source", "epidist_family", "epidist_mean", "epidist_sd"),
+                              value = c(paste0(cur, "_OTHER"), "gamma", "9", "7")),
+                   tmp, row.names = FALSE)
+  old <- get("DELAY_PARAMS_PATH", envir = globalenv())
+  on.exit(assign("DELAY_PARAMS_PATH", old, envir = globalenv()), add = TRUE)
+  assign("DELAY_PARAMS_PATH", tmp, envir = globalenv())        # tmp is now the canonical file
+  expect_warning(r <- .load_dhis2_delay_params(tmp), "NOT used")
+  expect_null(r)
+  assign("DELAY_PARAMS_PATH", old, envir = globalenv())        # tmp is an explicit file again
+  w <- character(0)
+  withCallingHandlers(.load_dhis2_delay_params(tmp),
+                      warning = function(c) { w <<- c(w, conditionMessage(c)); invokeRestart("muffleWarning") })
+  expect_false(any(grepl("NOT used", w)))
+})
+
+# =============================================================================
+# write_onset_sample_long(): which EpiDist rows survive a write WITHOUT a fit, and what the
+# `selected_*` rows then say. Round trips through the REAL loader, on temp files only.
+# =============================================================================
+
+.wl_fit <- function(window = "analytical_2026-10-03", n = 100L, mean = 6.667)
+  list(params = c(shape = 0.8, rate = 0.8 / mean), best_family = "gamma", window = window,
+       n_fit = n, implied_mean = mean, rate = 1 / mean)
+.wl_epi <- function(mean = 7.5, sd = 8, family = "gamma", ...)
+  c(list(family = family, mean = mean, sd = sd, mean_lo = mean - 0.3, mean_hi = mean + 0.3,
+         n = 100L), list(...))
+.wl_q <- function(out, q) { v <- out$value[out$quantity == q]; if (length(v)) v[1] else NA_character_ }
+# Run `code` with the given globals swapped in, restoring them afterwards.
+.wl_with <- function(vals, code) {
+  old <- lapply(names(vals), function(n) get0(n, envir = globalenv(), ifnotfound = NULL))
+  names(old) <- names(vals)
+  on.exit(for (n in names(old)) assign(n, old[[n]], envir = globalenv()), add = TRUE)
+  for (n in names(vals)) assign(n, vals[[n]], envir = globalenv())
+  force(code)
+}
+
+test_that("another snapshot's EpiDist rows are DROPPED, not re-stamped as this snapshot's", {
+  skip_if_missing("write_onset_sample_long"); skip_if_missing(".load_dhis2_delay_params")
+  tmp <- tempfile(fileext = ".csv"); js <- tempfile(fileext = ".json")
+  on.exit(unlink(c(tmp, js)), add = TRUE)
+  writeLines('{"folder": "LINELIST_NEW"}', js)
+  .wl_with(list(RUN_EPIDIST = TRUE, DELAY_PARAMS_PATH = tmp, LINELIST_JSON = js), {
+    # Snapshot OLD: pooled EpiDist 7, confirmed stratum 10.
+    write_onset_sample_long(.wl_fit("analytical_2026-09-26", 90L, 6.0), tmp, "LINELIST_OLD",
+                            epidist = .wl_epi(7),
+                            strata = list(confirmed = .wl_epi(10)))
+    # Snapshot NEW, EpiDist failed (epidist = NULL): the OLD fit must not survive.
+    expect_warning(out <- write_onset_sample_long(.wl_fit(), tmp, "LINELIST_NEW"), "DROPPED")
+    expect_false(any(grepl("^epidist_", out$quantity)))
+    expect_identical(.wl_q(out, "selected_estimator"), "interval_censored_mle")
+    r <- .load_dhis2_delay_params(tmp)          # tmp is the canonical file; NEW is current
+    expect_identical(r$estimator, "interval_censored_mle")
+    expect_equal(r$mean, 6.667, tolerance = 1e-9)
+    # No confirmed row survived: the stratum read warns and resolves the pooled MLE.
+    expect_warning(rc <- .load_dhis2_delay_params(tmp, stratum = "confirmed"), "stratum")
+    expect_identical(rc$estimator, "interval_censored_mle")
+  })
+})
+
+test_that("a fit of the SAME records is preserved when EpiDist was requested but failed", {
+  skip_if_missing("write_onset_sample_long"); skip_if_missing(".load_dhis2_delay_params")
+  tmp <- tempfile(fileext = ".csv"); on.exit(unlink(tmp), add = TRUE)
+  .wl_with(list(RUN_EPIDIST = TRUE), {
+    write_onset_sample_long(.wl_fit(), tmp, "LINELIST_NEW", epidist = .wl_epi(7.5),
+                            strata = list(confirmed = .wl_epi(10)))
+    expect_warning(out <- write_onset_sample_long(.wl_fit(), tmp, "LINELIST_NEW"), "PRESERVING")
+    expect_identical(.wl_q(out, "selected_estimator"), "epidist_marginal_truncation_corrected")
+    expect_equal(as.numeric(.wl_q(out, "selected_mean")), 7.5)
+    expect_identical(anyDuplicated(out$quantity), 0L)
+    expect_equal(.load_dhis2_delay_params(tmp)$mean, 7.5)
+    expect_equal(.load_dhis2_delay_params(tmp, stratum = "confirmed")$mean, 10)
+  })
+  # Same window and n but a different MLE mean = different records (e.g. another sample-date
+  # rule): dropped.
+  .wl_with(list(RUN_EPIDIST = TRUE),
+           expect_warning(out2 <- write_onset_sample_long(.wl_fit(mean = 5.9), tmp, "LINELIST_NEW"),
+                          "DROPPED"))
+  expect_false(any(grepl("^epidist_", out2$quantity)))
+})
+
+test_that("RUN_EPIDIST = FALSE falls back to the censored MLE, as 00_config.R documents", {
+  skip_if_missing("write_onset_sample_long"); skip_if_missing(".load_dhis2_delay_params")
+  tmp <- tempfile(fileext = ".csv"); on.exit(unlink(tmp), add = TRUE)
+  write_onset_sample_long(.wl_fit(), tmp, "LINELIST_NEW", epidist = .wl_epi(7.5))
+  .wl_with(list(RUN_EPIDIST = FALSE),
+           expect_warning(out <- write_onset_sample_long(.wl_fit(), tmp, "LINELIST_NEW"),
+                          "RUN_EPIDIST is off"))
+  expect_identical(.wl_q(out, "selected_estimator"), "interval_censored_mle")
+  expect_identical(.load_dhis2_delay_params(tmp)$estimator, "interval_censored_mle")
+})
+
+test_that("preserved STRATUM rows alone do not make selected_* claim an EpiDist pooled fit", {
+  skip_if_missing("write_onset_sample_long"); skip_if_missing(".load_dhis2_delay_params")
+  tmp <- tempfile(fileext = ".csv"); on.exit(unlink(tmp), add = TRUE)
+  .wl_with(list(RUN_EPIDIST = TRUE), {
+    write_onset_sample_long(.wl_fit(), tmp, "LINELIST_NEW", strata = list(confirmed = .wl_epi(10)))
+    expect_warning(out <- write_onset_sample_long(.wl_fit(), tmp, "LINELIST_NEW"), "PRESERVING")
+  })
+  expect_identical(.wl_q(out, "selected_estimator"), "interval_censored_mle")
+  expect_equal(as.numeric(.wl_q(out, "selected_mean")), 6.667)
+  expect_identical(.wl_q(out, "selected_family"), "gamma")
+  w <- character(0)
+  r <- withCallingHandlers(.load_dhis2_delay_params(tmp),
+                           warning = function(c) { w <<- c(w, conditionMessage(c)); invokeRestart("muffleWarning") })
+  expect_identical(r$estimator, "interval_censored_mle")
+  expect_length(w, 0L)                                     # no selected_* self-check warning
+  expect_equal(.load_dhis2_delay_params(tmp, stratum = "confirmed")$mean, 10)
+})
+
+test_that("selected_param_* follow the SELECTED family (lognormal EpiDist), as the loader derives", {
+  skip_if_missing("write_onset_sample_long"); skip_if_missing(".load_dhis2_delay_params")
+  tmp <- tempfile(fileext = ".csv"); on.exit(unlink(tmp), add = TRUE)
+  out <- write_onset_sample_long(.wl_fit(), tmp, "LINELIST_NEW",
+                                 epidist = .wl_epi(7.123, 9.456, family = "lnorm"))
+  expect_identical(.wl_q(out, "selected_family"), "lnorm")
+  expect_false(any(c("selected_param_shape", "selected_param_rate") %in% out$quantity))
+  r <- .load_dhis2_delay_params(tmp)
+  expect_identical(r$family, "lnorm")
+  expect_equal(as.numeric(.wl_q(out, "selected_param_meanlog")), unname(r$params[["meanlog"]]), tolerance = 1e-5)
+  expect_equal(as.numeric(.wl_q(out, "selected_param_sdlog")),   unname(r$params[["sdlog"]]),   tolerance = 1e-5)
+  # The same holds after a preserving rewrite.
+  .wl_with(list(RUN_EPIDIST = TRUE),
+           expect_warning(out2 <- write_onset_sample_long(.wl_fit(), tmp, "LINELIST_NEW"), "PRESERVING"))
+  expect_equal(as.numeric(.wl_q(out2, "selected_param_meanlog")), unname(r$params[["meanlog"]]), tolerance = 1e-5)
+  expect_false(any(c("selected_param_shape", "selected_param_rate") %in% out2$quantity))
+  # A gamma pick with an unusable sd writes NO selected_param_* rather than the MLE's.
+  out3 <- write_onset_sample_long(.wl_fit(), tempfile(fileext = ".csv"), "LINELIST_NEW",
+                                  epidist = .wl_epi(7.5, NA_real_))
+  expect_false(any(grepl("^selected_param_", out3$quantity)))
+})
+
+test_that("EpiDist convergence diagnostics are persisted, pooled and per stratum, and the loader tolerates them", {
+  skip_if_missing("write_onset_sample_long"); skip_if_missing(".load_dhis2_delay_params")
+  skip_if_missing(".epidist_converged")
+  tmp <- tempfile(fileext = ".csv"); on.exit(unlink(tmp), add = TRUE)
+  ok  <- .wl_epi(7.5, max_rhat = 1.003, min_ess_bulk = 800, min_ess_tail = 700, n_divergent = 0)
+  bad <- .wl_epi(10,  max_rhat = 1.05,  min_ess_bulk = 800, min_ess_tail = 700, n_divergent = 3)
+  out <- write_onset_sample_long(.wl_fit(), tmp, "LINELIST_NEW", epidist = ok,
+                                 strata = list(confirmed = bad, not_a_case = .wl_epi(6)))
+  expect_identical(anyDuplicated(out$quantity), 0L)
+  expect_equal(as.numeric(.wl_q(out, "epidist_max_rhat")), 1.003)
+  expect_identical(.wl_q(out, "epidist_converged"), "TRUE")
+  expect_identical(.wl_q(out, "epidist_n_divergent__confirmed"), "3")
+  expect_identical(.wl_q(out, "epidist_converged__confirmed"), "FALSE")
+  expect_false(any(grepl("__not_a_case$", out$quantity) & grepl("rhat|ess|diverg|converged", out$quantity)))
+  expect_equal(.load_dhis2_delay_params(tmp)$mean, 7.5)
+  expect_equal(.load_dhis2_delay_params(tmp, stratum = "confirmed")$mean, 10)
+  expect_equal(.load_dhis2_delay_params(tmp, stratum = "not_a_case")$mean, 6)
+  expect_true(is.na(.epidist_converged(1.0, NA, 700, 0)))
+})
+
+test_that("the figure builder and the estimator use the SAME window when the latest sample has no onset", {
+  skip_if_missing("build_dhis2_delay_populations"); skip_if_missing("estimate_dhis2_onset_sample_delay")
+  set.seed(4)
+  ob <- get0("OUTBREAK_START", ifnotfound = as.Date("2026-04-30"))
+  onset <- ob + sample(0:50, 400, replace = TRUE)
+  samp  <- onset + pmax(round(stats::rgamma(400, shape = 2, rate = 0.4)), 0L)
+  ll <- data.frame(date_of_symptom_onset = c(as.character(onset), NA),
+                   date_of_sample_collection = c(as.character(samp), as.character(max(samp) + 4L)),
+                   stringsAsFactors = FALSE)
+  asof <- max(samp) + 4L
+  pop <- build_dhis2_delay_populations(ll, analysis_date = asof)
+  fit <- suppressMessages(estimate_dhis2_onset_sample_delay(ll, analysis_date = asof))
+  expect_identical(pop$trunc_date, fit$trunc_date)
+  expect_identical(sort(pop$delays$onset_sample$delay), sort(fit$delays_windowed))
+})
+
+test_that("the ECDF gap measures misfit, not the size of a day's step", {
+  f04d <- file.path(here::here(), "spatiotemporal", "04d_delay_fit_figures.R")
+  skip_if(!file.exists(f04d), "04d not found")
+  skip_if_missing("build_dhis2_delay_populations")       # 04d would otherwise source 04c
+  env <- new.env(parent = globalenv())
+  suppressMessages(sys.source(f04d, envir = env))
+  set.seed(5)
+  # Recorded = round(true delay): exactly the censored-MLE convention, P(recorded <= d) = F(d+0.5).
+  x <- round(stats::rgamma(20000, shape = 0.9, rate = 0.15))
+  p <- c(shape = 0.9, rate = 0.15)
+  expect_lt(env$.dfg_ecdf_gap(x, "gamma", p), 0.02)       # true model: sampling noise only
+  # A visibly wrong model is still caught.
+  expect_gt(env$.dfg_ecdf_gap(x, "gamma", c(shape = 0.9, rate = 0.30)), 0.1)
 })

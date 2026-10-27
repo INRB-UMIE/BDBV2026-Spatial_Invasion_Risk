@@ -6,22 +6,28 @@
 # short-horizon backtest evaluation), for the LONGER-TERM invasion cascade. The
 # cascade is a single model, so where Figure 2 contrasts many models / two short
 # horizons, this figure contrasts the leave-future-out backtest ORIGINS (folds)
-# at the deepest horizon the ~15-week record supports (+6 weeks). Same design
-# system, same panels, honest about the data ceiling:
+# over the backtest window K (CASCADE_CALIB_K weeks; read from the backtest's own K
+# column). Same design system, same panels, honest about the data ceiling:
 #
 #   A  Discrimination          AUC-PR skill (× base rate) per backtest origin.
 #   B  Real-time prioritisation share of true invasions caught vs a random
 #                              watch-list of the same size (capture curve).
 #   C  Ranking accuracy        mean rank of the truly-invaded zones (lower better).
 #   D  Per-round forecasts      top-K predicted zones per origin, coloured by the
-#                              realised outcome (invaded within +6 wk, or not).
+#                              realised outcome (invaded within the K-week window, or not).
 #
 # All four panels come from ONE source — the cascade leave-future-out backtest
 # (cascade_backtest → summary + per-zone `detail`) — so they are mutually
-# consistent and fully out-of-sample. Entry: cascade_fig_evaluation(ctx), called
+# consistent. NOT "fully out-of-sample": each origin's model is trained only on data known at
+# that origin, but when run_cascade.R calibrates, delta is fitted to the pooled new-invasion
+# COUNT on these same origins and K, so the probability LEVEL (the bar lengths in D, any
+# predicted/observed ratio) is in-sample; the ranking metrics in A-C are what delta was not
+# fitted to. Entry: cascade_fig_evaluation(ctx), called
 # from run_cascade.R (needs ctx$backtest carrying its `detail` attribute).
 # Standalone regen: Rscript spatiotemporal/39_cascade_eval_figure.R (from the RDS).
-# Saves Figure2_cascade.{pdf,png} to key_outputs/figures (+ mirror in cascade/figures).
+# Saves Figure2_cascade.{pdf,png} to cascade/figures ONLY (the published Figure2_cascade is
+# make_manuscript_figure2_cascade.R's), plus key_outputs/cascade_backtest_per_origin.csv and
+# the inputs RDS.
 # =============================================================================
 suppressPackageStartupMessages({
   library(dplyr); library(tidyr); library(purrr); library(ggplot2)
@@ -40,7 +46,7 @@ CASC_ACCENT  <- "#0072B2"                       # featured-cascade blue (Okabe)
 OUT_COL <- c("Invaded (first case)" = "#D55E00", "Not invaded" = "grey75")
 
 # theme_pub, plus concise visible titles (this figure stands alone — Figure 2
-# suppresses titles because its captions live in FIGURE_CAPTIONS.md).
+# suppresses titles because its captions live in the manuscript, not in the figure).
 .theme_casc <- function(base = 12) {
   theme_minimal(base_size = base, base_family = .CASC_FAMILY) %+replace% theme(
     plot.title = element_text(size = base + 0.4, face = "bold", colour = INK,
@@ -82,21 +88,36 @@ OUT_COL <- c("Invaded (first case)" = "#D55E00", "Not invaded" = "grey75")
   d <- as.Date(cutoffs)
   ord <- order(d)
   # Label by the FORECAST ORIGIN (cutoff + 6) -- 33b issues each origin at cutoff_date + 6.
-  lab <- sprintf("Round %d — %s", seq_along(d[ord]), format(lfo_origin(d[ord]), "%d %b"))
+  # English month abbreviations from month.abb, not format("%b"), which follows the machine's
+  # LC_TIME locale (a French one prints "juin").
+  o <- lfo_origin(d[ord])
+  lab <- sprintf("Round %d — %02d %s", seq_along(d[ord]), as.integer(format(o, "%d")),
+                 month.abb[as.integer(format(o, "%m"))])
   setNames(lab, as.character(cutoffs[ord]))
 }
 
-# recall / random capture curve, pooled over folds (mirrors .det_curve exactly:
-# rank WITHIN fold, total events over all folds, random = min(k / mean-at-risk, 1)).
+# recall / random capture curve: the SAME ESTIMAND as the published panel's det_curve()
+# (make_manuscript_figure2_cascade.R) and compute_detection_curve() (20_forecast_detail.R) —
+# rank WITHIN origin, recall = each origin's share of its own invasions caught, AVERAGED over
+# the origins that had any; random = min(k / mean-at-risk, 1). This used to plot the POOLED
+# recall (all hits / all invasions) under the same label, so two "Figure2_cascade" files showed
+# different numbers. The pooled value is kept beside it (recall_pooled) and is not drawn.
 .casc_capture_curve <- function(detail, ks = 1:25) {
   if (is.null(detail) || !nrow(detail)) return(NULL)
   pf <- detail %>% dplyr::group_by(cutoff) %>%
     dplyr::mutate(rk = rank(-p_invasion, ties.method = "max")) %>% dplyr::ungroup()
   tot <- sum(pf$y, na.rm = TRUE); if (tot == 0) return(NULL)
   natr <- pf %>% dplyr::count(cutoff) %>% dplyr::pull(n) %>% mean()
+  idx_by_origin <- split(seq_len(nrow(pf)), pf$cutoff)
   purrr::map_dfr(ks, function(k) {
-    tp <- sum(pf$y[pf$rk <= k], na.rm = TRUE)
-    tibble(k = k, recall = tp / tot, recall_random = pmin(k / natr, 1))
+    inK <- pf$rk <= k
+    per <- vapply(idx_by_origin, function(ix) {
+      np <- sum(pf$y[ix], na.rm = TRUE)
+      if (np == 0) NA_real_ else sum(pf$y[ix][inK[ix]], na.rm = TRUE) / np
+    }, numeric(1))
+    tibble(k = k, recall = mean(per[is.finite(per)]),
+           recall_pooled = sum(pf$y[inK], na.rm = TRUE) / tot,
+           recall_random = pmin(k / natr, 1))
   })
 }
 
@@ -113,7 +134,7 @@ OUT_COL <- c("Invaded (first case)" = "#D55E00", "Not invaded" = "grey75")
               size = 2.9, colour = INK) +
     scale_x_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.16))) +
     labs(title = "A · Discrimination",
-         subtitle = "AUC-PR ÷ base rate  (1× = random)",
+         subtitle = "AUC-PR ÷ base rate  (1× = base rate; a random ordering scores above 1×)",
          x = "AUC-PR skill (× base rate)", y = NULL) +
     .theme_casc() + theme(panel.grid.major.y = element_blank())
 }
@@ -190,7 +211,6 @@ OUT_COL <- c("Invaded (first case)" = "#D55E00", "Not invaded" = "grey75")
 
 # ---- assemble + save --------------------------------------------------------
 cascade_fig_evaluation <- function(ctx, file = "Figure2_cascade") {
-  `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
   bt <- ctx$backtest
   if (is.null(bt) || !nrow(bt)) {
     message("[cascade] Figure2_cascade skipped: no backtest available."); return(invisible(NULL))
@@ -210,15 +230,24 @@ cascade_fig_evaluation <- function(ctx, file = "Figure2_cascade") {
   # The window length and the number of origins come from the data, not from prose: the
   # backtest horizon is configurable (CASCADE_CALIB_K) and the number of usable origins
   # grows with the record, so both were wrong as soon as either changed.
-  .Kcap <- if ("K" %in% names(bt)) as.integer(stats::median(bt$K, na.rm = TRUE)) else 6L
+  # NA (not a typed 6) when the backtest predates the K column: the caption then names no window.
+  .Kcap <- if ("K" %in% names(bt)) as.integer(stats::median(bt$K, na.rm = TRUE)) else NA_integer_
+  # Whether the level was fitted on these origins: recorded by run_cascade.R; when absent (a
+  # standalone regeneration from an older RDS) the caption says it cannot tell rather than guess.
+  .ins <- ctx$backtest_level_in_sample
   cap <- paste0(
-    sprintf("Leave-future-out evaluation of the 3-month invasion cascade at its deepest supported horizon (+%d weeks; %d backtest origin(s) on this record). ",
-            .Kcap, nrow(bt)),
-    "A: out-of-sample discrimination, AUC-PR relative to the base rate (1× = random). ",
-    "B: share of true invasions caught when the top-K highest-risk zones are watched each week, vs a same-size random list. ",
+    sprintf("Leave-future-out evaluation of the 3-month invasion cascade over its backtest window (%s%d backtest origin(s) on this record). ",
+            if (is.na(.Kcap)) "" else sprintf("+%d weeks; ", .Kcap), nrow(bt)),
+    "A: discrimination, AUC-PR relative to the base rate (1× = the base rate; a random ordering scores somewhat above it). ",
+    "B: share of true invasions caught when the top-K highest-risk zones are watched each week (per origin, averaged over origins), vs a same-size random list. ",
     "C: mean rank of the truly-invaded zones among all at-risk zones. D: the top predicted zones at each origin, coloured by ",
-    sprintf("whether they were actually invaded within the next %d weeks. ", .Kcap),
-    "Discrimination & ranking are the trustworthy products; absolute probabilities are upper bounds.")
+    if (is.na(.Kcap)) "whether they were actually invaded within the backtest window. "
+    else sprintf("whether they were actually invaded within the next %d weeks. ", .Kcap),
+    if (isTRUE(.ins))
+      "The probability LEVEL (bar lengths in D) is in-sample: the cascade's scale factor was fitted to the pooled count on these origins. "
+    else if (isFALSE(.ins)) "The scale factor was not fitted on these origins. "
+    else "Whether the scale factor was fitted on these origins is not recorded for this figure. ",
+    "Discrimination & ranking are the trustworthy products; absolute probabilities are conditional on the scenario.")
 
   fig <- (pA | pB | pC) / pD +
     plot_layout(heights = c(1, 1.15)) +
@@ -230,16 +259,10 @@ cascade_fig_evaluation <- function(ctx, file = "Figure2_cascade") {
         plot.caption = element_text(size = 7, colour = MUTED, hjust = 0, margin = margin(t = 8)),
         plot.margin = margin(10, 12, 8, 10)))
 
-  # unicode-safe vector PDF via quartz (base "pdf" drops ×/÷; cairo_pdf is dead on
-  # this box — capabilities("cairo")==TRUE but the DLL fails to load, silent no-write).
+  # Unicode-safe vector PDF: figure_pdf_device() (00_config.R) is a device that opened cleanly
+  # in this session (cairo_pdf, else Quartz); the base pdf device turns dashes into dots.
   save_pdf <- function(path, w, h) {
-    if (isTRUE(capabilities("aqua"))) {
-      ok <- tryCatch({ grDevices::quartz(type = "pdf", file = path, width = w, height = h,
-                                         bg = "white"); print(fig); grDevices::dev.off(); TRUE },
-                     error = function(e) FALSE)
-      if (ok && file.exists(path)) return(invisible(path))
-    }
-    ggsave(path, fig, width = w, height = h, device = "pdf", bg = "white")
+    ggsave(path, fig, width = w, height = h, device = figure_pdf_device(), bg = "white")
     invisible(path)
   }
 
@@ -256,17 +279,34 @@ cascade_fig_evaluation <- function(ctx, file = "Figure2_cascade") {
   }
 
   # figure data (per-origin backtest summary) + inputs RDS for fast standalone regen
-  key_dir <- file.path(OUT_DIR, "key_outputs")
+  # CASCADE_OUT_DIR, not OUT_DIR: the bundle follows the run's output root (30_projection_config.R).
+  key_dir <- file.path(get0("CASCADE_OUT_DIR", ifnotfound = OUT_DIR), "key_outputs")
   if (!dir.exists(key_dir)) dir.create(key_dir, recursive = TRUE, showWarnings = FALSE)
   # RENAMED. This frame is the PER-ORIGIN BACKTEST SUMMARY (cutoff, K, n_atrisk, n_events,
-  # base_rate, auc_pr, auc_pr_skill, mean_rank_of_truth, prec_at5/10, pred_new, obs_new,
+  # base_rate, auc_pr, auc_pr_skill, mean_rank_of_truth, prec_at<K> for TOPK_VALUES,
+  # pred_new, obs_new,
   # count_ratio). None of those columns appears in the published Figure 2 cascade panel, whose
   # data are the pooled prioritisation curve and the per-origin top-12 outcomes — so a reader
   # matching "Figure2_cascade_data.csv" to the figure found neither panel. The published figure
   # is the manuscript-styled one, and make_manuscript_figure2_cascade.R now writes its own data
   # under that name.
-  readr::write_csv(bt, file.path(key_dir, "cascade_backtest_per_origin.csv"))
-  saveRDS(list(backtest = bt), file.path(OUT_CASCADE, "diagnostics", "cascade_eval_figure_inputs.rds"))
+  # Stamped with the run that produced it, so a stale copy cannot pass as current.
+  # THE BACKTEST'S OWN ANALYSIS DATE. From run_cascade.R (ctx without one) that is this
+  # session's ANALYSIS_DATE; a standalone regeneration carries the date saved in the inputs RDS
+  # (NA for an RDS written before the date was saved), never the date of the session that
+  # happens to redraw it.
+  .adate <- if ("analysis_date" %in% names(ctx)) ctx[["analysis_date"]]
+            else get0("ANALYSIS_DATE", ifnotfound = NA)
+  .adate <- if (length(.adate) == 1L && !is.na(.adate)) format(as.Date(.adate)) else NA_character_
+  .bt_csv <- bt
+  if (!is.null(ctx$cascade_run_id)) .bt_csv$cascade_run_id <- ctx$cascade_run_id
+  .bt_csv$analysis_date <- .adate
+  if (!is.null(ctx$backtest_level_in_sample)) .bt_csv$level_in_sample <- isTRUE(ctx$backtest_level_in_sample)
+  readr::write_csv(.bt_csv, file.path(key_dir, "cascade_backtest_per_origin.csv"))
+  saveRDS(list(backtest = bt, cascade_run_id = ctx$cascade_run_id,
+               backtest_level_in_sample = ctx$backtest_level_in_sample,
+               analysis_date = .adate),
+          file.path(OUT_CASCADE, "diagnostics", "cascade_eval_figure_inputs.rds"))
   message(sprintf("[cascade] wrote %s.{pdf,png} + per-origin data CSV + inputs RDS", file))
   invisible(fig)
 }
@@ -282,6 +322,10 @@ if (any(grepl("39_cascade_eval_figure.R", commandArgs(trailingOnly = FALSE), fix
   .rds <- file.path(OUT_CASCADE, "diagnostics", "cascade_eval_figure_inputs.rds")
   if (!file.exists(.rds)) stop("eval-figure inputs not found: ", .rds,
                                " — run run_cascade.R once to create them.")
-  cascade_fig_evaluation(readRDS(.rds))
+  .inp <- readRDS(.rds)
+  # An RDS written before the analysis date was saved: unknown, recorded as NA rather than
+  # stamped with this session's date.
+  if (!"analysis_date" %in% names(.inp)) .inp["analysis_date"] <- list(NA_character_)
+  cascade_fig_evaluation(.inp)
   message("[done] Figure2_cascade regenerated from ", basename(.rds))
 }

@@ -15,9 +15,9 @@
 #   * median — median-probability / median-of-quantiles: robust to a single
 #              badly-behaved member, the hubs' default operational combiner.
 #
-# The member set is PRE-SPECIFIED (the mobility-informed renewal family), so the
-# ensemble involves no selection on the test folds — it is evaluated in exactly
-# the same leakage-free LFO as every other model.
+# The member set is PRE-SPECIFIED (BAYES_ENSEMBLE_MEMBERS in run_all.R: a small, structurally
+# diverse set of Bayesian mobility kernels), so the ensemble involves no selection on the
+# test folds — it is evaluated in exactly the same leakage-free LFO as every other model.
 # =============================================================================
 
 source(file.path(here::here(), "spatiotemporal", "00_config.R"))
@@ -29,8 +29,10 @@ suppressPackageStartupMessages({ library(tidyverse) })
 #' target). Forecast-target identity is the set of key columns present among
 #' {fold_id, cutoff, training_cutoff, health_zone, horizon}; value columns
 #' (probabilities, mu, count quantiles) are combined across members by `combine`;
-#' outcome/mask attributes (is_new_invasion, was_active_before) are carried
-#' through (they are constant across members for a given target).
+#' outcome/mask attributes (is_new_invasion, was_active_before), the fold's
+#' outcome-window age and the round's training provenance (training_source,
+#' training_fallback, vintage_date) are carried through (they are constant across
+#' members for a given target); prob_calibrated is FALSE if any member is rank-only.
 #'
 #' @param fc_long  long forecast tibble with a `method` column.
 #' @param members  character vector of member method names to combine.
@@ -67,9 +69,19 @@ ensemble_forecasts <- function(fc_long, members, combine = c("mean", "median"),
   # unchanged. Without them the ensemble rows would be the only rows in the frame with no
   # reliability label, and every consumer that restricts to settled rounds (the deployment
   # recalibration, the truncation sensitivity) would silently drop the ensembles entirely.
+  # training_source / training_fallback / vintage_date record where the ROUND's training counts
+  # came from (run_invasion_lfo(), 16_invasion_eval.R): one value per fold, shared by every
+  # member, so they carry through the same way. Dropping them left the ensemble rows NA and
+  # invasion_delta_stability() (16b) reported an empty training source for both ensembles.
   carry_cols <- intersect(c("is_new_invasion", "was_active_before",
                             "issue_date", "window_days", "lead_days",
-                            "eval_age_days", "eval_reliable"), names(d))
+                            "eval_age_days", "eval_reliable",
+                            "training_source", "training_fallback", "vintage_date"), names(d))
+  # prob_calibrated is NOT a carry column: it differs by member, and a pool is a probability
+  # only if EVERY member's value is one. FALSE if any contributing member is rank-only
+  # (prob_calibrated = FALSE); otherwise the members' declared TRUE; NA (absent = calibrated,
+  # the convention every row-level consumer applies with `%in% FALSE`) when no member declares it.
+  has_cal <- "prob_calibrated" %in% names(d)
   agg <- if (combine == "mean") function(x) mean(x, na.rm = TRUE) else
                                 function(x) stats::median(x, na.rm = TRUE)
 
@@ -101,9 +113,9 @@ ensemble_forecasts <- function(fc_long, members, combine = c("mean", "median"),
   # gap every MEMBER row already carries. In 21_bayesian_renewal.R,
   #     mu_forecast = colMeans(cum)          (posterior mean of the cumulative hazard)
   #     p_invasion  = colMeans(1 - exp(-cum)) (posterior mean of the probability)
-  # and for a right-skewed hazard posterior these are far apart — measured on the shipped LFO,
-  # ~5% of rows (mostly h=2) have mu_forecast > 20 alongside p_invasion < 0.05, because a few
-  # draws with enormous hazard dominate E[cum] while p is bounded at 1.
+  # and for a right-skewed hazard posterior these can be far apart: a few draws with an
+  # enormous hazard dominate E[cum] while p is bounded at 1, so a large mu_forecast can sit
+  # beside a small p_invasion on the same row.
   #
   # Linear pooling of EACH summary is exactly right for a mixture of member posteriors: by
   # linearity of expectation the mean of the members' E[cum] IS the mixture's E[cum], and the
@@ -122,14 +134,17 @@ ensemble_forecasts <- function(fc_long, members, combine = c("mean", "median"),
       # carry the outcome would otherwise make the ensemble row unscorable.
       dplyr::across(dplyr::all_of(carry_cols),
                     ~ { .v <- .x[!is.na(.x)]; if (length(.v)) .v[1] else .x[1] }),
+      prob_calibrated = if (!has_cal) NA
+                        else if (any(prob_calibrated %in% FALSE)) FALSE
+                        else if (any(prob_calibrated %in% TRUE)) TRUE else NA,
       .groups = "drop") %>%
+    { if (has_cal) . else dplyr::select(., -prob_calibrated) } %>%
     # MEMBERSHIP MUST NOT VARY BY CELL. `min_members` lets a cell through on a SUBSET of the
     # members, so an ensemble could be a 3-model average at one (fold x zone) and a 2-model
     # average at the next -- a different estimator per row, scored as one method, and the
-    # cells where a member dropped out are exactly the hard ones. Verified harmless on the
-    # shipped run (all 10,056 targets carry 3 of 3) precisely because nothing had yet caused a
-    # member to drop out; the rule permitted it silently. Report any cell that is short, so a
-    # ragged ensemble is visible instead of being averaged away.
+    # cells where a member dropped out are exactly the hard ones. The rule permits that
+    # silently, so report any cell that is short: a ragged ensemble is then visible instead of
+    # being averaged away.
     { .short <- dplyr::filter(., .n_members >= min_members &
                                  .n_members < max(.n_members, na.rm = TRUE))
       if (nrow(.short))

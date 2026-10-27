@@ -1,0 +1,1813 @@
+origin_date,target,horizon,location,target_end_date,output_type,output_type_id,value
+2026-10-26,first confirmed case,1,Aba,2026-11-02,pmf,invasion,0.006044
+2026-10-26,first confirmed case,1,Aba,2026-11-02,pmf,no invasion,0.993956
+2026-10-26,first confirmed case,1,Abuzi,2026-11-02,pmf,invasion,0.001252
+2026-10-26,first confirmed case,1,Abuzi,2026-11-02,pmf,no invasion,0.998748
+2026-10-26,first confirmed case,1,Adi,2026-11-02,pmf,invasion,0.010009
+2026-10-26,first confirmed case,1,Adi,2026-11-02,pmf,no invasion,0.989991
+2026-10-26,first confirmed case,1,Aketi,2026-11-02,pmf,invasion,0.000823
+2026-10-26,first confirmed case,1,Aketi,2026-11-02,pmf,no invasion,0.999177
+2026-10-26,first confirmed case,1,Alunguli,2026-11-02,pmf,invasion,0.000425
+2026-10-26,first confirmed case,1,Alunguli,2026-11-02,pmf,no invasion,0.999575
+2026-10-26,first confirmed case,1,Angumu,2026-11-02,pmf,invasion,0.001306
+2026-10-26,first confirmed case,1,Angumu,2026-11-02,pmf,no invasion,0.998695
+2026-10-26,first confirmed case,1,Ankoro,2026-11-02,pmf,invasion,0.000193
+2026-10-26,first confirmed case,1,Ankoro,2026-11-02,pmf,no invasion,0.999807
+2026-10-26,first confirmed case,1,Bafwagbogbo,2026-11-02,pmf,invasion,0.004859
+2026-10-26,first confirmed case,1,Bafwagbogbo,2026-11-02,pmf,no invasion,0.995141
+2026-10-26,first confirmed case,1,Bagata,2026-11-02,pmf,invasion,9.8e-05
+2026-10-26,first confirmed case,1,Bagata,2026-11-02,pmf,no invasion,0.999902
+2026-10-26,first confirmed case,1,Bagira,2026-11-02,pmf,invasion,0.000629
+2026-10-26,first confirmed case,1,Bagira,2026-11-02,pmf,no invasion,0.999371
+2026-10-26,first confirmed case,1,Baka,2026-11-02,pmf,invasion,2.2e-05
+2026-10-26,first confirmed case,1,Baka,2026-11-02,pmf,no invasion,0.999978
+2026-10-26,first confirmed case,1,Bambo,2026-11-02,pmf,invasion,0.000879
+2026-10-26,first confirmed case,1,Bambo,2026-11-02,pmf,no invasion,0.999121
+2026-10-26,first confirmed case,1,Banalia,2026-11-02,pmf,invasion,0.007332
+2026-10-26,first confirmed case,1,Banalia,2026-11-02,pmf,no invasion,0.992668
+2026-10-26,first confirmed case,1,Bandalungwa,2026-11-02,pmf,invasion,5.3e-05
+2026-10-26,first confirmed case,1,Bandalungwa,2026-11-02,pmf,no invasion,0.999947
+2026-10-26,first confirmed case,1,Bandundu,2026-11-02,pmf,invasion,4.6e-05
+2026-10-26,first confirmed case,1,Bandundu,2026-11-02,pmf,no invasion,0.999954
+2026-10-26,first confirmed case,1,Banga Lubaka,2026-11-02,pmf,invasion,5.4e-05
+2026-10-26,first confirmed case,1,Banga Lubaka,2026-11-02,pmf,no invasion,0.999946
+2026-10-26,first confirmed case,1,Bangabola,2026-11-02,pmf,invasion,7e-05
+2026-10-26,first confirmed case,1,Bangabola,2026-11-02,pmf,no invasion,0.99993
+2026-10-26,first confirmed case,1,Banzow Moke,2026-11-02,pmf,invasion,4.7e-05
+2026-10-26,first confirmed case,1,Banzow Moke,2026-11-02,pmf,no invasion,0.999953
+2026-10-26,first confirmed case,1,Barumbu,2026-11-02,pmf,invasion,5.5e-05
+2026-10-26,first confirmed case,1,Barumbu,2026-11-02,pmf,no invasion,0.999945
+2026-10-26,first confirmed case,1,Basali,2026-11-02,pmf,invasion,0.00082
+2026-10-26,first confirmed case,1,Basali,2026-11-02,pmf,no invasion,0.99918
+2026-10-26,first confirmed case,1,Basankusu,2026-11-02,pmf,invasion,0.000138
+2026-10-26,first confirmed case,1,Basankusu,2026-11-02,pmf,no invasion,0.999862
+2026-10-26,first confirmed case,1,Basoko,2026-11-02,pmf,invasion,0.000905
+2026-10-26,first confirmed case,1,Basoko,2026-11-02,pmf,no invasion,0.999095
+2026-10-26,first confirmed case,1,Befale,2026-11-02,pmf,invasion,0.000137
+2026-10-26,first confirmed case,1,Befale,2026-11-02,pmf,no invasion,0.999863
+2026-10-26,first confirmed case,1,Bena Dibele,2026-11-02,pmf,invasion,0.000129
+2026-10-26,first confirmed case,1,Bena Dibele,2026-11-02,pmf,no invasion,0.999871
+2026-10-26,first confirmed case,1,Bena Leka,2026-11-02,pmf,invasion,0.00022
+2026-10-26,first confirmed case,1,Bena Leka,2026-11-02,pmf,no invasion,0.99978
+2026-10-26,first confirmed case,1,Bena Tshadi,2026-11-02,pmf,invasion,7e-05
+2026-10-26,first confirmed case,1,Bena Tshadi,2026-11-02,pmf,no invasion,0.99993
+2026-10-26,first confirmed case,1,Bengamisa,2026-11-02,pmf,invasion,0.003253
+2026-10-26,first confirmed case,1,Bengamisa,2026-11-02,pmf,no invasion,0.996747
+2026-10-26,first confirmed case,1,Bibanga,2026-11-02,pmf,invasion,0.000149
+2026-10-26,first confirmed case,1,Bibanga,2026-11-02,pmf,no invasion,0.999851
+2026-10-26,first confirmed case,1,Bikoro,2026-11-02,pmf,invasion,6.6e-05
+2026-10-26,first confirmed case,1,Bikoro,2026-11-02,pmf,no invasion,0.999934
+2026-10-26,first confirmed case,1,Bili (Bas-Uele),2026-11-02,pmf,invasion,0.00049
+2026-10-26,first confirmed case,1,Bili (Bas-Uele),2026-11-02,pmf,no invasion,0.99951
+2026-10-26,first confirmed case,1,Bili (Nord-Ubangi),2026-11-02,pmf,invasion,0.000357
+2026-10-26,first confirmed case,1,Bili (Nord-Ubangi),2026-11-02,pmf,no invasion,0.999643
+2026-10-26,first confirmed case,1,Bilomba,2026-11-02,pmf,invasion,0.000315
+2026-10-26,first confirmed case,1,Bilomba,2026-11-02,pmf,no invasion,0.999685
+2026-10-26,first confirmed case,1,Binga,2026-11-02,pmf,invasion,0.000147
+2026-10-26,first confirmed case,1,Binga,2026-11-02,pmf,no invasion,0.999853
+2026-10-26,first confirmed case,1,Binza,2026-11-02,pmf,invasion,0.000635
+2026-10-26,first confirmed case,1,Binza,2026-11-02,pmf,no invasion,0.999365
+2026-10-26,first confirmed case,1,Binza Meteo,2026-11-02,pmf,invasion,7.5e-05
+2026-10-26,first confirmed case,1,Binza Meteo,2026-11-02,pmf,no invasion,0.999925
+2026-10-26,first confirmed case,1,Binza Ozone,2026-11-02,pmf,invasion,0.000165
+2026-10-26,first confirmed case,1,Binza Ozone,2026-11-02,pmf,no invasion,0.999835
+2026-10-26,first confirmed case,1,Bipemba,2026-11-02,pmf,invasion,0.00013
+2026-10-26,first confirmed case,1,Bipemba,2026-11-02,pmf,no invasion,0.99987
+2026-10-26,first confirmed case,1,Birambizo,2026-11-02,pmf,invasion,0.00043
+2026-10-26,first confirmed case,1,Birambizo,2026-11-02,pmf,no invasion,0.99957
+2026-10-26,first confirmed case,1,Biringi,2026-11-02,pmf,invasion,0.014899
+2026-10-26,first confirmed case,1,Biringi,2026-11-02,pmf,no invasion,0.985101
+2026-10-26,first confirmed case,1,Biyela,2026-11-02,pmf,invasion,2e-05
+2026-10-26,first confirmed case,1,Biyela,2026-11-02,pmf,no invasion,0.99998
+2026-10-26,first confirmed case,1,Bobozo,2026-11-02,pmf,invasion,5.9e-05
+2026-10-26,first confirmed case,1,Bobozo,2026-11-02,pmf,no invasion,0.999941
+2026-10-26,first confirmed case,1,Boende,2026-11-02,pmf,invasion,0.00021
+2026-10-26,first confirmed case,1,Boende,2026-11-02,pmf,no invasion,0.99979
+2026-10-26,first confirmed case,1,Bogosenubea,2026-11-02,pmf,invasion,0.000132
+2026-10-26,first confirmed case,1,Bogosenubea,2026-11-02,pmf,no invasion,0.999868
+2026-10-26,first confirmed case,1,Boko,2026-11-02,pmf,invasion,0.000131
+2026-10-26,first confirmed case,1,Boko,2026-11-02,pmf,no invasion,0.999869
+2026-10-26,first confirmed case,1,Boko Kivulu,2026-11-02,pmf,invasion,3.2e-05
+2026-10-26,first confirmed case,1,Boko Kivulu,2026-11-02,pmf,no invasion,0.999968
+2026-10-26,first confirmed case,1,Bokonzi,2026-11-02,pmf,invasion,5.5e-05
+2026-10-26,first confirmed case,1,Bokonzi,2026-11-02,pmf,no invasion,0.999945
+2026-10-26,first confirmed case,1,Bokoro,2026-11-02,pmf,invasion,0.00019
+2026-10-26,first confirmed case,1,Bokoro,2026-11-02,pmf,no invasion,0.99981
+2026-10-26,first confirmed case,1,Bokungu,2026-11-02,pmf,invasion,0.00055
+2026-10-26,first confirmed case,1,Bokungu,2026-11-02,pmf,no invasion,0.99945
+2026-10-26,first confirmed case,1,Bolenge,2026-11-02,pmf,invasion,6.8e-05
+2026-10-26,first confirmed case,1,Bolenge,2026-11-02,pmf,no invasion,0.999932
+2026-10-26,first confirmed case,1,Bolobo,2026-11-02,pmf,invasion,3.9e-05
+2026-10-26,first confirmed case,1,Bolobo,2026-11-02,pmf,no invasion,0.999961
+2026-10-26,first confirmed case,1,Bolomba,2026-11-02,pmf,invasion,0.000129
+2026-10-26,first confirmed case,1,Bolomba,2026-11-02,pmf,no invasion,0.999871
+2026-10-26,first confirmed case,1,Boma,2026-11-02,pmf,invasion,1.4e-05
+2026-10-26,first confirmed case,1,Boma,2026-11-02,pmf,no invasion,0.999986
+2026-10-26,first confirmed case,1,Boma Bungu,2026-11-02,pmf,invasion,9e-06
+2026-10-26,first confirmed case,1,Boma Bungu,2026-11-02,pmf,no invasion,0.999991
+2026-10-26,first confirmed case,1,Bominenge,2026-11-02,pmf,invasion,0.000158
+2026-10-26,first confirmed case,1,Bominenge,2026-11-02,pmf,no invasion,0.999842
+2026-10-26,first confirmed case,1,Bomongo,2026-11-02,pmf,invasion,2.5e-05
+2026-10-26,first confirmed case,1,Bomongo,2026-11-02,pmf,no invasion,0.999975
+2026-10-26,first confirmed case,1,Bondo,2026-11-02,pmf,invasion,0.001903
+2026-10-26,first confirmed case,1,Bondo,2026-11-02,pmf,no invasion,0.998097
+2026-10-26,first confirmed case,1,Bongandanga,2026-11-02,pmf,invasion,0.000212
+2026-10-26,first confirmed case,1,Bongandanga,2026-11-02,pmf,no invasion,0.999788
+2026-10-26,first confirmed case,1,Bonzola,2026-11-02,pmf,invasion,0.000274
+2026-10-26,first confirmed case,1,Bonzola,2026-11-02,pmf,no invasion,0.999726
+2026-10-26,first confirmed case,1,Boso Manzi,2026-11-02,pmf,invasion,0.000144
+2026-10-26,first confirmed case,1,Boso Manzi,2026-11-02,pmf,no invasion,0.999856
+2026-10-26,first confirmed case,1,Boso Mondanda,2026-11-02,pmf,invasion,9.6e-05
+2026-10-26,first confirmed case,1,Boso Mondanda,2026-11-02,pmf,no invasion,0.999904
+2026-10-26,first confirmed case,1,Bosobe,2026-11-02,pmf,invasion,4.8e-05
+2026-10-26,first confirmed case,1,Bosobe,2026-11-02,pmf,no invasion,0.999952
+2026-10-26,first confirmed case,1,Bosobolo,2026-11-02,pmf,invasion,0.000173
+2026-10-26,first confirmed case,1,Bosobolo,2026-11-02,pmf,no invasion,0.999827
+2026-10-26,first confirmed case,1,Bosondjo,2026-11-02,pmf,invasion,0.000188
+2026-10-26,first confirmed case,1,Bosondjo,2026-11-02,pmf,no invasion,0.999812
+2026-10-26,first confirmed case,1,Boto,2026-11-02,pmf,invasion,7.7e-05
+2026-10-26,first confirmed case,1,Boto,2026-11-02,pmf,no invasion,0.999923
+2026-10-26,first confirmed case,1,Budjala,2026-11-02,pmf,invasion,0.000137
+2026-10-26,first confirmed case,1,Budjala,2026-11-02,pmf,no invasion,0.999863
+2026-10-26,first confirmed case,1,Bukama,2026-11-02,pmf,invasion,0.000131
+2026-10-26,first confirmed case,1,Bukama,2026-11-02,pmf,no invasion,0.999869
+2026-10-26,first confirmed case,1,Bulape,2026-11-02,pmf,invasion,0.0002
+2026-10-26,first confirmed case,1,Bulape,2026-11-02,pmf,no invasion,0.9998
+2026-10-26,first confirmed case,1,Bulungu,2026-11-02,pmf,invasion,0.000216
+2026-10-26,first confirmed case,1,Bulungu,2026-11-02,pmf,no invasion,0.999784
+2026-10-26,first confirmed case,1,Bumba,2026-11-02,pmf,invasion,0.000555
+2026-10-26,first confirmed case,1,Bumba,2026-11-02,pmf,no invasion,0.999445
+2026-10-26,first confirmed case,1,Bumbu,2026-11-02,pmf,invasion,1e-05
+2026-10-26,first confirmed case,1,Bumbu,2026-11-02,pmf,no invasion,0.99999
+2026-10-26,first confirmed case,1,Bunkeya,2026-11-02,pmf,invasion,1.9e-05
+2026-10-26,first confirmed case,1,Bunkeya,2026-11-02,pmf,no invasion,0.999981
+2026-10-26,first confirmed case,1,Bunkonde,2026-11-02,pmf,invasion,0.000237
+2026-10-26,first confirmed case,1,Bunkonde,2026-11-02,pmf,no invasion,0.999763
+2026-10-26,first confirmed case,1,Bunyakiri,2026-11-02,pmf,invasion,0.000612
+2026-10-26,first confirmed case,1,Bunyakiri,2026-11-02,pmf,no invasion,0.999388
+2026-10-26,first confirmed case,1,Busanga,2026-11-02,pmf,invasion,7.8e-05
+2026-10-26,first confirmed case,1,Busanga,2026-11-02,pmf,no invasion,0.999922
+2026-10-26,first confirmed case,1,Businga,2026-11-02,pmf,invasion,0.000227
+2026-10-26,first confirmed case,1,Businga,2026-11-02,pmf,no invasion,0.999773
+2026-10-26,first confirmed case,1,Butumba,2026-11-02,pmf,invasion,0.000125
+2026-10-26,first confirmed case,1,Butumba,2026-11-02,pmf,no invasion,0.999875
+2026-10-26,first confirmed case,1,Bwamanda,2026-11-02,pmf,invasion,0.000171
+2026-10-26,first confirmed case,1,Bwamanda,2026-11-02,pmf,no invasion,0.999829
+2026-10-26,first confirmed case,1,Cilundu,2026-11-02,pmf,invasion,0.000343
+2026-10-26,first confirmed case,1,Cilundu,2026-11-02,pmf,no invasion,0.999657
+2026-10-26,first confirmed case,1,Citenge,2026-11-02,pmf,invasion,0.000116
+2026-10-26,first confirmed case,1,Citenge,2026-11-02,pmf,no invasion,0.999884
+2026-10-26,first confirmed case,1,Dekese,2026-11-02,pmf,invasion,9.2e-05
+2026-10-26,first confirmed case,1,Dekese,2026-11-02,pmf,no invasion,0.999908
+2026-10-26,first confirmed case,1,Demba,2026-11-02,pmf,invasion,0.000191
+2026-10-26,first confirmed case,1,Demba,2026-11-02,pmf,no invasion,0.999809
+2026-10-26,first confirmed case,1,Dibaya,2026-11-02,pmf,invasion,0.000443
+2026-10-26,first confirmed case,1,Dibaya,2026-11-02,pmf,no invasion,0.999557
+2026-10-26,first confirmed case,1,Dibindi,2026-11-02,pmf,invasion,0.000103
+2026-10-26,first confirmed case,1,Dibindi,2026-11-02,pmf,no invasion,0.999897
+2026-10-26,first confirmed case,1,Dikungu,2026-11-02,pmf,invasion,0.000224
+2026-10-26,first confirmed case,1,Dikungu,2026-11-02,pmf,no invasion,0.999776
+2026-10-26,first confirmed case,1,Dilala,2026-11-02,pmf,invasion,4.5e-05
+2026-10-26,first confirmed case,1,Dilala,2026-11-02,pmf,no invasion,0.999955
+2026-10-26,first confirmed case,1,Dilolo,2026-11-02,pmf,invasion,2e-06
+2026-10-26,first confirmed case,1,Dilolo,2026-11-02,pmf,no invasion,0.999998
+2026-10-26,first confirmed case,1,Diulu,2026-11-02,pmf,invasion,0.00016
+2026-10-26,first confirmed case,1,Diulu,2026-11-02,pmf,no invasion,0.99984
+2026-10-26,first confirmed case,1,Djalo Ndjeka,2026-11-02,pmf,invasion,0.000122
+2026-10-26,first confirmed case,1,Djalo Ndjeka,2026-11-02,pmf,no invasion,0.999878
+2026-10-26,first confirmed case,1,Djolu,2026-11-02,pmf,invasion,0.000983
+2026-10-26,first confirmed case,1,Djolu,2026-11-02,pmf,no invasion,0.999017
+2026-10-26,first confirmed case,1,Djombo,2026-11-02,pmf,invasion,0.000142
+2026-10-26,first confirmed case,1,Djombo,2026-11-02,pmf,no invasion,0.999858
+2026-10-26,first confirmed case,1,Djuma,2026-11-02,pmf,invasion,0.000136
+2026-10-26,first confirmed case,1,Djuma,2026-11-02,pmf,no invasion,0.999864
+2026-10-26,first confirmed case,1,Doruma,2026-11-02,pmf,invasion,0.001759
+2026-10-26,first confirmed case,1,Doruma,2026-11-02,pmf,no invasion,0.998241
+2026-10-26,first confirmed case,1,Faradje,2026-11-02,pmf,invasion,0.00272
+2026-10-26,first confirmed case,1,Faradje,2026-11-02,pmf,no invasion,0.99728
+2026-10-26,first confirmed case,1,Ferekeni,2026-11-02,pmf,invasion,0.000237
+2026-10-26,first confirmed case,1,Ferekeni,2026-11-02,pmf,no invasion,0.999763
+2026-10-26,first confirmed case,1,Feshi,2026-11-02,pmf,invasion,9.4e-05
+2026-10-26,first confirmed case,1,Feshi,2026-11-02,pmf,no invasion,0.999906
+2026-10-26,first confirmed case,1,Fizi,2026-11-02,pmf,invasion,0.00145
+2026-10-26,first confirmed case,1,Fizi,2026-11-02,pmf,no invasion,0.99855
+2026-10-26,first confirmed case,1,Fungurume,2026-11-02,pmf,invasion,6.8e-05
+2026-10-26,first confirmed case,1,Fungurume,2026-11-02,pmf,no invasion,0.999932
+2026-10-26,first confirmed case,1,Gbadolite,2026-11-02,pmf,invasion,0.000108
+2026-10-26,first confirmed case,1,Gbadolite,2026-11-02,pmf,no invasion,0.999892
+2026-10-26,first confirmed case,1,Gemena,2026-11-02,pmf,invasion,0.000371
+2026-10-26,first confirmed case,1,Gemena,2026-11-02,pmf,no invasion,0.999629
+2026-10-26,first confirmed case,1,Gombe,2026-11-02,pmf,invasion,0.000239
+2026-10-26,first confirmed case,1,Gombe,2026-11-02,pmf,no invasion,0.999761
+2026-10-26,first confirmed case,1,Gombe Matadi,2026-11-02,pmf,invasion,4.2e-05
+2026-10-26,first confirmed case,1,Gombe Matadi,2026-11-02,pmf,no invasion,0.999958
+2026-10-26,first confirmed case,1,Gungu,2026-11-02,pmf,invasion,0.000133
+2026-10-26,first confirmed case,1,Gungu,2026-11-02,pmf,no invasion,0.999867
+2026-10-26,first confirmed case,1,Haut Plateau,2026-11-02,pmf,invasion,0.000359
+2026-10-26,first confirmed case,1,Haut Plateau,2026-11-02,pmf,no invasion,0.999641
+2026-10-26,first confirmed case,1,Ibanda,2026-11-02,pmf,invasion,0.002017
+2026-10-26,first confirmed case,1,Ibanda,2026-11-02,pmf,no invasion,0.997983
+2026-10-26,first confirmed case,1,Iboko,2026-11-02,pmf,invasion,0.000127
+2026-10-26,first confirmed case,1,Iboko,2026-11-02,pmf,no invasion,0.999873
+2026-10-26,first confirmed case,1,Idiofa,2026-11-02,pmf,invasion,0.000325
+2026-10-26,first confirmed case,1,Idiofa,2026-11-02,pmf,no invasion,0.999675
+2026-10-26,first confirmed case,1,Idjwi,2026-11-02,pmf,invasion,0.000172
+2026-10-26,first confirmed case,1,Idjwi,2026-11-02,pmf,no invasion,0.999828
+2026-10-26,first confirmed case,1,Ikela,2026-11-02,pmf,invasion,0.000763
+2026-10-26,first confirmed case,1,Ikela,2026-11-02,pmf,no invasion,0.999237
+2026-10-26,first confirmed case,1,Ilebo,2026-11-02,pmf,invasion,9.5e-05
+2026-10-26,first confirmed case,1,Ilebo,2026-11-02,pmf,no invasion,0.999905
+2026-10-26,first confirmed case,1,Inga,2026-11-02,pmf,invasion,1.6e-05
+2026-10-26,first confirmed case,1,Inga,2026-11-02,pmf,no invasion,0.999984
+2026-10-26,first confirmed case,1,Ingende,2026-11-02,pmf,invasion,8e-05
+2026-10-26,first confirmed case,1,Ingende,2026-11-02,pmf,no invasion,0.99992
+2026-10-26,first confirmed case,1,Inongo,2026-11-02,pmf,invasion,8.1e-05
+2026-10-26,first confirmed case,1,Inongo,2026-11-02,pmf,no invasion,0.999919
+2026-10-26,first confirmed case,1,Ipamu,2026-11-02,pmf,invasion,0.000156
+2026-10-26,first confirmed case,1,Ipamu,2026-11-02,pmf,no invasion,0.999844
+2026-10-26,first confirmed case,1,Irebu,2026-11-02,pmf,invasion,4e-05
+2026-10-26,first confirmed case,1,Irebu,2026-11-02,pmf,no invasion,0.99996
+2026-10-26,first confirmed case,1,Isangi,2026-11-02,pmf,invasion,0.003846
+2026-10-26,first confirmed case,1,Isangi,2026-11-02,pmf,no invasion,0.996154
+2026-10-26,first confirmed case,1,Itebero,2026-11-02,pmf,invasion,0.000591
+2026-10-26,first confirmed case,1,Itebero,2026-11-02,pmf,no invasion,0.999409
+2026-10-26,first confirmed case,1,Itombwe,2026-11-02,pmf,invasion,0.000162
+2026-10-26,first confirmed case,1,Itombwe,2026-11-02,pmf,no invasion,0.999838
+2026-10-26,first confirmed case,1,Jiba,2026-11-02,pmf,invasion,0.017832
+2026-10-26,first confirmed case,1,Jiba,2026-11-02,pmf,no invasion,0.982168
+2026-10-26,first confirmed case,1,Kabalo,2026-11-02,pmf,invasion,0.000558
+2026-10-26,first confirmed case,1,Kabalo,2026-11-02,pmf,no invasion,0.999442
+2026-10-26,first confirmed case,1,Kabambare,2026-11-02,pmf,invasion,0.00026
+2026-10-26,first confirmed case,1,Kabambare,2026-11-02,pmf,no invasion,0.99974
+2026-10-26,first confirmed case,1,Kabare,2026-11-02,pmf,invasion,0.000655
+2026-10-26,first confirmed case,1,Kabare,2026-11-02,pmf,no invasion,0.999345
+2026-10-26,first confirmed case,1,Kabeya Kamwanga,2026-11-02,pmf,invasion,0.000239
+2026-10-26,first confirmed case,1,Kabeya Kamwanga,2026-11-02,pmf,no invasion,0.999761
+2026-10-26,first confirmed case,1,Kabinda,2026-11-02,pmf,invasion,0.000689
+2026-10-26,first confirmed case,1,Kabinda,2026-11-02,pmf,no invasion,0.999311
+2026-10-26,first confirmed case,1,Kabondo Dianda,2026-11-02,pmf,invasion,0.000121
+2026-10-26,first confirmed case,1,Kabondo Dianda,2026-11-02,pmf,no invasion,0.999879
+2026-10-26,first confirmed case,1,Kabongo,2026-11-02,pmf,invasion,0.000323
+2026-10-26,first confirmed case,1,Kabongo,2026-11-02,pmf,no invasion,0.999677
+2026-10-26,first confirmed case,1,Kadutu,2026-11-02,pmf,invasion,0.001385
+2026-10-26,first confirmed case,1,Kadutu,2026-11-02,pmf,no invasion,0.998615
+2026-10-26,first confirmed case,1,Kafakumba,2026-11-02,pmf,invasion,0.000181
+2026-10-26,first confirmed case,1,Kafakumba,2026-11-02,pmf,no invasion,0.999819
+2026-10-26,first confirmed case,1,Kafubu,2026-11-02,pmf,invasion,3.5e-05
+2026-10-26,first confirmed case,1,Kafubu,2026-11-02,pmf,no invasion,0.999965
+2026-10-26,first confirmed case,1,Kahemba,2026-11-02,pmf,invasion,6.3e-05
+2026-10-26,first confirmed case,1,Kahemba,2026-11-02,pmf,no invasion,0.999937
+2026-10-26,first confirmed case,1,Kailo,2026-11-02,pmf,invasion,0.000528
+2026-10-26,first confirmed case,1,Kailo,2026-11-02,pmf,no invasion,0.999472
+2026-10-26,first confirmed case,1,Kajiji,2026-11-02,pmf,invasion,2.5e-05
+2026-10-26,first confirmed case,1,Kajiji,2026-11-02,pmf,no invasion,0.999975
+2026-10-26,first confirmed case,1,Kakenge,2026-11-02,pmf,invasion,0.000124
+2026-10-26,first confirmed case,1,Kakenge,2026-11-02,pmf,no invasion,0.999876
+2026-10-26,first confirmed case,1,Kalamba,2026-11-02,pmf,invasion,8.3e-05
+2026-10-26,first confirmed case,1,Kalamba,2026-11-02,pmf,no invasion,0.999917
+2026-10-26,first confirmed case,1,Kalambayi Kabanga,2026-11-02,pmf,invasion,0.000206
+2026-10-26,first confirmed case,1,Kalambayi Kabanga,2026-11-02,pmf,no invasion,0.999794
+2026-10-26,first confirmed case,1,Kalamu 1,2026-11-02,pmf,invasion,8.2e-05
+2026-10-26,first confirmed case,1,Kalamu 1,2026-11-02,pmf,no invasion,0.999918
+2026-10-26,first confirmed case,1,Kalamu 2,2026-11-02,pmf,invasion,1.9e-05
+2026-10-26,first confirmed case,1,Kalamu 2,2026-11-02,pmf,no invasion,0.999981
+2026-10-26,first confirmed case,1,Kalehe,2026-11-02,pmf,invasion,0.00041
+2026-10-26,first confirmed case,1,Kalehe,2026-11-02,pmf,no invasion,0.99959
+2026-10-26,first confirmed case,1,Kalemie,2026-11-02,pmf,invasion,0.000509
+2026-10-26,first confirmed case,1,Kalemie,2026-11-02,pmf,no invasion,0.999491
+2026-10-26,first confirmed case,1,Kalenda,2026-11-02,pmf,invasion,0.000206
+2026-10-26,first confirmed case,1,Kalenda,2026-11-02,pmf,no invasion,0.999794
+2026-10-26,first confirmed case,1,Kalima,2026-11-02,pmf,invasion,0.000644
+2026-10-26,first confirmed case,1,Kalima,2026-11-02,pmf,no invasion,0.999356
+2026-10-26,first confirmed case,1,Kalole,2026-11-02,pmf,invasion,0.00055
+2026-10-26,first confirmed case,1,Kalole,2026-11-02,pmf,no invasion,0.99945
+2026-10-26,first confirmed case,1,Kalomba,2026-11-02,pmf,invasion,0.000182
+2026-10-26,first confirmed case,1,Kalomba,2026-11-02,pmf,no invasion,0.999818
+2026-10-26,first confirmed case,1,Kalonda Est,2026-11-02,pmf,invasion,0.000162
+2026-10-26,first confirmed case,1,Kalonda Est,2026-11-02,pmf,no invasion,0.999838
+2026-10-26,first confirmed case,1,Kalonda Ouest,2026-11-02,pmf,invasion,0.000137
+2026-10-26,first confirmed case,1,Kalonda Ouest,2026-11-02,pmf,no invasion,0.999863
+2026-10-26,first confirmed case,1,Kalonge,2026-11-02,pmf,invasion,0.00028
+2026-10-26,first confirmed case,1,Kalonge,2026-11-02,pmf,no invasion,0.99972
+2026-10-26,first confirmed case,1,Kamalondo,2026-11-02,pmf,invasion,2.9e-05
+2026-10-26,first confirmed case,1,Kamalondo,2026-11-02,pmf,no invasion,0.999971
+2026-10-26,first confirmed case,1,Kamana,2026-11-02,pmf,invasion,0.000219
+2026-10-26,first confirmed case,1,Kamana,2026-11-02,pmf,no invasion,0.999781
+2026-10-26,first confirmed case,1,Kamango,2026-11-02,pmf,invasion,0.002744
+2026-10-26,first confirmed case,1,Kamango,2026-11-02,pmf,no invasion,0.997256
+2026-10-26,first confirmed case,1,Kambove,2026-11-02,pmf,invasion,4.2e-05
+2026-10-26,first confirmed case,1,Kambove,2026-11-02,pmf,no invasion,0.999958
+2026-10-26,first confirmed case,1,Kamiji,2026-11-02,pmf,invasion,0.000247
+2026-10-26,first confirmed case,1,Kamiji,2026-11-02,pmf,no invasion,0.999753
+2026-10-26,first confirmed case,1,Kamina,2026-11-02,pmf,invasion,0.000193
+2026-10-26,first confirmed case,1,Kamina,2026-11-02,pmf,no invasion,0.999807
+2026-10-26,first confirmed case,1,Kamituga,2026-11-02,pmf,invasion,0.000376
+2026-10-26,first confirmed case,1,Kamituga,2026-11-02,pmf,no invasion,0.999624
+2026-10-26,first confirmed case,1,Kamonia,2026-11-02,pmf,invasion,1.2e-05
+2026-10-26,first confirmed case,1,Kamonia,2026-11-02,pmf,no invasion,0.999988
+2026-10-26,first confirmed case,1,Kampemba,2026-11-02,pmf,invasion,5.7e-05
+2026-10-26,first confirmed case,1,Kampemba,2026-11-02,pmf,no invasion,0.999943
+2026-10-26,first confirmed case,1,Kampene,2026-11-02,pmf,invasion,0.000564
+2026-10-26,first confirmed case,1,Kampene,2026-11-02,pmf,no invasion,0.999436
+2026-10-26,first confirmed case,1,Kamwesha,2026-11-02,pmf,invasion,0.000197
+2026-10-26,first confirmed case,1,Kamwesha,2026-11-02,pmf,no invasion,0.999803
+2026-10-26,first confirmed case,1,Kananga,2026-11-02,pmf,invasion,0.000365
+2026-10-26,first confirmed case,1,Kananga,2026-11-02,pmf,no invasion,0.999635
+2026-10-26,first confirmed case,1,Kanda Kanda,2026-11-02,pmf,invasion,0.000258
+2026-10-26,first confirmed case,1,Kanda Kanda,2026-11-02,pmf,no invasion,0.999742
+2026-10-26,first confirmed case,1,Kangu,2026-11-02,pmf,invasion,1.3e-05
+2026-10-26,first confirmed case,1,Kangu,2026-11-02,pmf,no invasion,0.999987
+2026-10-26,first confirmed case,1,Kaniama,2026-11-02,pmf,invasion,0.000309
+2026-10-26,first confirmed case,1,Kaniama,2026-11-02,pmf,no invasion,0.999691
+2026-10-26,first confirmed case,1,Kaniola,2026-11-02,pmf,invasion,0.000486
+2026-10-26,first confirmed case,1,Kaniola,2026-11-02,pmf,no invasion,0.999514
+2026-10-26,first confirmed case,1,Kansele,2026-11-02,pmf,invasion,0.000106
+2026-10-26,first confirmed case,1,Kansele,2026-11-02,pmf,no invasion,0.999894
+2026-10-26,first confirmed case,1,Kansimba,2026-11-02,pmf,invasion,0.000186
+2026-10-26,first confirmed case,1,Kansimba,2026-11-02,pmf,no invasion,0.999814
+2026-10-26,first confirmed case,1,Kanzala,2026-11-02,pmf,invasion,0.000154
+2026-10-26,first confirmed case,1,Kanzala,2026-11-02,pmf,no invasion,0.999846
+2026-10-26,first confirmed case,1,Kanzenze,2026-11-02,pmf,invasion,2.2e-05
+2026-10-26,first confirmed case,1,Kanzenze,2026-11-02,pmf,no invasion,0.999978
+2026-10-26,first confirmed case,1,Kapanga,2026-11-02,pmf,invasion,7e-05
+2026-10-26,first confirmed case,1,Kapanga,2026-11-02,pmf,no invasion,0.99993
+2026-10-26,first confirmed case,1,Kapolowe,2026-11-02,pmf,invasion,4.6e-05
+2026-10-26,first confirmed case,1,Kapolowe,2026-11-02,pmf,no invasion,0.999954
+2026-10-26,first confirmed case,1,Karawa,2026-11-02,pmf,invasion,0.00022
+2026-10-26,first confirmed case,1,Karawa,2026-11-02,pmf,no invasion,0.99978
+2026-10-26,first confirmed case,1,Karisimbi,2026-11-02,pmf,invasion,0.000661
+2026-10-26,first confirmed case,1,Karisimbi,2026-11-02,pmf,no invasion,0.999339
+2026-10-26,first confirmed case,1,Kasa Vubu,2026-11-02,pmf,invasion,8.7e-05
+2026-10-26,first confirmed case,1,Kasa Vubu,2026-11-02,pmf,no invasion,0.999913
+2026-10-26,first confirmed case,1,Kasaji,2026-11-02,pmf,invasion,0.000101
+2026-10-26,first confirmed case,1,Kasaji,2026-11-02,pmf,no invasion,0.999899
+2026-10-26,first confirmed case,1,Kasansa,2026-11-02,pmf,invasion,0.000288
+2026-10-26,first confirmed case,1,Kasansa,2026-11-02,pmf,no invasion,0.999712
+2026-10-26,first confirmed case,1,Kasenga,2026-11-02,pmf,invasion,1.9e-05
+2026-10-26,first confirmed case,1,Kasenga,2026-11-02,pmf,no invasion,0.999981
+2026-10-26,first confirmed case,1,Kashobwe,2026-11-02,pmf,invasion,9e-06
+2026-10-26,first confirmed case,1,Kashobwe,2026-11-02,pmf,no invasion,0.999991
+2026-10-26,first confirmed case,1,Kasongo,2026-11-02,pmf,invasion,0.00118
+2026-10-26,first confirmed case,1,Kasongo,2026-11-02,pmf,no invasion,0.99882
+2026-10-26,first confirmed case,1,Kasongo Lunda,2026-11-02,pmf,invasion,1.2e-05
+2026-10-26,first confirmed case,1,Kasongo Lunda,2026-11-02,pmf,no invasion,0.999988
+2026-10-26,first confirmed case,1,Katako Kombe,2026-11-02,pmf,invasion,0.000248
+2026-10-26,first confirmed case,1,Katako Kombe,2026-11-02,pmf,no invasion,0.999752
+2026-10-26,first confirmed case,1,Katana,2026-11-02,pmf,invasion,0.000537
+2026-10-26,first confirmed case,1,Katana,2026-11-02,pmf,no invasion,0.999463
+2026-10-26,first confirmed case,1,Katende,2026-11-02,pmf,invasion,0.000186
+2026-10-26,first confirmed case,1,Katende,2026-11-02,pmf,no invasion,0.999814
+2026-10-26,first confirmed case,1,Katoka,2026-11-02,pmf,invasion,0.000171
+2026-10-26,first confirmed case,1,Katoka,2026-11-02,pmf,no invasion,0.999829
+2026-10-26,first confirmed case,1,Katoyi,2026-11-02,pmf,invasion,0.001574
+2026-10-26,first confirmed case,1,Katoyi,2026-11-02,pmf,no invasion,0.998426
+2026-10-26,first confirmed case,1,Katuba,2026-11-02,pmf,invasion,9e-06
+2026-10-26,first confirmed case,1,Katuba,2026-11-02,pmf,no invasion,0.999991
+2026-10-26,first confirmed case,1,Kayamba,2026-11-02,pmf,invasion,7.6e-05
+2026-10-26,first confirmed case,1,Kayamba,2026-11-02,pmf,no invasion,0.999924
+2026-10-26,first confirmed case,1,Kaziba,2026-11-02,pmf,invasion,0.000289
+2026-10-26,first confirmed case,1,Kaziba,2026-11-02,pmf,no invasion,0.999711
+2026-10-26,first confirmed case,1,Kenge,2026-11-02,pmf,invasion,0.000269
+2026-10-26,first confirmed case,1,Kenge,2026-11-02,pmf,no invasion,0.999731
+2026-10-26,first confirmed case,1,Kenya,2026-11-02,pmf,invasion,4.5e-05
+2026-10-26,first confirmed case,1,Kenya,2026-11-02,pmf,no invasion,0.999955
+2026-10-26,first confirmed case,1,Kiambi,2026-11-02,pmf,invasion,0.000197
+2026-10-26,first confirmed case,1,Kiambi,2026-11-02,pmf,no invasion,0.999803
+2026-10-26,first confirmed case,1,Kibirizi,2026-11-02,pmf,invasion,0.004187
+2026-10-26,first confirmed case,1,Kibirizi,2026-11-02,pmf,no invasion,0.995813
+2026-10-26,first confirmed case,1,Kibombo,2026-11-02,pmf,invasion,0.000291
+2026-10-26,first confirmed case,1,Kibombo,2026-11-02,pmf,no invasion,0.999709
+2026-10-26,first confirmed case,1,Kibua,2026-11-02,pmf,invasion,0.000924
+2026-10-26,first confirmed case,1,Kibua,2026-11-02,pmf,no invasion,0.999076
+2026-10-26,first confirmed case,1,Kibunzi,2026-11-02,pmf,invasion,1.2e-05
+2026-10-26,first confirmed case,1,Kibunzi,2026-11-02,pmf,no invasion,0.999988
+2026-10-26,first confirmed case,1,Kikimi,2026-11-02,pmf,invasion,6e-05
+2026-10-26,first confirmed case,1,Kikimi,2026-11-02,pmf,no invasion,0.99994
+2026-10-26,first confirmed case,1,Kikongo,2026-11-02,pmf,invasion,9.1e-05
+2026-10-26,first confirmed case,1,Kikongo,2026-11-02,pmf,no invasion,0.999909
+2026-10-26,first confirmed case,1,Kikula,2026-11-02,pmf,invasion,2e-05
+2026-10-26,first confirmed case,1,Kikula,2026-11-02,pmf,no invasion,0.99998
+2026-10-26,first confirmed case,1,Kikwit Nord,2026-11-02,pmf,invasion,0.000209
+2026-10-26,first confirmed case,1,Kikwit Nord,2026-11-02,pmf,no invasion,0.999791
+2026-10-26,first confirmed case,1,Kikwit Sud,2026-11-02,pmf,invasion,0.000139
+2026-10-26,first confirmed case,1,Kikwit Sud,2026-11-02,pmf,no invasion,0.999861
+2026-10-26,first confirmed case,1,Kilela Balanda,2026-11-02,pmf,invasion,1e-05
+2026-10-26,first confirmed case,1,Kilela Balanda,2026-11-02,pmf,no invasion,0.99999
+2026-10-26,first confirmed case,1,Kilwa,2026-11-02,pmf,invasion,7.9e-05
+2026-10-26,first confirmed case,1,Kilwa,2026-11-02,pmf,no invasion,0.999921
+2026-10-26,first confirmed case,1,Kimbanseke,2026-11-02,pmf,invasion,1.3e-05
+2026-10-26,first confirmed case,1,Kimbanseke,2026-11-02,pmf,no invasion,0.999987
+2026-10-26,first confirmed case,1,Kimbao,2026-11-02,pmf,invasion,7.8e-05
+2026-10-26,first confirmed case,1,Kimbao,2026-11-02,pmf,no invasion,0.999922
+2026-10-26,first confirmed case,1,Kimbi Lulenge,2026-11-02,pmf,invasion,0.000504
+2026-10-26,first confirmed case,1,Kimbi Lulenge,2026-11-02,pmf,no invasion,0.999496
+2026-10-26,first confirmed case,1,Kimpangu,2026-11-02,pmf,invasion,8e-06
+2026-10-26,first confirmed case,1,Kimpangu,2026-11-02,pmf,no invasion,0.999992
+2026-10-26,first confirmed case,1,Kimpese,2026-11-02,pmf,invasion,4.6e-05
+2026-10-26,first confirmed case,1,Kimpese,2026-11-02,pmf,no invasion,0.999954
+2026-10-26,first confirmed case,1,Kimputu,2026-11-02,pmf,invasion,0.000258
+2026-10-26,first confirmed case,1,Kimputu,2026-11-02,pmf,no invasion,0.999742
+2026-10-26,first confirmed case,1,Kimvula,2026-11-02,pmf,invasion,9.3e-05
+2026-10-26,first confirmed case,1,Kimvula,2026-11-02,pmf,no invasion,0.999907
+2026-10-26,first confirmed case,1,Kinda,2026-11-02,pmf,invasion,3.7e-05
+2026-10-26,first confirmed case,1,Kinda,2026-11-02,pmf,no invasion,0.999963
+2026-10-26,first confirmed case,1,Kindu,2026-11-02,pmf,invasion,0.003238
+2026-10-26,first confirmed case,1,Kindu,2026-11-02,pmf,no invasion,0.996762
+2026-10-26,first confirmed case,1,Kingabwa,2026-11-02,pmf,invasion,4.8e-05
+2026-10-26,first confirmed case,1,Kingabwa,2026-11-02,pmf,no invasion,0.999952
+2026-10-26,first confirmed case,1,Kingandu,2026-11-02,pmf,invasion,5.6e-05
+2026-10-26,first confirmed case,1,Kingandu,2026-11-02,pmf,no invasion,0.999944
+2026-10-26,first confirmed case,1,Kingasani,2026-11-02,pmf,invasion,3e-05
+2026-10-26,first confirmed case,1,Kingasani,2026-11-02,pmf,no invasion,0.99997
+2026-10-26,first confirmed case,1,Kinkondja,2026-11-02,pmf,invasion,0.000106
+2026-10-26,first confirmed case,1,Kinkondja,2026-11-02,pmf,no invasion,0.999894
+2026-10-26,first confirmed case,1,Kinkonzi,2026-11-02,pmf,invasion,8e-06
+2026-10-26,first confirmed case,1,Kinkonzi,2026-11-02,pmf,no invasion,0.999992
+2026-10-26,first confirmed case,1,Kinshasa,2026-11-02,pmf,invasion,9.4e-05
+2026-10-26,first confirmed case,1,Kinshasa,2026-11-02,pmf,no invasion,0.999906
+2026-10-26,first confirmed case,1,Kintambo,2026-11-02,pmf,invasion,8.4e-05
+2026-10-26,first confirmed case,1,Kintambo,2026-11-02,pmf,no invasion,0.999916
+2026-10-26,first confirmed case,1,Kipushi,2026-11-02,pmf,invasion,3.2e-05
+2026-10-26,first confirmed case,1,Kipushi,2026-11-02,pmf,no invasion,0.999968
+2026-10-26,first confirmed case,1,Kiri,2026-11-02,pmf,invasion,4.7e-05
+2026-10-26,first confirmed case,1,Kiri,2026-11-02,pmf,no invasion,0.999953
+2026-10-26,first confirmed case,1,Kirotshe,2026-11-02,pmf,invasion,0.001844
+2026-10-26,first confirmed case,1,Kirotshe,2026-11-02,pmf,no invasion,0.998156
+2026-10-26,first confirmed case,1,Kisanga,2026-11-02,pmf,invasion,2.9e-05
+2026-10-26,first confirmed case,1,Kisanga,2026-11-02,pmf,no invasion,0.999971
+2026-10-26,first confirmed case,1,Kisanji,2026-11-02,pmf,invasion,5.1e-05
+2026-10-26,first confirmed case,1,Kisanji,2026-11-02,pmf,no invasion,0.999949
+2026-10-26,first confirmed case,1,Kisantu,2026-11-02,pmf,invasion,4.3e-05
+2026-10-26,first confirmed case,1,Kisantu,2026-11-02,pmf,no invasion,0.999957
+2026-10-26,first confirmed case,1,Kisenso,2026-11-02,pmf,invasion,2.6e-05
+2026-10-26,first confirmed case,1,Kisenso,2026-11-02,pmf,no invasion,0.999974
+2026-10-26,first confirmed case,1,Kitangwa,2026-11-02,pmf,invasion,0.000219
+2026-10-26,first confirmed case,1,Kitangwa,2026-11-02,pmf,no invasion,0.999781
+2026-10-26,first confirmed case,1,Kitenda,2026-11-02,pmf,invasion,2.1e-05
+2026-10-26,first confirmed case,1,Kitenda,2026-11-02,pmf,no invasion,0.999979
+2026-10-26,first confirmed case,1,Kitenge,2026-11-02,pmf,invasion,0.000285
+2026-10-26,first confirmed case,1,Kitenge,2026-11-02,pmf,no invasion,0.999715
+2026-10-26,first confirmed case,1,Kitona,2026-11-02,pmf,invasion,0.0
+2026-10-26,first confirmed case,1,Kitona,2026-11-02,pmf,no invasion,1.0
+2026-10-26,first confirmed case,1,Kitutu,2026-11-02,pmf,invasion,0.000366
+2026-10-26,first confirmed case,1,Kitutu,2026-11-02,pmf,no invasion,0.999634
+2026-10-26,first confirmed case,1,Kizu,2026-11-02,pmf,invasion,4e-06
+2026-10-26,first confirmed case,1,Kizu,2026-11-02,pmf,no invasion,0.999996
+2026-10-26,first confirmed case,1,Kokolo,2026-11-02,pmf,invasion,0.000114
+2026-10-26,first confirmed case,1,Kokolo,2026-11-02,pmf,no invasion,0.999886
+2026-10-26,first confirmed case,1,Kole,2026-11-02,pmf,invasion,0.000125
+2026-10-26,first confirmed case,1,Kole,2026-11-02,pmf,no invasion,0.999875
+2026-10-26,first confirmed case,1,Kongolo,2026-11-02,pmf,invasion,0.000774
+2026-10-26,first confirmed case,1,Kongolo,2026-11-02,pmf,no invasion,0.999226
+2026-10-26,first confirmed case,1,Koshibanda,2026-11-02,pmf,invasion,0.000184
+2026-10-26,first confirmed case,1,Koshibanda,2026-11-02,pmf,no invasion,0.999816
+2026-10-26,first confirmed case,1,Kowe,2026-11-02,pmf,invasion,4e-06
+2026-10-26,first confirmed case,1,Kowe,2026-11-02,pmf,no invasion,0.999996
+2026-10-26,first confirmed case,1,Kuimba,2026-11-02,pmf,invasion,1e-06
+2026-10-26,first confirmed case,1,Kuimba,2026-11-02,pmf,no invasion,0.999999
+2026-10-26,first confirmed case,1,Kunda,2026-11-02,pmf,invasion,0.000823
+2026-10-26,first confirmed case,1,Kunda,2026-11-02,pmf,no invasion,0.999177
+2026-10-26,first confirmed case,1,Kungu,2026-11-02,pmf,invasion,9.8e-05
+2026-10-26,first confirmed case,1,Kungu,2026-11-02,pmf,no invasion,0.999902
+2026-10-26,first confirmed case,1,Kwamouth,2026-11-02,pmf,invasion,4.6e-05
+2026-10-26,first confirmed case,1,Kwamouth,2026-11-02,pmf,no invasion,0.999954
+2026-10-26,first confirmed case,1,Kwilu Ngongo,2026-11-02,pmf,invasion,3.4e-05
+2026-10-26,first confirmed case,1,Kwilu Ngongo,2026-11-02,pmf,no invasion,0.999966
+2026-10-26,first confirmed case,1,Laybo,2026-11-02,pmf,invasion,0.007101
+2026-10-26,first confirmed case,1,Laybo,2026-11-02,pmf,no invasion,0.992899
+2026-10-26,first confirmed case,1,Lemba,2026-11-02,pmf,invasion,0.000132
+2026-10-26,first confirmed case,1,Lemba,2026-11-02,pmf,no invasion,0.999868
+2026-10-26,first confirmed case,1,Lemera,2026-11-02,pmf,invasion,0.001582
+2026-10-26,first confirmed case,1,Lemera,2026-11-02,pmf,no invasion,0.998418
+2026-10-26,first confirmed case,1,Libenge,2026-11-02,pmf,invasion,0.000106
+2026-10-26,first confirmed case,1,Libenge,2026-11-02,pmf,no invasion,0.999894
+2026-10-26,first confirmed case,1,Likasi,2026-11-02,pmf,invasion,3.1e-05
+2026-10-26,first confirmed case,1,Likasi,2026-11-02,pmf,no invasion,0.999969
+2026-10-26,first confirmed case,1,Likati,2026-11-02,pmf,invasion,0.000642
+2026-10-26,first confirmed case,1,Likati,2026-11-02,pmf,no invasion,0.999358
+2026-10-26,first confirmed case,1,Lilanga Bobangi,2026-11-02,pmf,invasion,6e-06
+2026-10-26,first confirmed case,1,Lilanga Bobangi,2026-11-02,pmf,no invasion,0.999994
+2026-10-26,first confirmed case,1,Limete,2026-11-02,pmf,invasion,0.000179
+2026-10-26,first confirmed case,1,Limete,2026-11-02,pmf,no invasion,0.999821
+2026-10-26,first confirmed case,1,Linga,2026-11-02,pmf,invasion,0.01487
+2026-10-26,first confirmed case,1,Linga,2026-11-02,pmf,no invasion,0.98513
+2026-10-26,first confirmed case,1,Lingomo,2026-11-02,pmf,invasion,0.000491
+2026-10-26,first confirmed case,1,Lingomo,2026-11-02,pmf,no invasion,0.999509
+2026-10-26,first confirmed case,1,Lingwala,2026-11-02,pmf,invasion,0.00012
+2026-10-26,first confirmed case,1,Lingwala,2026-11-02,pmf,no invasion,0.99988
+2026-10-26,first confirmed case,1,Lisala,2026-11-02,pmf,invasion,0.000754
+2026-10-26,first confirmed case,1,Lisala,2026-11-02,pmf,no invasion,0.999246
+2026-10-26,first confirmed case,1,Lodja,2026-11-02,pmf,invasion,0.000615
+2026-10-26,first confirmed case,1,Lodja,2026-11-02,pmf,no invasion,0.999385
+2026-10-26,first confirmed case,1,Loko,2026-11-02,pmf,invasion,0.000122
+2026-10-26,first confirmed case,1,Loko,2026-11-02,pmf,no invasion,0.999878
+2026-10-26,first confirmed case,1,Lolo,2026-11-02,pmf,invasion,0.000474
+2026-10-26,first confirmed case,1,Lolo,2026-11-02,pmf,no invasion,0.999526
+2026-10-26,first confirmed case,1,Lomela,2026-11-02,pmf,invasion,0.000201
+2026-10-26,first confirmed case,1,Lomela,2026-11-02,pmf,no invasion,0.999799
+2026-10-26,first confirmed case,1,Lotumbe,2026-11-02,pmf,invasion,4.9e-05
+2026-10-26,first confirmed case,1,Lotumbe,2026-11-02,pmf,no invasion,0.999951
+2026-10-26,first confirmed case,1,Lowa,2026-11-02,pmf,invasion,0.000673
+2026-10-26,first confirmed case,1,Lowa,2026-11-02,pmf,no invasion,0.999327
+2026-10-26,first confirmed case,1,Lualaba,2026-11-02,pmf,invasion,8e-05
+2026-10-26,first confirmed case,1,Lualaba,2026-11-02,pmf,no invasion,0.99992
+2026-10-26,first confirmed case,1,Luambo,2026-11-02,pmf,invasion,0.000103
+2026-10-26,first confirmed case,1,Luambo,2026-11-02,pmf,no invasion,0.999897
+2026-10-26,first confirmed case,1,Lubao,2026-11-02,pmf,invasion,0.000949
+2026-10-26,first confirmed case,1,Lubao,2026-11-02,pmf,no invasion,0.999051
+2026-10-26,first confirmed case,1,Lubilanji,2026-11-02,pmf,invasion,0.0001
+2026-10-26,first confirmed case,1,Lubilanji,2026-11-02,pmf,no invasion,0.9999
+2026-10-26,first confirmed case,1,Lubondaie,2026-11-02,pmf,invasion,0.000275
+2026-10-26,first confirmed case,1,Lubondaie,2026-11-02,pmf,no invasion,0.999725
+2026-10-26,first confirmed case,1,Lubudi,2026-11-02,pmf,invasion,5.9e-05
+2026-10-26,first confirmed case,1,Lubudi,2026-11-02,pmf,no invasion,0.999941
+2026-10-26,first confirmed case,1,Lubumbashi,2026-11-02,pmf,invasion,0.000224
+2026-10-26,first confirmed case,1,Lubumbashi,2026-11-02,pmf,no invasion,0.999776
+2026-10-26,first confirmed case,1,Lubunga (Kasaï-Central),2026-11-02,pmf,invasion,0.000309
+2026-10-26,first confirmed case,1,Lubunga (Kasaï-Central),2026-11-02,pmf,no invasion,0.999691
+2026-10-26,first confirmed case,1,Lubutu,2026-11-02,pmf,invasion,0.002195
+2026-10-26,first confirmed case,1,Lubutu,2026-11-02,pmf,no invasion,0.997805
+2026-10-26,first confirmed case,1,Ludimbi Lukula,2026-11-02,pmf,invasion,0.000735
+2026-10-26,first confirmed case,1,Ludimbi Lukula,2026-11-02,pmf,no invasion,0.999265
+2026-10-26,first confirmed case,1,Luebo,2026-11-02,pmf,invasion,0.000251
+2026-10-26,first confirmed case,1,Luebo,2026-11-02,pmf,no invasion,0.999749
+2026-10-26,first confirmed case,1,Luiza,2026-11-02,pmf,invasion,0.000209
+2026-10-26,first confirmed case,1,Luiza,2026-11-02,pmf,no invasion,0.999791
+2026-10-26,first confirmed case,1,Lukafu,2026-11-02,pmf,invasion,3.7e-05
+2026-10-26,first confirmed case,1,Lukafu,2026-11-02,pmf,no invasion,0.999963
+2026-10-26,first confirmed case,1,Lukelenge,2026-11-02,pmf,invasion,0.000133
+2026-10-26,first confirmed case,1,Lukelenge,2026-11-02,pmf,no invasion,0.999867
+2026-10-26,first confirmed case,1,Lukolela,2026-11-02,pmf,invasion,4.2e-05
+2026-10-26,first confirmed case,1,Lukolela,2026-11-02,pmf,no invasion,0.999958
+2026-10-26,first confirmed case,1,Lukonga,2026-11-02,pmf,invasion,0.000195
+2026-10-26,first confirmed case,1,Lukonga,2026-11-02,pmf,no invasion,0.999805
+2026-10-26,first confirmed case,1,Lukula,2026-11-02,pmf,invasion,2.3e-05
+2026-10-26,first confirmed case,1,Lukula,2026-11-02,pmf,no invasion,0.999977
+2026-10-26,first confirmed case,1,Lulingu,2026-11-02,pmf,invasion,0.000636
+2026-10-26,first confirmed case,1,Lulingu,2026-11-02,pmf,no invasion,0.999364
+2026-10-26,first confirmed case,1,Luozi,2026-11-02,pmf,invasion,8.9e-05
+2026-10-26,first confirmed case,1,Luozi,2026-11-02,pmf,no invasion,0.999911
+2026-10-26,first confirmed case,1,Luputa,2026-11-02,pmf,invasion,0.000388
+2026-10-26,first confirmed case,1,Luputa,2026-11-02,pmf,no invasion,0.999612
+2026-10-26,first confirmed case,1,Lusambo,2026-11-02,pmf,invasion,0.000155
+2026-10-26,first confirmed case,1,Lusambo,2026-11-02,pmf,no invasion,0.999845
+2026-10-26,first confirmed case,1,Lusanga,2026-11-02,pmf,invasion,0.000223
+2026-10-26,first confirmed case,1,Lusanga,2026-11-02,pmf,no invasion,0.999777
+2026-10-26,first confirmed case,1,Lusangi,2026-11-02,pmf,invasion,0.00041
+2026-10-26,first confirmed case,1,Lusangi,2026-11-02,pmf,no invasion,0.99959
+2026-10-26,first confirmed case,1,Lwamba,2026-11-02,pmf,invasion,0.000192
+2026-10-26,first confirmed case,1,Lwamba,2026-11-02,pmf,no invasion,0.999808
+2026-10-26,first confirmed case,1,Makala,2026-11-02,pmf,invasion,1.9e-05
+2026-10-26,first confirmed case,1,Makala,2026-11-02,pmf,no invasion,0.999981
+2026-10-26,first confirmed case,1,Makanza,2026-11-02,pmf,invasion,0.000151
+2026-10-26,first confirmed case,1,Makanza,2026-11-02,pmf,no invasion,0.999849
+2026-10-26,first confirmed case,1,Makoro,2026-11-02,pmf,invasion,0.008127
+2026-10-26,first confirmed case,1,Makoro,2026-11-02,pmf,no invasion,0.991873
+2026-10-26,first confirmed case,1,Makota,2026-11-02,pmf,invasion,0.000144
+2026-10-26,first confirmed case,1,Makota,2026-11-02,pmf,no invasion,0.999856
+2026-10-26,first confirmed case,1,Malemba Nkulu,2026-11-02,pmf,invasion,0.000184
+2026-10-26,first confirmed case,1,Malemba Nkulu,2026-11-02,pmf,no invasion,0.999816
+2026-10-26,first confirmed case,1,Maluku 1,2026-11-02,pmf,invasion,8.9e-05
+2026-10-26,first confirmed case,1,Maluku 1,2026-11-02,pmf,no invasion,0.999911
+2026-10-26,first confirmed case,1,Maluku 2,2026-11-02,pmf,invasion,9.6e-05
+2026-10-26,first confirmed case,1,Maluku 2,2026-11-02,pmf,no invasion,0.999904
+2026-10-26,first confirmed case,1,Mampoko,2026-11-02,pmf,invasion,4.6e-05
+2026-10-26,first confirmed case,1,Mampoko,2026-11-02,pmf,no invasion,0.999954
+2026-10-26,first confirmed case,1,Mangembo,2026-11-02,pmf,invasion,3.7e-05
+2026-10-26,first confirmed case,1,Mangembo,2026-11-02,pmf,no invasion,0.999963
+2026-10-26,first confirmed case,1,Manika,2026-11-02,pmf,invasion,0.000105
+2026-10-26,first confirmed case,1,Manika,2026-11-02,pmf,no invasion,0.999895
+2026-10-26,first confirmed case,1,Manono,2026-11-02,pmf,invasion,0.0003
+2026-10-26,first confirmed case,1,Manono,2026-11-02,pmf,no invasion,0.9997
+2026-10-26,first confirmed case,1,Masi Manimba,2026-11-02,pmf,invasion,0.000161
+2026-10-26,first confirmed case,1,Masi Manimba,2026-11-02,pmf,no invasion,0.999839
+2026-10-26,first confirmed case,1,Masina 1,2026-11-02,pmf,invasion,8.1e-05
+2026-10-26,first confirmed case,1,Masina 1,2026-11-02,pmf,no invasion,0.999919
+2026-10-26,first confirmed case,1,Masina 2,2026-11-02,pmf,invasion,4.9e-05
+2026-10-26,first confirmed case,1,Masina 2,2026-11-02,pmf,no invasion,0.999951
+2026-10-26,first confirmed case,1,Masisi,2026-11-02,pmf,invasion,0.002416
+2026-10-26,first confirmed case,1,Masisi,2026-11-02,pmf,no invasion,0.997584
+2026-10-26,first confirmed case,1,Massa,2026-11-02,pmf,invasion,2e-05
+2026-10-26,first confirmed case,1,Massa,2026-11-02,pmf,no invasion,0.99998
+2026-10-26,first confirmed case,1,Masuika,2026-11-02,pmf,invasion,0.000587
+2026-10-26,first confirmed case,1,Masuika,2026-11-02,pmf,no invasion,0.999413
+2026-10-26,first confirmed case,1,Matadi,2026-11-02,pmf,invasion,2.8e-05
+2026-10-26,first confirmed case,1,Matadi,2026-11-02,pmf,no invasion,0.999972
+2026-10-26,first confirmed case,1,Matete,2026-11-02,pmf,invasion,6.9e-05
+2026-10-26,first confirmed case,1,Matete,2026-11-02,pmf,no invasion,0.999931
+2026-10-26,first confirmed case,1,Mawuya,2026-11-02,pmf,invasion,7.9e-05
+2026-10-26,first confirmed case,1,Mawuya,2026-11-02,pmf,no invasion,0.999921
+2026-10-26,first confirmed case,1,Mbandaka,2026-11-02,pmf,invasion,0.000118
+2026-10-26,first confirmed case,1,Mbandaka,2026-11-02,pmf,no invasion,0.999882
+2026-10-26,first confirmed case,1,Mbanza Ngungu,2026-11-02,pmf,invasion,3.6e-05
+2026-10-26,first confirmed case,1,Mbanza Ngungu,2026-11-02,pmf,no invasion,0.999964
+2026-10-26,first confirmed case,1,Mbaya,2026-11-02,pmf,invasion,0.000132
+2026-10-26,first confirmed case,1,Mbaya,2026-11-02,pmf,no invasion,0.999868
+2026-10-26,first confirmed case,1,Mbulula,2026-11-02,pmf,invasion,0.000567
+2026-10-26,first confirmed case,1,Mbulula,2026-11-02,pmf,no invasion,0.999433
+2026-10-26,first confirmed case,1,Miabi,2026-11-02,pmf,invasion,8.2e-05
+2026-10-26,first confirmed case,1,Miabi,2026-11-02,pmf,no invasion,0.999918
+2026-10-26,first confirmed case,1,Mikalayi,2026-11-02,pmf,invasion,0.000234
+2026-10-26,first confirmed case,1,Mikalayi,2026-11-02,pmf,no invasion,0.999766
+2026-10-26,first confirmed case,1,Mikope,2026-11-02,pmf,invasion,0.000103
+2026-10-26,first confirmed case,1,Mikope,2026-11-02,pmf,no invasion,0.999897
+2026-10-26,first confirmed case,1,Mimia,2026-11-02,pmf,invasion,3.4e-05
+2026-10-26,first confirmed case,1,Mimia,2026-11-02,pmf,no invasion,0.999966
+2026-10-26,first confirmed case,1,Minembwe,2026-11-02,pmf,invasion,0.000768
+2026-10-26,first confirmed case,1,Minembwe,2026-11-02,pmf,no invasion,0.999232
+2026-10-26,first confirmed case,1,Minga,2026-11-02,pmf,invasion,0.000208
+2026-10-26,first confirmed case,1,Minga,2026-11-02,pmf,no invasion,0.999792
+2026-10-26,first confirmed case,1,Minova,2026-11-02,pmf,invasion,0.000857
+2026-10-26,first confirmed case,1,Minova,2026-11-02,pmf,no invasion,0.999143
+2026-10-26,first confirmed case,1,Mitwaba,2026-11-02,pmf,invasion,6e-05
+2026-10-26,first confirmed case,1,Mitwaba,2026-11-02,pmf,no invasion,0.99994
+2026-10-26,first confirmed case,1,Moanza,2026-11-02,pmf,invasion,0.000155
+2026-10-26,first confirmed case,1,Moanza,2026-11-02,pmf,no invasion,0.999845
+2026-10-26,first confirmed case,1,Moba,2026-11-02,pmf,invasion,0.000254
+2026-10-26,first confirmed case,1,Moba,2026-11-02,pmf,no invasion,0.999746
+2026-10-26,first confirmed case,1,Mobayi Mbongo,2026-11-02,pmf,invasion,0.000478
+2026-10-26,first confirmed case,1,Mobayi Mbongo,2026-11-02,pmf,no invasion,0.999522
+2026-10-26,first confirmed case,1,Mokala,2026-11-02,pmf,invasion,0.000118
+2026-10-26,first confirmed case,1,Mokala,2026-11-02,pmf,no invasion,0.999882
+2026-10-26,first confirmed case,1,Mompono,2026-11-02,pmf,invasion,0.00043
+2026-10-26,first confirmed case,1,Mompono,2026-11-02,pmf,no invasion,0.99957
+2026-10-26,first confirmed case,1,Mondombe,2026-11-02,pmf,invasion,0.000282
+2026-10-26,first confirmed case,1,Mondombe,2026-11-02,pmf,no invasion,0.999718
+2026-10-26,first confirmed case,1,Monga,2026-11-02,pmf,invasion,0.001898
+2026-10-26,first confirmed case,1,Monga,2026-11-02,pmf,no invasion,0.998102
+2026-10-26,first confirmed case,1,Monieka,2026-11-02,pmf,invasion,4.3e-05
+2026-10-26,first confirmed case,1,Monieka,2026-11-02,pmf,no invasion,0.999957
+2026-10-26,first confirmed case,1,Monkoto,2026-11-02,pmf,invasion,9.6e-05
+2026-10-26,first confirmed case,1,Monkoto,2026-11-02,pmf,no invasion,0.999904
+2026-10-26,first confirmed case,1,Mont Ngafula 1,2026-11-02,pmf,invasion,7.8e-05
+2026-10-26,first confirmed case,1,Mont Ngafula 1,2026-11-02,pmf,no invasion,0.999922
+2026-10-26,first confirmed case,1,Mont Ngafula 2,2026-11-02,pmf,invasion,5.5e-05
+2026-10-26,first confirmed case,1,Mont Ngafula 2,2026-11-02,pmf,no invasion,0.999945
+2026-10-26,first confirmed case,1,Mosango,2026-11-02,pmf,invasion,0.000134
+2026-10-26,first confirmed case,1,Mosango,2026-11-02,pmf,no invasion,0.999866
+2026-10-26,first confirmed case,1,Mpokolo,2026-11-02,pmf,invasion,0.000273
+2026-10-26,first confirmed case,1,Mpokolo,2026-11-02,pmf,no invasion,0.999727
+2026-10-26,first confirmed case,1,Muanda,2026-11-02,pmf,invasion,1e-06
+2026-10-26,first confirmed case,1,Muanda,2026-11-02,pmf,no invasion,0.999999
+2026-10-26,first confirmed case,1,Mubumbano,2026-11-02,pmf,invasion,0.000504
+2026-10-26,first confirmed case,1,Mubumbano,2026-11-02,pmf,no invasion,0.999496
+2026-10-26,first confirmed case,1,Muetshi,2026-11-02,pmf,invasion,0.000131
+2026-10-26,first confirmed case,1,Muetshi,2026-11-02,pmf,no invasion,0.999869
+2026-10-26,first confirmed case,1,Mufunga Sampwe,2026-11-02,pmf,invasion,0.000239
+2026-10-26,first confirmed case,1,Mufunga Sampwe,2026-11-02,pmf,no invasion,0.999761
+2026-10-26,first confirmed case,1,Mukanga,2026-11-02,pmf,invasion,0.000135
+2026-10-26,first confirmed case,1,Mukanga,2026-11-02,pmf,no invasion,0.999865
+2026-10-26,first confirmed case,1,Mukedi,2026-11-02,pmf,invasion,0.000211
+2026-10-26,first confirmed case,1,Mukedi,2026-11-02,pmf,no invasion,0.999789
+2026-10-26,first confirmed case,1,Mukumbi,2026-11-02,pmf,invasion,0.000345
+2026-10-26,first confirmed case,1,Mukumbi,2026-11-02,pmf,no invasion,0.999655
+2026-10-26,first confirmed case,1,Mulongo,2026-11-02,pmf,invasion,0.000124
+2026-10-26,first confirmed case,1,Mulongo,2026-11-02,pmf,no invasion,0.999876
+2026-10-26,first confirmed case,1,Mulumba,2026-11-02,pmf,invasion,0.000358
+2026-10-26,first confirmed case,1,Mulumba,2026-11-02,pmf,no invasion,0.999642
+2026-10-26,first confirmed case,1,Mulungu,2026-11-02,pmf,invasion,0.000589
+2026-10-26,first confirmed case,1,Mulungu,2026-11-02,pmf,no invasion,0.999411
+2026-10-26,first confirmed case,1,Mumbunda,2026-11-02,pmf,invasion,0.000163
+2026-10-26,first confirmed case,1,Mumbunda,2026-11-02,pmf,no invasion,0.999837
+2026-10-26,first confirmed case,1,Mungindu,2026-11-02,pmf,invasion,0.000174
+2026-10-26,first confirmed case,1,Mungindu,2026-11-02,pmf,no invasion,0.999826
+2026-10-26,first confirmed case,1,Mushenge,2026-11-02,pmf,invasion,8.3e-05
+2026-10-26,first confirmed case,1,Mushenge,2026-11-02,pmf,no invasion,0.999917
+2026-10-26,first confirmed case,1,Mushie,2026-11-02,pmf,invasion,4.8e-05
+2026-10-26,first confirmed case,1,Mushie,2026-11-02,pmf,no invasion,0.999952
+2026-10-26,first confirmed case,1,Mutena,2026-11-02,pmf,invasion,6.7e-05
+2026-10-26,first confirmed case,1,Mutena,2026-11-02,pmf,no invasion,0.999933
+2026-10-26,first confirmed case,1,Mutoto,2026-11-02,pmf,invasion,0.000195
+2026-10-26,first confirmed case,1,Mutoto,2026-11-02,pmf,no invasion,0.999805
+2026-10-26,first confirmed case,1,Mutshatsha,2026-11-02,pmf,invasion,1.1e-05
+2026-10-26,first confirmed case,1,Mutshatsha,2026-11-02,pmf,no invasion,0.999989
+2026-10-26,first confirmed case,1,Muya,2026-11-02,pmf,invasion,0.000104
+2026-10-26,first confirmed case,1,Muya,2026-11-02,pmf,no invasion,0.999896
+2026-10-26,first confirmed case,1,Mwana,2026-11-02,pmf,invasion,0.000619
+2026-10-26,first confirmed case,1,Mwana,2026-11-02,pmf,no invasion,0.999381
+2026-10-26,first confirmed case,1,Mweka,2026-11-02,pmf,invasion,0.000252
+2026-10-26,first confirmed case,1,Mweka,2026-11-02,pmf,no invasion,0.999748
+2026-10-26,first confirmed case,1,Mwela Lembwa,2026-11-02,pmf,invasion,4.1e-05
+2026-10-26,first confirmed case,1,Mwela Lembwa,2026-11-02,pmf,no invasion,0.999959
+2026-10-26,first confirmed case,1,Mweneditu,2026-11-02,pmf,invasion,0.000347
+2026-10-26,first confirmed case,1,Mweneditu,2026-11-02,pmf,no invasion,0.999653
+2026-10-26,first confirmed case,1,Mwenga,2026-11-02,pmf,invasion,0.000781
+2026-10-26,first confirmed case,1,Mwenga,2026-11-02,pmf,no invasion,0.999219
+2026-10-26,first confirmed case,1,Mweso,2026-11-02,pmf,invasion,0.001832
+2026-10-26,first confirmed case,1,Mweso,2026-11-02,pmf,no invasion,0.998168
+2026-10-26,first confirmed case,1,Ndage,2026-11-02,pmf,invasion,0.000114
+2026-10-26,first confirmed case,1,Ndage,2026-11-02,pmf,no invasion,0.999886
+2026-10-26,first confirmed case,1,Ndekesha,2026-11-02,pmf,invasion,0.00048
+2026-10-26,first confirmed case,1,Ndekesha,2026-11-02,pmf,no invasion,0.99952
+2026-10-26,first confirmed case,1,Ndesha,2026-11-02,pmf,invasion,5.3e-05
+2026-10-26,first confirmed case,1,Ndesha,2026-11-02,pmf,no invasion,0.999947
+2026-10-26,first confirmed case,1,Ndjili,2026-11-02,pmf,invasion,5e-05
+2026-10-26,first confirmed case,1,Ndjili,2026-11-02,pmf,no invasion,0.99995
+2026-10-26,first confirmed case,1,Ndjoko Mpunda,2026-11-02,pmf,invasion,0.000326
+2026-10-26,first confirmed case,1,Ndjoko Mpunda,2026-11-02,pmf,no invasion,0.999674
+2026-10-26,first confirmed case,1,Ngaba,2026-11-02,pmf,invasion,1.1e-05
+2026-10-26,first confirmed case,1,Ngaba,2026-11-02,pmf,no invasion,0.999989
+2026-10-26,first confirmed case,1,Ngandajika,2026-11-02,pmf,invasion,0.000815
+2026-10-26,first confirmed case,1,Ngandajika,2026-11-02,pmf,no invasion,0.999185
+2026-10-26,first confirmed case,1,Ngidinga,2026-11-02,pmf,invasion,3.1e-05
+2026-10-26,first confirmed case,1,Ngidinga,2026-11-02,pmf,no invasion,0.999969
+2026-10-26,first confirmed case,1,Ngiri Ngiri,2026-11-02,pmf,invasion,2.9e-05
+2026-10-26,first confirmed case,1,Ngiri Ngiri,2026-11-02,pmf,no invasion,0.999971
+2026-10-26,first confirmed case,1,Niangara,2026-11-02,pmf,invasion,0.015798
+2026-10-26,first confirmed case,1,Niangara,2026-11-02,pmf,no invasion,0.984202
+2026-10-26,first confirmed case,1,Nioki,2026-11-02,pmf,invasion,5.3e-05
+2026-10-26,first confirmed case,1,Nioki,2026-11-02,pmf,no invasion,0.999947
+2026-10-26,first confirmed case,1,Nsele,2026-11-02,pmf,invasion,0.00029
+2026-10-26,first confirmed case,1,Nsele,2026-11-02,pmf,no invasion,0.99971
+2026-10-26,first confirmed case,1,Nselo,2026-11-02,pmf,invasion,1.4e-05
+2026-10-26,first confirmed case,1,Nselo,2026-11-02,pmf,no invasion,0.999986
+2026-10-26,first confirmed case,1,Nsona Mpangu,2026-11-02,pmf,invasion,2.9e-05
+2026-10-26,first confirmed case,1,Nsona Mpangu,2026-11-02,pmf,no invasion,0.999971
+2026-10-26,first confirmed case,1,Ntandembelo,2026-11-02,pmf,invasion,4.6e-05
+2026-10-26,first confirmed case,1,Ntandembelo,2026-11-02,pmf,no invasion,0.999954
+2026-10-26,first confirmed case,1,Ntondo,2026-11-02,pmf,invasion,4.2e-05
+2026-10-26,first confirmed case,1,Ntondo,2026-11-02,pmf,no invasion,0.999958
+2026-10-26,first confirmed case,1,Nundu,2026-11-02,pmf,invasion,0.001271
+2026-10-26,first confirmed case,1,Nundu,2026-11-02,pmf,no invasion,0.998729
+2026-10-26,first confirmed case,1,Nyanga,2026-11-02,pmf,invasion,6.2e-05
+2026-10-26,first confirmed case,1,Nyanga,2026-11-02,pmf,no invasion,0.999938
+2026-10-26,first confirmed case,1,Nyangezi,2026-11-02,pmf,invasion,0.000658
+2026-10-26,first confirmed case,1,Nyangezi,2026-11-02,pmf,no invasion,0.999342
+2026-10-26,first confirmed case,1,Nyantende,2026-11-02,pmf,invasion,0.000445
+2026-10-26,first confirmed case,1,Nyantende,2026-11-02,pmf,no invasion,0.999555
+2026-10-26,first confirmed case,1,Nyarambe,2026-11-02,pmf,invasion,0.002269
+2026-10-26,first confirmed case,1,Nyarambe,2026-11-02,pmf,no invasion,0.997731
+2026-10-26,first confirmed case,1,Nyemba,2026-11-02,pmf,invasion,0.000731
+2026-10-26,first confirmed case,1,Nyemba,2026-11-02,pmf,no invasion,0.999269
+2026-10-26,first confirmed case,1,Nyiragongo,2026-11-02,pmf,invasion,0.000533
+2026-10-26,first confirmed case,1,Nyiragongo,2026-11-02,pmf,no invasion,0.999467
+2026-10-26,first confirmed case,1,Nyunzu,2026-11-02,pmf,invasion,0.000428
+2026-10-26,first confirmed case,1,Nyunzu,2026-11-02,pmf,no invasion,0.999572
+2026-10-26,first confirmed case,1,Nzaba,2026-11-02,pmf,invasion,0.000203
+2026-10-26,first confirmed case,1,Nzaba,2026-11-02,pmf,no invasion,0.999797
+2026-10-26,first confirmed case,1,Nzanza,2026-11-02,pmf,invasion,7e-06
+2026-10-26,first confirmed case,1,Nzanza,2026-11-02,pmf,no invasion,0.999993
+2026-10-26,first confirmed case,1,Obokote,2026-11-02,pmf,invasion,0.000291
+2026-10-26,first confirmed case,1,Obokote,2026-11-02,pmf,no invasion,0.999709
+2026-10-26,first confirmed case,1,Omendjadi,2026-11-02,pmf,invasion,0.000561
+2026-10-26,first confirmed case,1,Omendjadi,2026-11-02,pmf,no invasion,0.999439
+2026-10-26,first confirmed case,1,Opala,2026-11-02,pmf,invasion,0.000715
+2026-10-26,first confirmed case,1,Opala,2026-11-02,pmf,no invasion,0.999285
+2026-10-26,first confirmed case,1,Opienge,2026-11-02,pmf,invasion,0.002035
+2026-10-26,first confirmed case,1,Opienge,2026-11-02,pmf,no invasion,0.997965
+2026-10-26,first confirmed case,1,Oshwe,2026-11-02,pmf,invasion,6.5e-05
+2026-10-26,first confirmed case,1,Oshwe,2026-11-02,pmf,no invasion,0.999935
+2026-10-26,first confirmed case,1,Ototo,2026-11-02,pmf,invasion,0.000198
+2026-10-26,first confirmed case,1,Ototo,2026-11-02,pmf,no invasion,0.999802
+2026-10-26,first confirmed case,1,Panda,2026-11-02,pmf,invasion,2.1e-05
+2026-10-26,first confirmed case,1,Panda,2026-11-02,pmf,no invasion,0.999979
+2026-10-26,first confirmed case,1,Pangi,2026-11-02,pmf,invasion,0.000168
+2026-10-26,first confirmed case,1,Pangi,2026-11-02,pmf,no invasion,0.999832
+2026-10-26,first confirmed case,1,Pania Mutombo,2026-11-02,pmf,invasion,9.6e-05
+2026-10-26,first confirmed case,1,Pania Mutombo,2026-11-02,pmf,no invasion,0.999904
+2026-10-26,first confirmed case,1,Panzi,2026-11-02,pmf,invasion,8.5e-05
+2026-10-26,first confirmed case,1,Panzi,2026-11-02,pmf,no invasion,0.999915
+2026-10-26,first confirmed case,1,Pay Kongila,2026-11-02,pmf,invasion,9.2e-05
+2026-10-26,first confirmed case,1,Pay Kongila,2026-11-02,pmf,no invasion,0.999908
+2026-10-26,first confirmed case,1,Pendjwa,2026-11-02,pmf,invasion,9.8e-05
+2026-10-26,first confirmed case,1,Pendjwa,2026-11-02,pmf,no invasion,0.999902
+2026-10-26,first confirmed case,1,Pimu,2026-11-02,pmf,invasion,0.000173
+2026-10-26,first confirmed case,1,Pimu,2026-11-02,pmf,no invasion,0.999827
+2026-10-26,first confirmed case,1,Pinga,2026-11-02,pmf,invasion,0.001483
+2026-10-26,first confirmed case,1,Pinga,2026-11-02,pmf,no invasion,0.998517
+2026-10-26,first confirmed case,1,Poko,2026-11-02,pmf,invasion,0.014292
+2026-10-26,first confirmed case,1,Poko,2026-11-02,pmf,no invasion,0.985708
+2026-10-26,first confirmed case,1,Police,2026-11-02,pmf,invasion,3e-05
+2026-10-26,first confirmed case,1,Police,2026-11-02,pmf,no invasion,0.99997
+2026-10-26,first confirmed case,1,Popokabaka,2026-11-02,pmf,invasion,7.2e-05
+2026-10-26,first confirmed case,1,Popokabaka,2026-11-02,pmf,no invasion,0.999928
+2026-10-26,first confirmed case,1,Punia,2026-11-02,pmf,invasion,0.00077
+2026-10-26,first confirmed case,1,Punia,2026-11-02,pmf,no invasion,0.99923
+2026-10-26,first confirmed case,1,Pweto,2026-11-02,pmf,invasion,7.4e-05
+2026-10-26,first confirmed case,1,Pweto,2026-11-02,pmf,no invasion,0.999926
+2026-10-26,first confirmed case,1,Rethy,2026-11-02,pmf,invasion,0.038601
+2026-10-26,first confirmed case,1,Rethy,2026-11-02,pmf,no invasion,0.961399
+2026-10-26,first confirmed case,1,Ruashi,2026-11-02,pmf,invasion,3.8e-05
+2026-10-26,first confirmed case,1,Ruashi,2026-11-02,pmf,no invasion,0.999962
+2026-10-26,first confirmed case,1,Rutshuru,2026-11-02,pmf,invasion,0.001523
+2026-10-26,first confirmed case,1,Rutshuru,2026-11-02,pmf,no invasion,0.998476
+2026-10-26,first confirmed case,1,Ruzizi,2026-11-02,pmf,invasion,0.002952
+2026-10-26,first confirmed case,1,Ruzizi,2026-11-02,pmf,no invasion,0.997048
+2026-10-26,first confirmed case,1,Rwanguba,2026-11-02,pmf,invasion,0.001715
+2026-10-26,first confirmed case,1,Rwanguba,2026-11-02,pmf,no invasion,0.998285
+2026-10-26,first confirmed case,1,Sakania,2026-11-02,pmf,invasion,4.4e-05
+2026-10-26,first confirmed case,1,Sakania,2026-11-02,pmf,no invasion,0.999956
+2026-10-26,first confirmed case,1,Samba,2026-11-02,pmf,invasion,0.000389
+2026-10-26,first confirmed case,1,Samba,2026-11-02,pmf,no invasion,0.999611
+2026-10-26,first confirmed case,1,Sandoa,2026-11-02,pmf,invasion,8.5e-05
+2026-10-26,first confirmed case,1,Sandoa,2026-11-02,pmf,no invasion,0.999915
+2026-10-26,first confirmed case,1,Saramabila,2026-11-02,pmf,invasion,0.000743
+2026-10-26,first confirmed case,1,Saramabila,2026-11-02,pmf,no invasion,0.999257
+2026-10-26,first confirmed case,1,Seke Banza,2026-11-02,pmf,invasion,2.4e-05
+2026-10-26,first confirmed case,1,Seke Banza,2026-11-02,pmf,no invasion,0.999976
+2026-10-26,first confirmed case,1,Selembao,2026-11-02,pmf,invasion,5.2e-05
+2026-10-26,first confirmed case,1,Selembao,2026-11-02,pmf,no invasion,0.999948
+2026-10-26,first confirmed case,1,Shabunda,2026-11-02,pmf,invasion,0.001265
+2026-10-26,first confirmed case,1,Shabunda,2026-11-02,pmf,no invasion,0.998735
+2026-10-26,first confirmed case,1,Sia,2026-11-02,pmf,invasion,6.9e-05
+2026-10-26,first confirmed case,1,Sia,2026-11-02,pmf,no invasion,0.999931
+2026-10-26,first confirmed case,1,Sona Bata,2026-11-02,pmf,invasion,1.8e-05
+2026-10-26,first confirmed case,1,Sona Bata,2026-11-02,pmf,no invasion,0.999982
+2026-10-26,first confirmed case,1,Songa,2026-11-02,pmf,invasion,8.8e-05
+2026-10-26,first confirmed case,1,Songa,2026-11-02,pmf,no invasion,0.999912
+2026-10-26,first confirmed case,1,Tandala,2026-11-02,pmf,invasion,0.000158
+2026-10-26,first confirmed case,1,Tandala,2026-11-02,pmf,no invasion,0.999842
+2026-10-26,first confirmed case,1,Tembo,2026-11-02,pmf,invasion,3e-06
+2026-10-26,first confirmed case,1,Tembo,2026-11-02,pmf,no invasion,0.999997
+2026-10-26,first confirmed case,1,Titule,2026-11-02,pmf,invasion,0.00145
+2026-10-26,first confirmed case,1,Titule,2026-11-02,pmf,no invasion,0.99855
+2026-10-26,first confirmed case,1,Tshamilemba,2026-11-02,pmf,invasion,9.1e-05
+2026-10-26,first confirmed case,1,Tshamilemba,2026-11-02,pmf,no invasion,0.999909
+2026-10-26,first confirmed case,1,Tshela,2026-11-02,pmf,invasion,1e-06
+2026-10-26,first confirmed case,1,Tshela,2026-11-02,pmf,no invasion,0.999999
+2026-10-26,first confirmed case,1,Tshibala,2026-11-02,pmf,invasion,0.000402
+2026-10-26,first confirmed case,1,Tshibala,2026-11-02,pmf,no invasion,0.999598
+2026-10-26,first confirmed case,1,Tshikaji,2026-11-02,pmf,invasion,0.000202
+2026-10-26,first confirmed case,1,Tshikaji,2026-11-02,pmf,no invasion,0.999798
+2026-10-26,first confirmed case,1,Tshikapa,2026-11-02,pmf,invasion,0.000164
+2026-10-26,first confirmed case,1,Tshikapa,2026-11-02,pmf,no invasion,0.999836
+2026-10-26,first confirmed case,1,Tshikula,2026-11-02,pmf,invasion,0.00012
+2026-10-26,first confirmed case,1,Tshikula,2026-11-02,pmf,no invasion,0.99988
+2026-10-26,first confirmed case,1,Tshilenge,2026-11-02,pmf,invasion,0.000152
+2026-10-26,first confirmed case,1,Tshilenge,2026-11-02,pmf,no invasion,0.999848
+2026-10-26,first confirmed case,1,Tshishimbi,2026-11-02,pmf,invasion,8.5e-05
+2026-10-26,first confirmed case,1,Tshishimbi,2026-11-02,pmf,no invasion,0.999915
+2026-10-26,first confirmed case,1,Tshofa,2026-11-02,pmf,invasion,0.000789
+2026-10-26,first confirmed case,1,Tshofa,2026-11-02,pmf,no invasion,0.999211
+2026-10-26,first confirmed case,1,Tshudi Loto,2026-11-02,pmf,invasion,0.000148
+2026-10-26,first confirmed case,1,Tshudi Loto,2026-11-02,pmf,no invasion,0.999852
+2026-10-26,first confirmed case,1,Tshumbe,2026-11-02,pmf,invasion,0.000218
+2026-10-26,first confirmed case,1,Tshumbe,2026-11-02,pmf,no invasion,0.999782
+2026-10-26,first confirmed case,1,Tunda,2026-11-02,pmf,invasion,0.000158
+2026-10-26,first confirmed case,1,Tunda,2026-11-02,pmf,no invasion,0.999842
+2026-10-26,first confirmed case,1,Ubundu,2026-11-02,pmf,invasion,0.001987
+2026-10-26,first confirmed case,1,Ubundu,2026-11-02,pmf,no invasion,0.998013
+2026-10-26,first confirmed case,1,Uvira,2026-11-02,pmf,invasion,0.004841
+2026-10-26,first confirmed case,1,Uvira,2026-11-02,pmf,no invasion,0.995159
+2026-10-26,first confirmed case,1,Vaku,2026-11-02,pmf,invasion,1.1e-05
+2026-10-26,first confirmed case,1,Vaku,2026-11-02,pmf,no invasion,0.999989
+2026-10-26,first confirmed case,1,Vanga,2026-11-02,pmf,invasion,0.00021
+2026-10-26,first confirmed case,1,Vanga,2026-11-02,pmf,no invasion,0.99979
+2026-10-26,first confirmed case,1,Vanga Kete,2026-11-02,pmf,invasion,0.000234
+2026-10-26,first confirmed case,1,Vanga Kete,2026-11-02,pmf,no invasion,0.999766
+2026-10-26,first confirmed case,1,Vangu,2026-11-02,pmf,invasion,6e-06
+2026-10-26,first confirmed case,1,Vangu,2026-11-02,pmf,no invasion,0.999994
+2026-10-26,first confirmed case,1,Walikale,2026-11-02,pmf,invasion,0.002738
+2026-10-26,first confirmed case,1,Walikale,2026-11-02,pmf,no invasion,0.997262
+2026-10-26,first confirmed case,1,Walungu,2026-11-02,pmf,invasion,0.000703
+2026-10-26,first confirmed case,1,Walungu,2026-11-02,pmf,no invasion,0.999297
+2026-10-26,first confirmed case,1,Wamba Lwadi,2026-11-02,pmf,invasion,6e-05
+2026-10-26,first confirmed case,1,Wamba Lwadi,2026-11-02,pmf,no invasion,0.99994
+2026-10-26,first confirmed case,1,Wangata,2026-11-02,pmf,invasion,0.000116
+2026-10-26,first confirmed case,1,Wangata,2026-11-02,pmf,no invasion,0.999884
+2026-10-26,first confirmed case,1,Wasolo,2026-11-02,pmf,invasion,0.013333
+2026-10-26,first confirmed case,1,Wasolo,2026-11-02,pmf,no invasion,0.986667
+2026-10-26,first confirmed case,1,Watsa,2026-11-02,pmf,invasion,0.02146
+2026-10-26,first confirmed case,1,Watsa,2026-11-02,pmf,no invasion,0.97854
+2026-10-26,first confirmed case,1,Wema,2026-11-02,pmf,invasion,6.6e-05
+2026-10-26,first confirmed case,1,Wema,2026-11-02,pmf,no invasion,0.999934
+2026-10-26,first confirmed case,1,Wembo Nyama,2026-11-02,pmf,invasion,0.000175
+2026-10-26,first confirmed case,1,Wembo Nyama,2026-11-02,pmf,no invasion,0.999825
+2026-10-26,first confirmed case,1,Wikong,2026-11-02,pmf,invasion,0.000115
+2026-10-26,first confirmed case,1,Wikong,2026-11-02,pmf,no invasion,0.999885
+2026-10-26,first confirmed case,1,Yabaondo,2026-11-02,pmf,invasion,0.002036
+2026-10-26,first confirmed case,1,Yabaondo,2026-11-02,pmf,no invasion,0.997964
+2026-10-26,first confirmed case,1,Yahisuli,2026-11-02,pmf,invasion,0.001012
+2026-10-26,first confirmed case,1,Yahisuli,2026-11-02,pmf,no invasion,0.998988
+2026-10-26,first confirmed case,1,Yahuma,2026-11-02,pmf,invasion,0.000846
+2026-10-26,first confirmed case,1,Yahuma,2026-11-02,pmf,no invasion,0.999154
+2026-10-26,first confirmed case,1,Yakoma,2026-11-02,pmf,invasion,0.008229
+2026-10-26,first confirmed case,1,Yakoma,2026-11-02,pmf,no invasion,0.991771
+2026-10-26,first confirmed case,1,Yakusu,2026-11-02,pmf,invasion,0.01539
+2026-10-26,first confirmed case,1,Yakusu,2026-11-02,pmf,no invasion,0.98461
+2026-10-26,first confirmed case,1,Yaleko,2026-11-02,pmf,invasion,0.001617
+2026-10-26,first confirmed case,1,Yaleko,2026-11-02,pmf,no invasion,0.998383
+2026-10-26,first confirmed case,1,Yalifafu,2026-11-02,pmf,invasion,0.000588
+2026-10-26,first confirmed case,1,Yalifafu,2026-11-02,pmf,no invasion,0.999412
+2026-10-26,first confirmed case,1,Yalimbongo,2026-11-02,pmf,invasion,0.000429
+2026-10-26,first confirmed case,1,Yalimbongo,2026-11-02,pmf,no invasion,0.999571
+2026-10-26,first confirmed case,1,Yamaluka,2026-11-02,pmf,invasion,0.00045
+2026-10-26,first confirmed case,1,Yamaluka,2026-11-02,pmf,no invasion,0.99955
+2026-10-26,first confirmed case,1,Yambuku,2026-11-02,pmf,invasion,0.001426
+2026-10-26,first confirmed case,1,Yambuku,2026-11-02,pmf,no invasion,0.998574
+2026-10-26,first confirmed case,1,Yamongili,2026-11-02,pmf,invasion,0.000408
+2026-10-26,first confirmed case,1,Yamongili,2026-11-02,pmf,no invasion,0.999592
+2026-10-26,first confirmed case,1,Yangala,2026-11-02,pmf,invasion,0.000356
+2026-10-26,first confirmed case,1,Yangala,2026-11-02,pmf,no invasion,0.999644
+2026-10-26,first confirmed case,1,Yasa Bonga,2026-11-02,pmf,invasion,0.000147
+2026-10-26,first confirmed case,1,Yasa Bonga,2026-11-02,pmf,no invasion,0.999853
+2026-10-26,first confirmed case,1,Yumbi,2026-11-02,pmf,invasion,2.6e-05
+2026-10-26,first confirmed case,1,Yumbi,2026-11-02,pmf,no invasion,0.999974
+2026-10-26,first confirmed case,1,Zongo,2026-11-02,pmf,invasion,1.9e-05
+2026-10-26,first confirmed case,1,Zongo,2026-11-02,pmf,no invasion,0.999981
+2026-10-26,first confirmed case,2,Aba,2026-11-09,pmf,invasion,0.014716
+2026-10-26,first confirmed case,2,Aba,2026-11-09,pmf,no invasion,0.985284
+2026-10-26,first confirmed case,2,Abuzi,2026-11-09,pmf,invasion,0.002952
+2026-10-26,first confirmed case,2,Abuzi,2026-11-09,pmf,no invasion,0.997048
+2026-10-26,first confirmed case,2,Adi,2026-11-09,pmf,invasion,0.025004
+2026-10-26,first confirmed case,2,Adi,2026-11-09,pmf,no invasion,0.974996
+2026-10-26,first confirmed case,2,Aketi,2026-11-09,pmf,invasion,0.001995
+2026-10-26,first confirmed case,2,Aketi,2026-11-09,pmf,no invasion,0.998005
+2026-10-26,first confirmed case,2,Alunguli,2026-11-09,pmf,invasion,0.001036
+2026-10-26,first confirmed case,2,Alunguli,2026-11-09,pmf,no invasion,0.998964
+2026-10-26,first confirmed case,2,Angumu,2026-11-09,pmf,invasion,0.00314
+2026-10-26,first confirmed case,2,Angumu,2026-11-09,pmf,no invasion,0.99686
+2026-10-26,first confirmed case,2,Ankoro,2026-11-09,pmf,invasion,0.000458
+2026-10-26,first confirmed case,2,Ankoro,2026-11-09,pmf,no invasion,0.999542
+2026-10-26,first confirmed case,2,Bafwagbogbo,2026-11-09,pmf,invasion,0.011347
+2026-10-26,first confirmed case,2,Bafwagbogbo,2026-11-09,pmf,no invasion,0.988653
+2026-10-26,first confirmed case,2,Bagata,2026-11-09,pmf,invasion,0.000234
+2026-10-26,first confirmed case,2,Bagata,2026-11-09,pmf,no invasion,0.999766
+2026-10-26,first confirmed case,2,Bagira,2026-11-09,pmf,invasion,0.001477
+2026-10-26,first confirmed case,2,Bagira,2026-11-09,pmf,no invasion,0.998523
+2026-10-26,first confirmed case,2,Baka,2026-11-09,pmf,invasion,5.2e-05
+2026-10-26,first confirmed case,2,Baka,2026-11-09,pmf,no invasion,0.999948
+2026-10-26,first confirmed case,2,Bambo,2026-11-09,pmf,invasion,0.002044
+2026-10-26,first confirmed case,2,Bambo,2026-11-09,pmf,no invasion,0.997956
+2026-10-26,first confirmed case,2,Banalia,2026-11-09,pmf,invasion,0.017379
+2026-10-26,first confirmed case,2,Banalia,2026-11-09,pmf,no invasion,0.982621
+2026-10-26,first confirmed case,2,Bandalungwa,2026-11-09,pmf,invasion,0.000126
+2026-10-26,first confirmed case,2,Bandalungwa,2026-11-09,pmf,no invasion,0.999874
+2026-10-26,first confirmed case,2,Bandundu,2026-11-09,pmf,invasion,0.00011
+2026-10-26,first confirmed case,2,Bandundu,2026-11-09,pmf,no invasion,0.99989
+2026-10-26,first confirmed case,2,Banga Lubaka,2026-11-09,pmf,invasion,0.000128
+2026-10-26,first confirmed case,2,Banga Lubaka,2026-11-09,pmf,no invasion,0.999872
+2026-10-26,first confirmed case,2,Bangabola,2026-11-09,pmf,invasion,0.000168
+2026-10-26,first confirmed case,2,Bangabola,2026-11-09,pmf,no invasion,0.999832
+2026-10-26,first confirmed case,2,Banzow Moke,2026-11-09,pmf,invasion,0.000117
+2026-10-26,first confirmed case,2,Banzow Moke,2026-11-09,pmf,no invasion,0.999883
+2026-10-26,first confirmed case,2,Barumbu,2026-11-09,pmf,invasion,0.000129
+2026-10-26,first confirmed case,2,Barumbu,2026-11-09,pmf,no invasion,0.999871
+2026-10-26,first confirmed case,2,Basali,2026-11-09,pmf,invasion,0.001958
+2026-10-26,first confirmed case,2,Basali,2026-11-09,pmf,no invasion,0.998042
+2026-10-26,first confirmed case,2,Basankusu,2026-11-09,pmf,invasion,0.00033
+2026-10-26,first confirmed case,2,Basankusu,2026-11-09,pmf,no invasion,0.99967
+2026-10-26,first confirmed case,2,Basoko,2026-11-09,pmf,invasion,0.002204
+2026-10-26,first confirmed case,2,Basoko,2026-11-09,pmf,no invasion,0.997796
+2026-10-26,first confirmed case,2,Befale,2026-11-09,pmf,invasion,0.000342
+2026-10-26,first confirmed case,2,Befale,2026-11-09,pmf,no invasion,0.999658
+2026-10-26,first confirmed case,2,Bena Dibele,2026-11-09,pmf,invasion,0.000312
+2026-10-26,first confirmed case,2,Bena Dibele,2026-11-09,pmf,no invasion,0.999688
+2026-10-26,first confirmed case,2,Bena Leka,2026-11-09,pmf,invasion,0.000526
+2026-10-26,first confirmed case,2,Bena Leka,2026-11-09,pmf,no invasion,0.999474
+2026-10-26,first confirmed case,2,Bena Tshadi,2026-11-09,pmf,invasion,0.000168
+2026-10-26,first confirmed case,2,Bena Tshadi,2026-11-09,pmf,no invasion,0.999832
+2026-10-26,first confirmed case,2,Bengamisa,2026-11-09,pmf,invasion,0.008099
+2026-10-26,first confirmed case,2,Bengamisa,2026-11-09,pmf,no invasion,0.991901
+2026-10-26,first confirmed case,2,Bibanga,2026-11-09,pmf,invasion,0.000353
+2026-10-26,first confirmed case,2,Bibanga,2026-11-09,pmf,no invasion,0.999647
+2026-10-26,first confirmed case,2,Bikoro,2026-11-09,pmf,invasion,0.000158
+2026-10-26,first confirmed case,2,Bikoro,2026-11-09,pmf,no invasion,0.999842
+2026-10-26,first confirmed case,2,Bili (Bas-Uele),2026-11-09,pmf,invasion,0.001106
+2026-10-26,first confirmed case,2,Bili (Bas-Uele),2026-11-09,pmf,no invasion,0.998894
+2026-10-26,first confirmed case,2,Bili (Nord-Ubangi),2026-11-09,pmf,invasion,0.000851
+2026-10-26,first confirmed case,2,Bili (Nord-Ubangi),2026-11-09,pmf,no invasion,0.999149
+2026-10-26,first confirmed case,2,Bilomba,2026-11-09,pmf,invasion,0.000753
+2026-10-26,first confirmed case,2,Bilomba,2026-11-09,pmf,no invasion,0.999247
+2026-10-26,first confirmed case,2,Binga,2026-11-09,pmf,invasion,0.000353
+2026-10-26,first confirmed case,2,Binga,2026-11-09,pmf,no invasion,0.999647
+2026-10-26,first confirmed case,2,Binza,2026-11-09,pmf,invasion,0.001476
+2026-10-26,first confirmed case,2,Binza,2026-11-09,pmf,no invasion,0.998524
+2026-10-26,first confirmed case,2,Binza Meteo,2026-11-09,pmf,invasion,0.000177
+2026-10-26,first confirmed case,2,Binza Meteo,2026-11-09,pmf,no invasion,0.999823
+2026-10-26,first confirmed case,2,Binza Ozone,2026-11-09,pmf,invasion,0.000386
+2026-10-26,first confirmed case,2,Binza Ozone,2026-11-09,pmf,no invasion,0.999614
+2026-10-26,first confirmed case,2,Bipemba,2026-11-09,pmf,invasion,0.000312
+2026-10-26,first confirmed case,2,Bipemba,2026-11-09,pmf,no invasion,0.999688
+2026-10-26,first confirmed case,2,Birambizo,2026-11-09,pmf,invasion,0.001009
+2026-10-26,first confirmed case,2,Birambizo,2026-11-09,pmf,no invasion,0.998991
+2026-10-26,first confirmed case,2,Biringi,2026-11-09,pmf,invasion,0.03593
+2026-10-26,first confirmed case,2,Biringi,2026-11-09,pmf,no invasion,0.96407
+2026-10-26,first confirmed case,2,Biyela,2026-11-09,pmf,invasion,4.8e-05
+2026-10-26,first confirmed case,2,Biyela,2026-11-09,pmf,no invasion,0.999952
+2026-10-26,first confirmed case,2,Bobozo,2026-11-09,pmf,invasion,0.000139
+2026-10-26,first confirmed case,2,Bobozo,2026-11-09,pmf,no invasion,0.999861
+2026-10-26,first confirmed case,2,Boende,2026-11-09,pmf,invasion,0.000509
+2026-10-26,first confirmed case,2,Boende,2026-11-09,pmf,no invasion,0.999491
+2026-10-26,first confirmed case,2,Bogosenubea,2026-11-09,pmf,invasion,0.000321
+2026-10-26,first confirmed case,2,Bogosenubea,2026-11-09,pmf,no invasion,0.999679
+2026-10-26,first confirmed case,2,Boko,2026-11-09,pmf,invasion,0.000313
+2026-10-26,first confirmed case,2,Boko,2026-11-09,pmf,no invasion,0.999687
+2026-10-26,first confirmed case,2,Boko Kivulu,2026-11-09,pmf,invasion,7.6e-05
+2026-10-26,first confirmed case,2,Boko Kivulu,2026-11-09,pmf,no invasion,0.999924
+2026-10-26,first confirmed case,2,Bokonzi,2026-11-09,pmf,invasion,0.000132
+2026-10-26,first confirmed case,2,Bokonzi,2026-11-09,pmf,no invasion,0.999868
+2026-10-26,first confirmed case,2,Bokoro,2026-11-09,pmf,invasion,0.000456
+2026-10-26,first confirmed case,2,Bokoro,2026-11-09,pmf,no invasion,0.999544
+2026-10-26,first confirmed case,2,Bokungu,2026-11-09,pmf,invasion,0.001315
+2026-10-26,first confirmed case,2,Bokungu,2026-11-09,pmf,no invasion,0.998685
+2026-10-26,first confirmed case,2,Bolenge,2026-11-09,pmf,invasion,0.00016
+2026-10-26,first confirmed case,2,Bolenge,2026-11-09,pmf,no invasion,0.99984
+2026-10-26,first confirmed case,2,Bolobo,2026-11-09,pmf,invasion,9.3e-05
+2026-10-26,first confirmed case,2,Bolobo,2026-11-09,pmf,no invasion,0.999907
+2026-10-26,first confirmed case,2,Bolomba,2026-11-09,pmf,invasion,0.000314
+2026-10-26,first confirmed case,2,Bolomba,2026-11-09,pmf,no invasion,0.999686
+2026-10-26,first confirmed case,2,Boma,2026-11-09,pmf,invasion,3.2e-05
+2026-10-26,first confirmed case,2,Boma,2026-11-09,pmf,no invasion,0.999968
+2026-10-26,first confirmed case,2,Boma Bungu,2026-11-09,pmf,invasion,2.1e-05
+2026-10-26,first confirmed case,2,Boma Bungu,2026-11-09,pmf,no invasion,0.999979
+2026-10-26,first confirmed case,2,Bominenge,2026-11-09,pmf,invasion,0.000378
+2026-10-26,first confirmed case,2,Bominenge,2026-11-09,pmf,no invasion,0.999622
+2026-10-26,first confirmed case,2,Bomongo,2026-11-09,pmf,invasion,5.9e-05
+2026-10-26,first confirmed case,2,Bomongo,2026-11-09,pmf,no invasion,0.999941
+2026-10-26,first confirmed case,2,Bondo,2026-11-09,pmf,invasion,0.004417
+2026-10-26,first confirmed case,2,Bondo,2026-11-09,pmf,no invasion,0.995583
+2026-10-26,first confirmed case,2,Bongandanga,2026-11-09,pmf,invasion,0.000508
+2026-10-26,first confirmed case,2,Bongandanga,2026-11-09,pmf,no invasion,0.999492
+2026-10-26,first confirmed case,2,Bonzola,2026-11-09,pmf,invasion,0.000653
+2026-10-26,first confirmed case,2,Bonzola,2026-11-09,pmf,no invasion,0.999347
+2026-10-26,first confirmed case,2,Boso Manzi,2026-11-09,pmf,invasion,0.000353
+2026-10-26,first confirmed case,2,Boso Manzi,2026-11-09,pmf,no invasion,0.999647
+2026-10-26,first confirmed case,2,Boso Mondanda,2026-11-09,pmf,invasion,0.000229
+2026-10-26,first confirmed case,2,Boso Mondanda,2026-11-09,pmf,no invasion,0.999771
+2026-10-26,first confirmed case,2,Bosobe,2026-11-09,pmf,invasion,0.000118
+2026-10-26,first confirmed case,2,Bosobe,2026-11-09,pmf,no invasion,0.999882
+2026-10-26,first confirmed case,2,Bosobolo,2026-11-09,pmf,invasion,0.000429
+2026-10-26,first confirmed case,2,Bosobolo,2026-11-09,pmf,no invasion,0.999571
+2026-10-26,first confirmed case,2,Bosondjo,2026-11-09,pmf,invasion,0.000465
+2026-10-26,first confirmed case,2,Bosondjo,2026-11-09,pmf,no invasion,0.999535
+2026-10-26,first confirmed case,2,Boto,2026-11-09,pmf,invasion,0.000184
+2026-10-26,first confirmed case,2,Boto,2026-11-09,pmf,no invasion,0.999816
+2026-10-26,first confirmed case,2,Budjala,2026-11-09,pmf,invasion,0.000316
+2026-10-26,first confirmed case,2,Budjala,2026-11-09,pmf,no invasion,0.999684
+2026-10-26,first confirmed case,2,Bukama,2026-11-09,pmf,invasion,0.000318
+2026-10-26,first confirmed case,2,Bukama,2026-11-09,pmf,no invasion,0.999682
+2026-10-26,first confirmed case,2,Bulape,2026-11-09,pmf,invasion,0.000472
+2026-10-26,first confirmed case,2,Bulape,2026-11-09,pmf,no invasion,0.999528
+2026-10-26,first confirmed case,2,Bulungu,2026-11-09,pmf,invasion,0.00052
+2026-10-26,first confirmed case,2,Bulungu,2026-11-09,pmf,no invasion,0.99948
+2026-10-26,first confirmed case,2,Bumba,2026-11-09,pmf,invasion,0.001339
+2026-10-26,first confirmed case,2,Bumba,2026-11-09,pmf,no invasion,0.998661
+2026-10-26,first confirmed case,2,Bumbu,2026-11-09,pmf,invasion,2.4e-05
+2026-10-26,first confirmed case,2,Bumbu,2026-11-09,pmf,no invasion,0.999976
+2026-10-26,first confirmed case,2,Bunkeya,2026-11-09,pmf,invasion,4.4e-05
+2026-10-26,first confirmed case,2,Bunkeya,2026-11-09,pmf,no invasion,0.999956
+2026-10-26,first confirmed case,2,Bunkonde,2026-11-09,pmf,invasion,0.000563
+2026-10-26,first confirmed case,2,Bunkonde,2026-11-09,pmf,no invasion,0.999437
+2026-10-26,first confirmed case,2,Bunyakiri,2026-11-09,pmf,invasion,0.001452
+2026-10-26,first confirmed case,2,Bunyakiri,2026-11-09,pmf,no invasion,0.998548
+2026-10-26,first confirmed case,2,Busanga,2026-11-09,pmf,invasion,0.000197
+2026-10-26,first confirmed case,2,Busanga,2026-11-09,pmf,no invasion,0.999803
+2026-10-26,first confirmed case,2,Businga,2026-11-09,pmf,invasion,0.00054
+2026-10-26,first confirmed case,2,Businga,2026-11-09,pmf,no invasion,0.99946
+2026-10-26,first confirmed case,2,Butumba,2026-11-09,pmf,invasion,0.000295
+2026-10-26,first confirmed case,2,Butumba,2026-11-09,pmf,no invasion,0.999705
+2026-10-26,first confirmed case,2,Bwamanda,2026-11-09,pmf,invasion,0.00041
+2026-10-26,first confirmed case,2,Bwamanda,2026-11-09,pmf,no invasion,0.99959
+2026-10-26,first confirmed case,2,Cilundu,2026-11-09,pmf,invasion,0.000809
+2026-10-26,first confirmed case,2,Cilundu,2026-11-09,pmf,no invasion,0.999191
+2026-10-26,first confirmed case,2,Citenge,2026-11-09,pmf,invasion,0.000277
+2026-10-26,first confirmed case,2,Citenge,2026-11-09,pmf,no invasion,0.999723
+2026-10-26,first confirmed case,2,Dekese,2026-11-09,pmf,invasion,0.000218
+2026-10-26,first confirmed case,2,Dekese,2026-11-09,pmf,no invasion,0.999782
+2026-10-26,first confirmed case,2,Demba,2026-11-09,pmf,invasion,0.000456
+2026-10-26,first confirmed case,2,Demba,2026-11-09,pmf,no invasion,0.999544
+2026-10-26,first confirmed case,2,Dibaya,2026-11-09,pmf,invasion,0.001058
+2026-10-26,first confirmed case,2,Dibaya,2026-11-09,pmf,no invasion,0.998942
+2026-10-26,first confirmed case,2,Dibindi,2026-11-09,pmf,invasion,0.000248
+2026-10-26,first confirmed case,2,Dibindi,2026-11-09,pmf,no invasion,0.999752
+2026-10-26,first confirmed case,2,Dikungu,2026-11-09,pmf,invasion,0.000538
+2026-10-26,first confirmed case,2,Dikungu,2026-11-09,pmf,no invasion,0.999462
+2026-10-26,first confirmed case,2,Dilala,2026-11-09,pmf,invasion,0.000107
+2026-10-26,first confirmed case,2,Dilala,2026-11-09,pmf,no invasion,0.999893
+2026-10-26,first confirmed case,2,Dilolo,2026-11-09,pmf,invasion,6e-06
+2026-10-26,first confirmed case,2,Dilolo,2026-11-09,pmf,no invasion,0.999994
+2026-10-26,first confirmed case,2,Diulu,2026-11-09,pmf,invasion,0.000383
+2026-10-26,first confirmed case,2,Diulu,2026-11-09,pmf,no invasion,0.999617
+2026-10-26,first confirmed case,2,Djalo Ndjeka,2026-11-09,pmf,invasion,0.000295
+2026-10-26,first confirmed case,2,Djalo Ndjeka,2026-11-09,pmf,no invasion,0.999705
+2026-10-26,first confirmed case,2,Djolu,2026-11-09,pmf,invasion,0.002467
+2026-10-26,first confirmed case,2,Djolu,2026-11-09,pmf,no invasion,0.997533
+2026-10-26,first confirmed case,2,Djombo,2026-11-09,pmf,invasion,0.000338
+2026-10-26,first confirmed case,2,Djombo,2026-11-09,pmf,no invasion,0.999662
+2026-10-26,first confirmed case,2,Djuma,2026-11-09,pmf,invasion,0.000331
+2026-10-26,first confirmed case,2,Djuma,2026-11-09,pmf,no invasion,0.999669
+2026-10-26,first confirmed case,2,Doruma,2026-11-09,pmf,invasion,0.004102
+2026-10-26,first confirmed case,2,Doruma,2026-11-09,pmf,no invasion,0.995898
+2026-10-26,first confirmed case,2,Faradje,2026-11-09,pmf,invasion,0.0066
+2026-10-26,first confirmed case,2,Faradje,2026-11-09,pmf,no invasion,0.9934
+2026-10-26,first confirmed case,2,Ferekeni,2026-11-09,pmf,invasion,0.000599
+2026-10-26,first confirmed case,2,Ferekeni,2026-11-09,pmf,no invasion,0.999401
+2026-10-26,first confirmed case,2,Feshi,2026-11-09,pmf,invasion,0.000222
+2026-10-26,first confirmed case,2,Feshi,2026-11-09,pmf,no invasion,0.999778
+2026-10-26,first confirmed case,2,Fizi,2026-11-09,pmf,invasion,0.003414
+2026-10-26,first confirmed case,2,Fizi,2026-11-09,pmf,no invasion,0.996586
+2026-10-26,first confirmed case,2,Fungurume,2026-11-09,pmf,invasion,0.00016
+2026-10-26,first confirmed case,2,Fungurume,2026-11-09,pmf,no invasion,0.99984
+2026-10-26,first confirmed case,2,Gbadolite,2026-11-09,pmf,invasion,0.000266
+2026-10-26,first confirmed case,2,Gbadolite,2026-11-09,pmf,no invasion,0.999734
+2026-10-26,first confirmed case,2,Gemena,2026-11-09,pmf,invasion,0.000884
+2026-10-26,first confirmed case,2,Gemena,2026-11-09,pmf,no invasion,0.999116
+2026-10-26,first confirmed case,2,Gombe,2026-11-09,pmf,invasion,0.000561
+2026-10-26,first confirmed case,2,Gombe,2026-11-09,pmf,no invasion,0.999439
+2026-10-26,first confirmed case,2,Gombe Matadi,2026-11-09,pmf,invasion,9.9e-05
+2026-10-26,first confirmed case,2,Gombe Matadi,2026-11-09,pmf,no invasion,0.999901
+2026-10-26,first confirmed case,2,Gungu,2026-11-09,pmf,invasion,0.000321
+2026-10-26,first confirmed case,2,Gungu,2026-11-09,pmf,no invasion,0.999679
+2026-10-26,first confirmed case,2,Haut Plateau,2026-11-09,pmf,invasion,0.000872
+2026-10-26,first confirmed case,2,Haut Plateau,2026-11-09,pmf,no invasion,0.999128
+2026-10-26,first confirmed case,2,Ibanda,2026-11-09,pmf,invasion,0.004689
+2026-10-26,first confirmed case,2,Ibanda,2026-11-09,pmf,no invasion,0.995311
+2026-10-26,first confirmed case,2,Iboko,2026-11-09,pmf,invasion,0.000306
+2026-10-26,first confirmed case,2,Iboko,2026-11-09,pmf,no invasion,0.999694
+2026-10-26,first confirmed case,2,Idiofa,2026-11-09,pmf,invasion,0.000785
+2026-10-26,first confirmed case,2,Idiofa,2026-11-09,pmf,no invasion,0.999215
+2026-10-26,first confirmed case,2,Idjwi,2026-11-09,pmf,invasion,0.000402
+2026-10-26,first confirmed case,2,Idjwi,2026-11-09,pmf,no invasion,0.999598
+2026-10-26,first confirmed case,2,Ikela,2026-11-09,pmf,invasion,0.00186
+2026-10-26,first confirmed case,2,Ikela,2026-11-09,pmf,no invasion,0.99814
+2026-10-26,first confirmed case,2,Ilebo,2026-11-09,pmf,invasion,0.000228
+2026-10-26,first confirmed case,2,Ilebo,2026-11-09,pmf,no invasion,0.999772
+2026-10-26,first confirmed case,2,Inga,2026-11-09,pmf,invasion,3.9e-05
+2026-10-26,first confirmed case,2,Inga,2026-11-09,pmf,no invasion,0.999961
+2026-10-26,first confirmed case,2,Ingende,2026-11-09,pmf,invasion,0.000197
+2026-10-26,first confirmed case,2,Ingende,2026-11-09,pmf,no invasion,0.999803
+2026-10-26,first confirmed case,2,Inongo,2026-11-09,pmf,invasion,0.000194
+2026-10-26,first confirmed case,2,Inongo,2026-11-09,pmf,no invasion,0.999806
+2026-10-26,first confirmed case,2,Ipamu,2026-11-09,pmf,invasion,0.000374
+2026-10-26,first confirmed case,2,Ipamu,2026-11-09,pmf,no invasion,0.999626
+2026-10-26,first confirmed case,2,Irebu,2026-11-09,pmf,invasion,9.6e-05
+2026-10-26,first confirmed case,2,Irebu,2026-11-09,pmf,no invasion,0.999904
+2026-10-26,first confirmed case,2,Isangi,2026-11-09,pmf,invasion,0.009576
+2026-10-26,first confirmed case,2,Isangi,2026-11-09,pmf,no invasion,0.990424
+2026-10-26,first confirmed case,2,Itebero,2026-11-09,pmf,invasion,0.001455
+2026-10-26,first confirmed case,2,Itebero,2026-11-09,pmf,no invasion,0.998545
+2026-10-26,first confirmed case,2,Itombwe,2026-11-09,pmf,invasion,0.00039
+2026-10-26,first confirmed case,2,Itombwe,2026-11-09,pmf,no invasion,0.99961
+2026-10-26,first confirmed case,2,Jiba,2026-11-09,pmf,invasion,0.041254
+2026-10-26,first confirmed case,2,Jiba,2026-11-09,pmf,no invasion,0.958746
+2026-10-26,first confirmed case,2,Kabalo,2026-11-09,pmf,invasion,0.001325
+2026-10-26,first confirmed case,2,Kabalo,2026-11-09,pmf,no invasion,0.998675
+2026-10-26,first confirmed case,2,Kabambare,2026-11-09,pmf,invasion,0.000621
+2026-10-26,first confirmed case,2,Kabambare,2026-11-09,pmf,no invasion,0.999379
+2026-10-26,first confirmed case,2,Kabare,2026-11-09,pmf,invasion,0.001535
+2026-10-26,first confirmed case,2,Kabare,2026-11-09,pmf,no invasion,0.998465
+2026-10-26,first confirmed case,2,Kabeya Kamwanga,2026-11-09,pmf,invasion,0.000568
+2026-10-26,first confirmed case,2,Kabeya Kamwanga,2026-11-09,pmf,no invasion,0.999432
+2026-10-26,first confirmed case,2,Kabinda,2026-11-09,pmf,invasion,0.001667
+2026-10-26,first confirmed case,2,Kabinda,2026-11-09,pmf,no invasion,0.998333
+2026-10-26,first confirmed case,2,Kabondo Dianda,2026-11-09,pmf,invasion,0.000289
+2026-10-26,first confirmed case,2,Kabondo Dianda,2026-11-09,pmf,no invasion,0.999711
+2026-10-26,first confirmed case,2,Kabongo,2026-11-09,pmf,invasion,0.000772
+2026-10-26,first confirmed case,2,Kabongo,2026-11-09,pmf,no invasion,0.999228
+2026-10-26,first confirmed case,2,Kadutu,2026-11-09,pmf,invasion,0.003227
+2026-10-26,first confirmed case,2,Kadutu,2026-11-09,pmf,no invasion,0.996773
+2026-10-26,first confirmed case,2,Kafakumba,2026-11-09,pmf,invasion,0.000427
+2026-10-26,first confirmed case,2,Kafakumba,2026-11-09,pmf,no invasion,0.999573
+2026-10-26,first confirmed case,2,Kafubu,2026-11-09,pmf,invasion,8.1e-05
+2026-10-26,first confirmed case,2,Kafubu,2026-11-09,pmf,no invasion,0.999919
+2026-10-26,first confirmed case,2,Kahemba,2026-11-09,pmf,invasion,0.00015
+2026-10-26,first confirmed case,2,Kahemba,2026-11-09,pmf,no invasion,0.99985
+2026-10-26,first confirmed case,2,Kailo,2026-11-09,pmf,invasion,0.001273
+2026-10-26,first confirmed case,2,Kailo,2026-11-09,pmf,no invasion,0.998727
+2026-10-26,first confirmed case,2,Kajiji,2026-11-09,pmf,invasion,5.9e-05
+2026-10-26,first confirmed case,2,Kajiji,2026-11-09,pmf,no invasion,0.999941
+2026-10-26,first confirmed case,2,Kakenge,2026-11-09,pmf,invasion,0.000295
+2026-10-26,first confirmed case,2,Kakenge,2026-11-09,pmf,no invasion,0.999705
+2026-10-26,first confirmed case,2,Kalamba,2026-11-09,pmf,invasion,0.000196
+2026-10-26,first confirmed case,2,Kalamba,2026-11-09,pmf,no invasion,0.999804
+2026-10-26,first confirmed case,2,Kalambayi Kabanga,2026-11-09,pmf,invasion,0.000487
+2026-10-26,first confirmed case,2,Kalambayi Kabanga,2026-11-09,pmf,no invasion,0.999513
+2026-10-26,first confirmed case,2,Kalamu 1,2026-11-09,pmf,invasion,0.000192
+2026-10-26,first confirmed case,2,Kalamu 1,2026-11-09,pmf,no invasion,0.999808
+2026-10-26,first confirmed case,2,Kalamu 2,2026-11-09,pmf,invasion,4.5e-05
+2026-10-26,first confirmed case,2,Kalamu 2,2026-11-09,pmf,no invasion,0.999955
+2026-10-26,first confirmed case,2,Kalehe,2026-11-09,pmf,invasion,0.000958
+2026-10-26,first confirmed case,2,Kalehe,2026-11-09,pmf,no invasion,0.999042
+2026-10-26,first confirmed case,2,Kalemie,2026-11-09,pmf,invasion,0.001204
+2026-10-26,first confirmed case,2,Kalemie,2026-11-09,pmf,no invasion,0.998796
+2026-10-26,first confirmed case,2,Kalenda,2026-11-09,pmf,invasion,0.000493
+2026-10-26,first confirmed case,2,Kalenda,2026-11-09,pmf,no invasion,0.999507
+2026-10-26,first confirmed case,2,Kalima,2026-11-09,pmf,invasion,0.001536
+2026-10-26,first confirmed case,2,Kalima,2026-11-09,pmf,no invasion,0.998464
+2026-10-26,first confirmed case,2,Kalole,2026-11-09,pmf,invasion,0.001329
+2026-10-26,first confirmed case,2,Kalole,2026-11-09,pmf,no invasion,0.998671
+2026-10-26,first confirmed case,2,Kalomba,2026-11-09,pmf,invasion,0.000431
+2026-10-26,first confirmed case,2,Kalomba,2026-11-09,pmf,no invasion,0.999569
+2026-10-26,first confirmed case,2,Kalonda Est,2026-11-09,pmf,invasion,0.000385
+2026-10-26,first confirmed case,2,Kalonda Est,2026-11-09,pmf,no invasion,0.999615
+2026-10-26,first confirmed case,2,Kalonda Ouest,2026-11-09,pmf,invasion,0.000329
+2026-10-26,first confirmed case,2,Kalonda Ouest,2026-11-09,pmf,no invasion,0.999671
+2026-10-26,first confirmed case,2,Kalonge,2026-11-09,pmf,invasion,0.000658
+2026-10-26,first confirmed case,2,Kalonge,2026-11-09,pmf,no invasion,0.999342
+2026-10-26,first confirmed case,2,Kamalondo,2026-11-09,pmf,invasion,6.8e-05
+2026-10-26,first confirmed case,2,Kamalondo,2026-11-09,pmf,no invasion,0.999932
+2026-10-26,first confirmed case,2,Kamana,2026-11-09,pmf,invasion,0.000518
+2026-10-26,first confirmed case,2,Kamana,2026-11-09,pmf,no invasion,0.999482
+2026-10-26,first confirmed case,2,Kamango,2026-11-09,pmf,invasion,0.006377
+2026-10-26,first confirmed case,2,Kamango,2026-11-09,pmf,no invasion,0.993623
+2026-10-26,first confirmed case,2,Kambove,2026-11-09,pmf,invasion,9.9e-05
+2026-10-26,first confirmed case,2,Kambove,2026-11-09,pmf,no invasion,0.999901
+2026-10-26,first confirmed case,2,Kamiji,2026-11-09,pmf,invasion,0.000587
+2026-10-26,first confirmed case,2,Kamiji,2026-11-09,pmf,no invasion,0.999413
+2026-10-26,first confirmed case,2,Kamina,2026-11-09,pmf,invasion,0.000463
+2026-10-26,first confirmed case,2,Kamina,2026-11-09,pmf,no invasion,0.999537
+2026-10-26,first confirmed case,2,Kamituga,2026-11-09,pmf,invasion,0.000888
+2026-10-26,first confirmed case,2,Kamituga,2026-11-09,pmf,no invasion,0.999112
+2026-10-26,first confirmed case,2,Kamonia,2026-11-09,pmf,invasion,2.9e-05
+2026-10-26,first confirmed case,2,Kamonia,2026-11-09,pmf,no invasion,0.999971
+2026-10-26,first confirmed case,2,Kampemba,2026-11-09,pmf,invasion,0.000135
+2026-10-26,first confirmed case,2,Kampemba,2026-11-09,pmf,no invasion,0.999865
+2026-10-26,first confirmed case,2,Kampene,2026-11-09,pmf,invasion,0.001337
+2026-10-26,first confirmed case,2,Kampene,2026-11-09,pmf,no invasion,0.998663
+2026-10-26,first confirmed case,2,Kamwesha,2026-11-09,pmf,invasion,0.000468
+2026-10-26,first confirmed case,2,Kamwesha,2026-11-09,pmf,no invasion,0.999532
+2026-10-26,first confirmed case,2,Kananga,2026-11-09,pmf,invasion,0.000884
+2026-10-26,first confirmed case,2,Kananga,2026-11-09,pmf,no invasion,0.999116
+2026-10-26,first confirmed case,2,Kanda Kanda,2026-11-09,pmf,invasion,0.000619
+2026-10-26,first confirmed case,2,Kanda Kanda,2026-11-09,pmf,no invasion,0.999381
+2026-10-26,first confirmed case,2,Kangu,2026-11-09,pmf,invasion,3.1e-05
+2026-10-26,first confirmed case,2,Kangu,2026-11-09,pmf,no invasion,0.999969
+2026-10-26,first confirmed case,2,Kaniama,2026-11-09,pmf,invasion,0.000732
+2026-10-26,first confirmed case,2,Kaniama,2026-11-09,pmf,no invasion,0.999268
+2026-10-26,first confirmed case,2,Kaniola,2026-11-09,pmf,invasion,0.001149
+2026-10-26,first confirmed case,2,Kaniola,2026-11-09,pmf,no invasion,0.998851
+2026-10-26,first confirmed case,2,Kansele,2026-11-09,pmf,invasion,0.000258
+2026-10-26,first confirmed case,2,Kansele,2026-11-09,pmf,no invasion,0.999742
+2026-10-26,first confirmed case,2,Kansimba,2026-11-09,pmf,invasion,0.000443
+2026-10-26,first confirmed case,2,Kansimba,2026-11-09,pmf,no invasion,0.999557
+2026-10-26,first confirmed case,2,Kanzala,2026-11-09,pmf,invasion,0.000366
+2026-10-26,first confirmed case,2,Kanzala,2026-11-09,pmf,no invasion,0.999634
+2026-10-26,first confirmed case,2,Kanzenze,2026-11-09,pmf,invasion,5.3e-05
+2026-10-26,first confirmed case,2,Kanzenze,2026-11-09,pmf,no invasion,0.999947
+2026-10-26,first confirmed case,2,Kapanga,2026-11-09,pmf,invasion,0.00017
+2026-10-26,first confirmed case,2,Kapanga,2026-11-09,pmf,no invasion,0.99983
+2026-10-26,first confirmed case,2,Kapolowe,2026-11-09,pmf,invasion,0.000109
+2026-10-26,first confirmed case,2,Kapolowe,2026-11-09,pmf,no invasion,0.999891
+2026-10-26,first confirmed case,2,Karawa,2026-11-09,pmf,invasion,0.000535
+2026-10-26,first confirmed case,2,Karawa,2026-11-09,pmf,no invasion,0.999465
+2026-10-26,first confirmed case,2,Karisimbi,2026-11-09,pmf,invasion,0.001522
+2026-10-26,first confirmed case,2,Karisimbi,2026-11-09,pmf,no invasion,0.998478
+2026-10-26,first confirmed case,2,Kasa Vubu,2026-11-09,pmf,invasion,0.000204
+2026-10-26,first confirmed case,2,Kasa Vubu,2026-11-09,pmf,no invasion,0.999796
+2026-10-26,first confirmed case,2,Kasaji,2026-11-09,pmf,invasion,0.00024
+2026-10-26,first confirmed case,2,Kasaji,2026-11-09,pmf,no invasion,0.99976
+2026-10-26,first confirmed case,2,Kasansa,2026-11-09,pmf,invasion,0.000688
+2026-10-26,first confirmed case,2,Kasansa,2026-11-09,pmf,no invasion,0.999312
+2026-10-26,first confirmed case,2,Kasenga,2026-11-09,pmf,invasion,4.4e-05
+2026-10-26,first confirmed case,2,Kasenga,2026-11-09,pmf,no invasion,0.999956
+2026-10-26,first confirmed case,2,Kashobwe,2026-11-09,pmf,invasion,2.1e-05
+2026-10-26,first confirmed case,2,Kashobwe,2026-11-09,pmf,no invasion,0.999979
+2026-10-26,first confirmed case,2,Kasongo,2026-11-09,pmf,invasion,0.002854
+2026-10-26,first confirmed case,2,Kasongo,2026-11-09,pmf,no invasion,0.997146
+2026-10-26,first confirmed case,2,Kasongo Lunda,2026-11-09,pmf,invasion,2.9e-05
+2026-10-26,first confirmed case,2,Kasongo Lunda,2026-11-09,pmf,no invasion,0.999971
+2026-10-26,first confirmed case,2,Katako Kombe,2026-11-09,pmf,invasion,0.000598
+2026-10-26,first confirmed case,2,Katako Kombe,2026-11-09,pmf,no invasion,0.999402
+2026-10-26,first confirmed case,2,Katana,2026-11-09,pmf,invasion,0.001259
+2026-10-26,first confirmed case,2,Katana,2026-11-09,pmf,no invasion,0.998741
+2026-10-26,first confirmed case,2,Katende,2026-11-09,pmf,invasion,0.000446
+2026-10-26,first confirmed case,2,Katende,2026-11-09,pmf,no invasion,0.999554
+2026-10-26,first confirmed case,2,Katoka,2026-11-09,pmf,invasion,0.000416
+2026-10-26,first confirmed case,2,Katoka,2026-11-09,pmf,no invasion,0.999584
+2026-10-26,first confirmed case,2,Katoyi,2026-11-09,pmf,invasion,0.00369
+2026-10-26,first confirmed case,2,Katoyi,2026-11-09,pmf,no invasion,0.99631
+2026-10-26,first confirmed case,2,Katuba,2026-11-09,pmf,invasion,2.1e-05
+2026-10-26,first confirmed case,2,Katuba,2026-11-09,pmf,no invasion,0.999979
+2026-10-26,first confirmed case,2,Kayamba,2026-11-09,pmf,invasion,0.00018
+2026-10-26,first confirmed case,2,Kayamba,2026-11-09,pmf,no invasion,0.99982
+2026-10-26,first confirmed case,2,Kaziba,2026-11-09,pmf,invasion,0.000679
+2026-10-26,first confirmed case,2,Kaziba,2026-11-09,pmf,no invasion,0.999321
+2026-10-26,first confirmed case,2,Kenge,2026-11-09,pmf,invasion,0.000647
+2026-10-26,first confirmed case,2,Kenge,2026-11-09,pmf,no invasion,0.999353
+2026-10-26,first confirmed case,2,Kenya,2026-11-09,pmf,invasion,0.000105
+2026-10-26,first confirmed case,2,Kenya,2026-11-09,pmf,no invasion,0.999895
+2026-10-26,first confirmed case,2,Kiambi,2026-11-09,pmf,invasion,0.000466
+2026-10-26,first confirmed case,2,Kiambi,2026-11-09,pmf,no invasion,0.999534
+2026-10-26,first confirmed case,2,Kibirizi,2026-11-09,pmf,invasion,0.009655
+2026-10-26,first confirmed case,2,Kibirizi,2026-11-09,pmf,no invasion,0.990345
+2026-10-26,first confirmed case,2,Kibombo,2026-11-09,pmf,invasion,0.000698
+2026-10-26,first confirmed case,2,Kibombo,2026-11-09,pmf,no invasion,0.999302
+2026-10-26,first confirmed case,2,Kibua,2026-11-09,pmf,invasion,0.002191
+2026-10-26,first confirmed case,2,Kibua,2026-11-09,pmf,no invasion,0.997809
+2026-10-26,first confirmed case,2,Kibunzi,2026-11-09,pmf,invasion,2.9e-05
+2026-10-26,first confirmed case,2,Kibunzi,2026-11-09,pmf,no invasion,0.999971
+2026-10-26,first confirmed case,2,Kikimi,2026-11-09,pmf,invasion,0.000142
+2026-10-26,first confirmed case,2,Kikimi,2026-11-09,pmf,no invasion,0.999858
+2026-10-26,first confirmed case,2,Kikongo,2026-11-09,pmf,invasion,0.000217
+2026-10-26,first confirmed case,2,Kikongo,2026-11-09,pmf,no invasion,0.999783
+2026-10-26,first confirmed case,2,Kikula,2026-11-09,pmf,invasion,4.7e-05
+2026-10-26,first confirmed case,2,Kikula,2026-11-09,pmf,no invasion,0.999953
+2026-10-26,first confirmed case,2,Kikwit Nord,2026-11-09,pmf,invasion,0.000508
+2026-10-26,first confirmed case,2,Kikwit Nord,2026-11-09,pmf,no invasion,0.999492
+2026-10-26,first confirmed case,2,Kikwit Sud,2026-11-09,pmf,invasion,0.000344
+2026-10-26,first confirmed case,2,Kikwit Sud,2026-11-09,pmf,no invasion,0.999656
+2026-10-26,first confirmed case,2,Kilela Balanda,2026-11-09,pmf,invasion,2.3e-05
+2026-10-26,first confirmed case,2,Kilela Balanda,2026-11-09,pmf,no invasion,0.999977
+2026-10-26,first confirmed case,2,Kilwa,2026-11-09,pmf,invasion,0.000187
+2026-10-26,first confirmed case,2,Kilwa,2026-11-09,pmf,no invasion,0.999813
+2026-10-26,first confirmed case,2,Kimbanseke,2026-11-09,pmf,invasion,3.1e-05
+2026-10-26,first confirmed case,2,Kimbanseke,2026-11-09,pmf,no invasion,0.999969
+2026-10-26,first confirmed case,2,Kimbao,2026-11-09,pmf,invasion,0.000186
+2026-10-26,first confirmed case,2,Kimbao,2026-11-09,pmf,no invasion,0.999814
+2026-10-26,first confirmed case,2,Kimbi Lulenge,2026-11-09,pmf,invasion,0.0012
+2026-10-26,first confirmed case,2,Kimbi Lulenge,2026-11-09,pmf,no invasion,0.9988
+2026-10-26,first confirmed case,2,Kimpangu,2026-11-09,pmf,invasion,1.9e-05
+2026-10-26,first confirmed case,2,Kimpangu,2026-11-09,pmf,no invasion,0.999981
+2026-10-26,first confirmed case,2,Kimpese,2026-11-09,pmf,invasion,0.000109
+2026-10-26,first confirmed case,2,Kimpese,2026-11-09,pmf,no invasion,0.999891
+2026-10-26,first confirmed case,2,Kimputu,2026-11-09,pmf,invasion,0.000611
+2026-10-26,first confirmed case,2,Kimputu,2026-11-09,pmf,no invasion,0.999389
+2026-10-26,first confirmed case,2,Kimvula,2026-11-09,pmf,invasion,0.000219
+2026-10-26,first confirmed case,2,Kimvula,2026-11-09,pmf,no invasion,0.999781
+2026-10-26,first confirmed case,2,Kinda,2026-11-09,pmf,invasion,8.7e-05
+2026-10-26,first confirmed case,2,Kinda,2026-11-09,pmf,no invasion,0.999913
+2026-10-26,first confirmed case,2,Kindu,2026-11-09,pmf,invasion,0.007543
+2026-10-26,first confirmed case,2,Kindu,2026-11-09,pmf,no invasion,0.992457
+2026-10-26,first confirmed case,2,Kingabwa,2026-11-09,pmf,invasion,0.000112
+2026-10-26,first confirmed case,2,Kingabwa,2026-11-09,pmf,no invasion,0.999888
+2026-10-26,first confirmed case,2,Kingandu,2026-11-09,pmf,invasion,0.000134
+2026-10-26,first confirmed case,2,Kingandu,2026-11-09,pmf,no invasion,0.999866
+2026-10-26,first confirmed case,2,Kingasani,2026-11-09,pmf,invasion,7.2e-05
+2026-10-26,first confirmed case,2,Kingasani,2026-11-09,pmf,no invasion,0.999928
+2026-10-26,first confirmed case,2,Kinkondja,2026-11-09,pmf,invasion,0.000254
+2026-10-26,first confirmed case,2,Kinkondja,2026-11-09,pmf,no invasion,0.999746
+2026-10-26,first confirmed case,2,Kinkonzi,2026-11-09,pmf,invasion,1.8e-05
+2026-10-26,first confirmed case,2,Kinkonzi,2026-11-09,pmf,no invasion,0.999982
+2026-10-26,first confirmed case,2,Kinshasa,2026-11-09,pmf,invasion,0.00022
+2026-10-26,first confirmed case,2,Kinshasa,2026-11-09,pmf,no invasion,0.99978
+2026-10-26,first confirmed case,2,Kintambo,2026-11-09,pmf,invasion,0.000198
+2026-10-26,first confirmed case,2,Kintambo,2026-11-09,pmf,no invasion,0.999802
+2026-10-26,first confirmed case,2,Kipushi,2026-11-09,pmf,invasion,7.6e-05
+2026-10-26,first confirmed case,2,Kipushi,2026-11-09,pmf,no invasion,0.999924
+2026-10-26,first confirmed case,2,Kiri,2026-11-09,pmf,invasion,0.000112
+2026-10-26,first confirmed case,2,Kiri,2026-11-09,pmf,no invasion,0.999888
+2026-10-26,first confirmed case,2,Kirotshe,2026-11-09,pmf,invasion,0.004316
+2026-10-26,first confirmed case,2,Kirotshe,2026-11-09,pmf,no invasion,0.995684
+2026-10-26,first confirmed case,2,Kisanga,2026-11-09,pmf,invasion,6.9e-05
+2026-10-26,first confirmed case,2,Kisanga,2026-11-09,pmf,no invasion,0.999931
+2026-10-26,first confirmed case,2,Kisanji,2026-11-09,pmf,invasion,0.000122
+2026-10-26,first confirmed case,2,Kisanji,2026-11-09,pmf,no invasion,0.999878
+2026-10-26,first confirmed case,2,Kisantu,2026-11-09,pmf,invasion,0.000102
+2026-10-26,first confirmed case,2,Kisantu,2026-11-09,pmf,no invasion,0.999898
+2026-10-26,first confirmed case,2,Kisenso,2026-11-09,pmf,invasion,6.2e-05
+2026-10-26,first confirmed case,2,Kisenso,2026-11-09,pmf,no invasion,0.999938
+2026-10-26,first confirmed case,2,Kitangwa,2026-11-09,pmf,invasion,0.000516
+2026-10-26,first confirmed case,2,Kitangwa,2026-11-09,pmf,no invasion,0.999484
+2026-10-26,first confirmed case,2,Kitenda,2026-11-09,pmf,invasion,4.9e-05
+2026-10-26,first confirmed case,2,Kitenda,2026-11-09,pmf,no invasion,0.999951
+2026-10-26,first confirmed case,2,Kitenge,2026-11-09,pmf,invasion,0.000683
+2026-10-26,first confirmed case,2,Kitenge,2026-11-09,pmf,no invasion,0.999317
+2026-10-26,first confirmed case,2,Kitona,2026-11-09,pmf,invasion,1e-06
+2026-10-26,first confirmed case,2,Kitona,2026-11-09,pmf,no invasion,0.999999
+2026-10-26,first confirmed case,2,Kitutu,2026-11-09,pmf,invasion,0.000875
+2026-10-26,first confirmed case,2,Kitutu,2026-11-09,pmf,no invasion,0.999125
+2026-10-26,first confirmed case,2,Kizu,2026-11-09,pmf,invasion,9e-06
+2026-10-26,first confirmed case,2,Kizu,2026-11-09,pmf,no invasion,0.999991
+2026-10-26,first confirmed case,2,Kokolo,2026-11-09,pmf,invasion,0.000267
+2026-10-26,first confirmed case,2,Kokolo,2026-11-09,pmf,no invasion,0.999733
+2026-10-26,first confirmed case,2,Kole,2026-11-09,pmf,invasion,0.000299
+2026-10-26,first confirmed case,2,Kole,2026-11-09,pmf,no invasion,0.999701
+2026-10-26,first confirmed case,2,Kongolo,2026-11-09,pmf,invasion,0.00186
+2026-10-26,first confirmed case,2,Kongolo,2026-11-09,pmf,no invasion,0.99814
+2026-10-26,first confirmed case,2,Koshibanda,2026-11-09,pmf,invasion,0.00044
+2026-10-26,first confirmed case,2,Koshibanda,2026-11-09,pmf,no invasion,0.99956
+2026-10-26,first confirmed case,2,Kowe,2026-11-09,pmf,invasion,1e-05
+2026-10-26,first confirmed case,2,Kowe,2026-11-09,pmf,no invasion,0.99999
+2026-10-26,first confirmed case,2,Kuimba,2026-11-09,pmf,invasion,2e-06
+2026-10-26,first confirmed case,2,Kuimba,2026-11-09,pmf,no invasion,0.999998
+2026-10-26,first confirmed case,2,Kunda,2026-11-09,pmf,invasion,0.001949
+2026-10-26,first confirmed case,2,Kunda,2026-11-09,pmf,no invasion,0.998051
+2026-10-26,first confirmed case,2,Kungu,2026-11-09,pmf,invasion,0.000235
+2026-10-26,first confirmed case,2,Kungu,2026-11-09,pmf,no invasion,0.999765
+2026-10-26,first confirmed case,2,Kwamouth,2026-11-09,pmf,invasion,0.000108
+2026-10-26,first confirmed case,2,Kwamouth,2026-11-09,pmf,no invasion,0.999892
+2026-10-26,first confirmed case,2,Kwilu Ngongo,2026-11-09,pmf,invasion,8e-05
+2026-10-26,first confirmed case,2,Kwilu Ngongo,2026-11-09,pmf,no invasion,0.99992
+2026-10-26,first confirmed case,2,Laybo,2026-11-09,pmf,invasion,0.017765
+2026-10-26,first confirmed case,2,Laybo,2026-11-09,pmf,no invasion,0.982235
+2026-10-26,first confirmed case,2,Lemba,2026-11-09,pmf,invasion,0.000311
+2026-10-26,first confirmed case,2,Lemba,2026-11-09,pmf,no invasion,0.999689
+2026-10-26,first confirmed case,2,Lemera,2026-11-09,pmf,invasion,0.00375
+2026-10-26,first confirmed case,2,Lemera,2026-11-09,pmf,no invasion,0.99625
+2026-10-26,first confirmed case,2,Libenge,2026-11-09,pmf,invasion,0.000252
+2026-10-26,first confirmed case,2,Libenge,2026-11-09,pmf,no invasion,0.999748
+2026-10-26,first confirmed case,2,Likasi,2026-11-09,pmf,invasion,7.4e-05
+2026-10-26,first confirmed case,2,Likasi,2026-11-09,pmf,no invasion,0.999926
+2026-10-26,first confirmed case,2,Likati,2026-11-09,pmf,invasion,0.001518
+2026-10-26,first confirmed case,2,Likati,2026-11-09,pmf,no invasion,0.998482
+2026-10-26,first confirmed case,2,Lilanga Bobangi,2026-11-09,pmf,invasion,1.5e-05
+2026-10-26,first confirmed case,2,Lilanga Bobangi,2026-11-09,pmf,no invasion,0.999985
+2026-10-26,first confirmed case,2,Limete,2026-11-09,pmf,invasion,0.000422
+2026-10-26,first confirmed case,2,Limete,2026-11-09,pmf,no invasion,0.999578
+2026-10-26,first confirmed case,2,Linga,2026-11-09,pmf,invasion,0.034601
+2026-10-26,first confirmed case,2,Linga,2026-11-09,pmf,no invasion,0.965399
+2026-10-26,first confirmed case,2,Lingomo,2026-11-09,pmf,invasion,0.001246
+2026-10-26,first confirmed case,2,Lingomo,2026-11-09,pmf,no invasion,0.998754
+2026-10-26,first confirmed case,2,Lingwala,2026-11-09,pmf,invasion,0.000282
+2026-10-26,first confirmed case,2,Lingwala,2026-11-09,pmf,no invasion,0.999718
+2026-10-26,first confirmed case,2,Lisala,2026-11-09,pmf,invasion,0.001778
+2026-10-26,first confirmed case,2,Lisala,2026-11-09,pmf,no invasion,0.998222
+2026-10-26,first confirmed case,2,Lodja,2026-11-09,pmf,invasion,0.001469
+2026-10-26,first confirmed case,2,Lodja,2026-11-09,pmf,no invasion,0.998531
+2026-10-26,first confirmed case,2,Loko,2026-11-09,pmf,invasion,0.000299
+2026-10-26,first confirmed case,2,Loko,2026-11-09,pmf,no invasion,0.999701
+2026-10-26,first confirmed case,2,Lolo,2026-11-09,pmf,invasion,0.001194
+2026-10-26,first confirmed case,2,Lolo,2026-11-09,pmf,no invasion,0.998806
+2026-10-26,first confirmed case,2,Lomela,2026-11-09,pmf,invasion,0.000485
+2026-10-26,first confirmed case,2,Lomela,2026-11-09,pmf,no invasion,0.999515
+2026-10-26,first confirmed case,2,Lotumbe,2026-11-09,pmf,invasion,0.00012
+2026-10-26,first confirmed case,2,Lotumbe,2026-11-09,pmf,no invasion,0.99988
+2026-10-26,first confirmed case,2,Lowa,2026-11-09,pmf,invasion,0.001608
+2026-10-26,first confirmed case,2,Lowa,2026-11-09,pmf,no invasion,0.998392
+2026-10-26,first confirmed case,2,Lualaba,2026-11-09,pmf,invasion,0.000189
+2026-10-26,first confirmed case,2,Lualaba,2026-11-09,pmf,no invasion,0.999811
+2026-10-26,first confirmed case,2,Luambo,2026-11-09,pmf,invasion,0.000246
+2026-10-26,first confirmed case,2,Luambo,2026-11-09,pmf,no invasion,0.999754
+2026-10-26,first confirmed case,2,Lubao,2026-11-09,pmf,invasion,0.002254
+2026-10-26,first confirmed case,2,Lubao,2026-11-09,pmf,no invasion,0.997746
+2026-10-26,first confirmed case,2,Lubilanji,2026-11-09,pmf,invasion,0.000247
+2026-10-26,first confirmed case,2,Lubilanji,2026-11-09,pmf,no invasion,0.999753
+2026-10-26,first confirmed case,2,Lubondaie,2026-11-09,pmf,invasion,0.000652
+2026-10-26,first confirmed case,2,Lubondaie,2026-11-09,pmf,no invasion,0.999348
+2026-10-26,first confirmed case,2,Lubudi,2026-11-09,pmf,invasion,0.000139
+2026-10-26,first confirmed case,2,Lubudi,2026-11-09,pmf,no invasion,0.999861
+2026-10-26,first confirmed case,2,Lubumbashi,2026-11-09,pmf,invasion,0.000525
+2026-10-26,first confirmed case,2,Lubumbashi,2026-11-09,pmf,no invasion,0.999475
+2026-10-26,first confirmed case,2,Lubunga (Kasaï-Central),2026-11-09,pmf,invasion,0.000729
+2026-10-26,first confirmed case,2,Lubunga (Kasaï-Central),2026-11-09,pmf,no invasion,0.999271
+2026-10-26,first confirmed case,2,Lubutu,2026-11-09,pmf,invasion,0.005297
+2026-10-26,first confirmed case,2,Lubutu,2026-11-09,pmf,no invasion,0.994703
+2026-10-26,first confirmed case,2,Ludimbi Lukula,2026-11-09,pmf,invasion,0.001756
+2026-10-26,first confirmed case,2,Ludimbi Lukula,2026-11-09,pmf,no invasion,0.998244
+2026-10-26,first confirmed case,2,Luebo,2026-11-09,pmf,invasion,0.000605
+2026-10-26,first confirmed case,2,Luebo,2026-11-09,pmf,no invasion,0.999395
+2026-10-26,first confirmed case,2,Luiza,2026-11-09,pmf,invasion,0.0005
+2026-10-26,first confirmed case,2,Luiza,2026-11-09,pmf,no invasion,0.9995
+2026-10-26,first confirmed case,2,Lukafu,2026-11-09,pmf,invasion,8.7e-05
+2026-10-26,first confirmed case,2,Lukafu,2026-11-09,pmf,no invasion,0.999913
+2026-10-26,first confirmed case,2,Lukelenge,2026-11-09,pmf,invasion,0.000316
+2026-10-26,first confirmed case,2,Lukelenge,2026-11-09,pmf,no invasion,0.999684
+2026-10-26,first confirmed case,2,Lukolela,2026-11-09,pmf,invasion,0.0001
+2026-10-26,first confirmed case,2,Lukolela,2026-11-09,pmf,no invasion,0.9999
+2026-10-26,first confirmed case,2,Lukonga,2026-11-09,pmf,invasion,0.000468
+2026-10-26,first confirmed case,2,Lukonga,2026-11-09,pmf,no invasion,0.999532
+2026-10-26,first confirmed case,2,Lukula,2026-11-09,pmf,invasion,5.5e-05
+2026-10-26,first confirmed case,2,Lukula,2026-11-09,pmf,no invasion,0.999945
+2026-10-26,first confirmed case,2,Lulingu,2026-11-09,pmf,invasion,0.001493
+2026-10-26,first confirmed case,2,Lulingu,2026-11-09,pmf,no invasion,0.998507
+2026-10-26,first confirmed case,2,Luozi,2026-11-09,pmf,invasion,0.00021
+2026-10-26,first confirmed case,2,Luozi,2026-11-09,pmf,no invasion,0.99979
+2026-10-26,first confirmed case,2,Luputa,2026-11-09,pmf,invasion,0.000926
+2026-10-26,first confirmed case,2,Luputa,2026-11-09,pmf,no invasion,0.999074
+2026-10-26,first confirmed case,2,Lusambo,2026-11-09,pmf,invasion,0.000367
+2026-10-26,first confirmed case,2,Lusambo,2026-11-09,pmf,no invasion,0.999633
+2026-10-26,first confirmed case,2,Lusanga,2026-11-09,pmf,invasion,0.000533
+2026-10-26,first confirmed case,2,Lusanga,2026-11-09,pmf,no invasion,0.999467
+2026-10-26,first confirmed case,2,Lusangi,2026-11-09,pmf,invasion,0.000981
+2026-10-26,first confirmed case,2,Lusangi,2026-11-09,pmf,no invasion,0.999019
+2026-10-26,first confirmed case,2,Lwamba,2026-11-09,pmf,invasion,0.000455
+2026-10-26,first confirmed case,2,Lwamba,2026-11-09,pmf,no invasion,0.999545
+2026-10-26,first confirmed case,2,Makala,2026-11-09,pmf,invasion,4.6e-05
+2026-10-26,first confirmed case,2,Makala,2026-11-09,pmf,no invasion,0.999954
+2026-10-26,first confirmed case,2,Makanza,2026-11-09,pmf,invasion,0.000359
+2026-10-26,first confirmed case,2,Makanza,2026-11-09,pmf,no invasion,0.999641
+2026-10-26,first confirmed case,2,Makoro,2026-11-09,pmf,invasion,0.019572
+2026-10-26,first confirmed case,2,Makoro,2026-11-09,pmf,no invasion,0.980428
+2026-10-26,first confirmed case,2,Makota,2026-11-09,pmf,invasion,0.000349
+2026-10-26,first confirmed case,2,Makota,2026-11-09,pmf,no invasion,0.999651
+2026-10-26,first confirmed case,2,Malemba Nkulu,2026-11-09,pmf,invasion,0.000444
+2026-10-26,first confirmed case,2,Malemba Nkulu,2026-11-09,pmf,no invasion,0.999556
+2026-10-26,first confirmed case,2,Maluku 1,2026-11-09,pmf,invasion,0.00021
+2026-10-26,first confirmed case,2,Maluku 1,2026-11-09,pmf,no invasion,0.99979
+2026-10-26,first confirmed case,2,Maluku 2,2026-11-09,pmf,invasion,0.00023
+2026-10-26,first confirmed case,2,Maluku 2,2026-11-09,pmf,no invasion,0.99977
+2026-10-26,first confirmed case,2,Mampoko,2026-11-09,pmf,invasion,0.000109
+2026-10-26,first confirmed case,2,Mampoko,2026-11-09,pmf,no invasion,0.999891
+2026-10-26,first confirmed case,2,Mangembo,2026-11-09,pmf,invasion,8.6e-05
+2026-10-26,first confirmed case,2,Mangembo,2026-11-09,pmf,no invasion,0.999914
+2026-10-26,first confirmed case,2,Manika,2026-11-09,pmf,invasion,0.000247
+2026-10-26,first confirmed case,2,Manika,2026-11-09,pmf,no invasion,0.999753
+2026-10-26,first confirmed case,2,Manono,2026-11-09,pmf,invasion,0.000717
+2026-10-26,first confirmed case,2,Manono,2026-11-09,pmf,no invasion,0.999283
+2026-10-26,first confirmed case,2,Masi Manimba,2026-11-09,pmf,invasion,0.000398
+2026-10-26,first confirmed case,2,Masi Manimba,2026-11-09,pmf,no invasion,0.999602
+2026-10-26,first confirmed case,2,Masina 1,2026-11-09,pmf,invasion,0.000191
+2026-10-26,first confirmed case,2,Masina 1,2026-11-09,pmf,no invasion,0.999809
+2026-10-26,first confirmed case,2,Masina 2,2026-11-09,pmf,invasion,0.000116
+2026-10-26,first confirmed case,2,Masina 2,2026-11-09,pmf,no invasion,0.999884
+2026-10-26,first confirmed case,2,Masisi,2026-11-09,pmf,invasion,0.005687
+2026-10-26,first confirmed case,2,Masisi,2026-11-09,pmf,no invasion,0.994313
+2026-10-26,first confirmed case,2,Massa,2026-11-09,pmf,invasion,4.6e-05
+2026-10-26,first confirmed case,2,Massa,2026-11-09,pmf,no invasion,0.999954
+2026-10-26,first confirmed case,2,Masuika,2026-11-09,pmf,invasion,0.001391
+2026-10-26,first confirmed case,2,Masuika,2026-11-09,pmf,no invasion,0.998609
+2026-10-26,first confirmed case,2,Matadi,2026-11-09,pmf,invasion,6.6e-05
+2026-10-26,first confirmed case,2,Matadi,2026-11-09,pmf,no invasion,0.999934
+2026-10-26,first confirmed case,2,Matete,2026-11-09,pmf,invasion,0.000162
+2026-10-26,first confirmed case,2,Matete,2026-11-09,pmf,no invasion,0.999838
+2026-10-26,first confirmed case,2,Mawuya,2026-11-09,pmf,invasion,0.000187
+2026-10-26,first confirmed case,2,Mawuya,2026-11-09,pmf,no invasion,0.999813
+2026-10-26,first confirmed case,2,Mbandaka,2026-11-09,pmf,invasion,0.000279
+2026-10-26,first confirmed case,2,Mbandaka,2026-11-09,pmf,no invasion,0.999721
+2026-10-26,first confirmed case,2,Mbanza Ngungu,2026-11-09,pmf,invasion,8.5e-05
+2026-10-26,first confirmed case,2,Mbanza Ngungu,2026-11-09,pmf,no invasion,0.999915
+2026-10-26,first confirmed case,2,Mbaya,2026-11-09,pmf,invasion,0.000303
+2026-10-26,first confirmed case,2,Mbaya,2026-11-09,pmf,no invasion,0.999697
+2026-10-26,first confirmed case,2,Mbulula,2026-11-09,pmf,invasion,0.001356
+2026-10-26,first confirmed case,2,Mbulula,2026-11-09,pmf,no invasion,0.998644
+2026-10-26,first confirmed case,2,Miabi,2026-11-09,pmf,invasion,0.000196
+2026-10-26,first confirmed case,2,Miabi,2026-11-09,pmf,no invasion,0.999804
+2026-10-26,first confirmed case,2,Mikalayi,2026-11-09,pmf,invasion,0.000569
+2026-10-26,first confirmed case,2,Mikalayi,2026-11-09,pmf,no invasion,0.999431
+2026-10-26,first confirmed case,2,Mikope,2026-11-09,pmf,invasion,0.000244
+2026-10-26,first confirmed case,2,Mikope,2026-11-09,pmf,no invasion,0.999756
+2026-10-26,first confirmed case,2,Mimia,2026-11-09,pmf,invasion,8.1e-05
+2026-10-26,first confirmed case,2,Mimia,2026-11-09,pmf,no invasion,0.999919
+2026-10-26,first confirmed case,2,Minembwe,2026-11-09,pmf,invasion,0.001811
+2026-10-26,first confirmed case,2,Minembwe,2026-11-09,pmf,no invasion,0.998189
+2026-10-26,first confirmed case,2,Minga,2026-11-09,pmf,invasion,0.0005
+2026-10-26,first confirmed case,2,Minga,2026-11-09,pmf,no invasion,0.9995
+2026-10-26,first confirmed case,2,Minova,2026-11-09,pmf,invasion,0.002001
+2026-10-26,first confirmed case,2,Minova,2026-11-09,pmf,no invasion,0.997999
+2026-10-26,first confirmed case,2,Mitwaba,2026-11-09,pmf,invasion,0.000146
+2026-10-26,first confirmed case,2,Mitwaba,2026-11-09,pmf,no invasion,0.999854
+2026-10-26,first confirmed case,2,Moanza,2026-11-09,pmf,invasion,0.000368
+2026-10-26,first confirmed case,2,Moanza,2026-11-09,pmf,no invasion,0.999632
+2026-10-26,first confirmed case,2,Moba,2026-11-09,pmf,invasion,0.0006
+2026-10-26,first confirmed case,2,Moba,2026-11-09,pmf,no invasion,0.9994
+2026-10-26,first confirmed case,2,Mobayi Mbongo,2026-11-09,pmf,invasion,0.001166
+2026-10-26,first confirmed case,2,Mobayi Mbongo,2026-11-09,pmf,no invasion,0.998834
+2026-10-26,first confirmed case,2,Mokala,2026-11-09,pmf,invasion,0.00028
+2026-10-26,first confirmed case,2,Mokala,2026-11-09,pmf,no invasion,0.99972
+2026-10-26,first confirmed case,2,Mompono,2026-11-09,pmf,invasion,0.001025
+2026-10-26,first confirmed case,2,Mompono,2026-11-09,pmf,no invasion,0.998975
+2026-10-26,first confirmed case,2,Mondombe,2026-11-09,pmf,invasion,0.000692
+2026-10-26,first confirmed case,2,Mondombe,2026-11-09,pmf,no invasion,0.999308
+2026-10-26,first confirmed case,2,Monga,2026-11-09,pmf,invasion,0.004491
+2026-10-26,first confirmed case,2,Monga,2026-11-09,pmf,no invasion,0.995509
+2026-10-26,first confirmed case,2,Monieka,2026-11-09,pmf,invasion,0.000105
+2026-10-26,first confirmed case,2,Monieka,2026-11-09,pmf,no invasion,0.999895
+2026-10-26,first confirmed case,2,Monkoto,2026-11-09,pmf,invasion,0.000229
+2026-10-26,first confirmed case,2,Monkoto,2026-11-09,pmf,no invasion,0.999771
+2026-10-26,first confirmed case,2,Mont Ngafula 1,2026-11-09,pmf,invasion,0.000184
+2026-10-26,first confirmed case,2,Mont Ngafula 1,2026-11-09,pmf,no invasion,0.999816
+2026-10-26,first confirmed case,2,Mont Ngafula 2,2026-11-09,pmf,invasion,0.00013
+2026-10-26,first confirmed case,2,Mont Ngafula 2,2026-11-09,pmf,no invasion,0.99987
+2026-10-26,first confirmed case,2,Mosango,2026-11-09,pmf,invasion,0.000328
+2026-10-26,first confirmed case,2,Mosango,2026-11-09,pmf,no invasion,0.999672
+2026-10-26,first confirmed case,2,Mpokolo,2026-11-09,pmf,invasion,0.000648
+2026-10-26,first confirmed case,2,Mpokolo,2026-11-09,pmf,no invasion,0.999352
+2026-10-26,first confirmed case,2,Muanda,2026-11-09,pmf,invasion,2e-06
+2026-10-26,first confirmed case,2,Muanda,2026-11-09,pmf,no invasion,0.999998
+2026-10-26,first confirmed case,2,Mubumbano,2026-11-09,pmf,invasion,0.001198
+2026-10-26,first confirmed case,2,Mubumbano,2026-11-09,pmf,no invasion,0.998802
+2026-10-26,first confirmed case,2,Muetshi,2026-11-09,pmf,invasion,0.000315
+2026-10-26,first confirmed case,2,Muetshi,2026-11-09,pmf,no invasion,0.999685
+2026-10-26,first confirmed case,2,Mufunga Sampwe,2026-11-09,pmf,invasion,0.000565
+2026-10-26,first confirmed case,2,Mufunga Sampwe,2026-11-09,pmf,no invasion,0.999435
+2026-10-26,first confirmed case,2,Mukanga,2026-11-09,pmf,invasion,0.000321
+2026-10-26,first confirmed case,2,Mukanga,2026-11-09,pmf,no invasion,0.999679
+2026-10-26,first confirmed case,2,Mukedi,2026-11-09,pmf,invasion,0.000512
+2026-10-26,first confirmed case,2,Mukedi,2026-11-09,pmf,no invasion,0.999488
+2026-10-26,first confirmed case,2,Mukumbi,2026-11-09,pmf,invasion,0.000818
+2026-10-26,first confirmed case,2,Mukumbi,2026-11-09,pmf,no invasion,0.999182
+2026-10-26,first confirmed case,2,Mulongo,2026-11-09,pmf,invasion,0.0003
+2026-10-26,first confirmed case,2,Mulongo,2026-11-09,pmf,no invasion,0.9997
+2026-10-26,first confirmed case,2,Mulumba,2026-11-09,pmf,invasion,0.000879
+2026-10-26,first confirmed case,2,Mulumba,2026-11-09,pmf,no invasion,0.999121
+2026-10-26,first confirmed case,2,Mulungu,2026-11-09,pmf,invasion,0.001383
+2026-10-26,first confirmed case,2,Mulungu,2026-11-09,pmf,no invasion,0.998617
+2026-10-26,first confirmed case,2,Mumbunda,2026-11-09,pmf,invasion,0.000381
+2026-10-26,first confirmed case,2,Mumbunda,2026-11-09,pmf,no invasion,0.999619
+2026-10-26,first confirmed case,2,Mungindu,2026-11-09,pmf,invasion,0.000413
+2026-10-26,first confirmed case,2,Mungindu,2026-11-09,pmf,no invasion,0.999587
+2026-10-26,first confirmed case,2,Mushenge,2026-11-09,pmf,invasion,0.000203
+2026-10-26,first confirmed case,2,Mushenge,2026-11-09,pmf,no invasion,0.999797
+2026-10-26,first confirmed case,2,Mushie,2026-11-09,pmf,invasion,0.000114
+2026-10-26,first confirmed case,2,Mushie,2026-11-09,pmf,no invasion,0.999886
+2026-10-26,first confirmed case,2,Mutena,2026-11-09,pmf,invasion,0.00016
+2026-10-26,first confirmed case,2,Mutena,2026-11-09,pmf,no invasion,0.99984
+2026-10-26,first confirmed case,2,Mutoto,2026-11-09,pmf,invasion,0.000459
+2026-10-26,first confirmed case,2,Mutoto,2026-11-09,pmf,no invasion,0.999541
+2026-10-26,first confirmed case,2,Mutshatsha,2026-11-09,pmf,invasion,2.6e-05
+2026-10-26,first confirmed case,2,Mutshatsha,2026-11-09,pmf,no invasion,0.999974
+2026-10-26,first confirmed case,2,Muya,2026-11-09,pmf,invasion,0.000249
+2026-10-26,first confirmed case,2,Muya,2026-11-09,pmf,no invasion,0.999751
+2026-10-26,first confirmed case,2,Mwana,2026-11-09,pmf,invasion,0.001454
+2026-10-26,first confirmed case,2,Mwana,2026-11-09,pmf,no invasion,0.998546
+2026-10-26,first confirmed case,2,Mweka,2026-11-09,pmf,invasion,0.000608
+2026-10-26,first confirmed case,2,Mweka,2026-11-09,pmf,no invasion,0.999392
+2026-10-26,first confirmed case,2,Mwela Lembwa,2026-11-09,pmf,invasion,0.0001
+2026-10-26,first confirmed case,2,Mwela Lembwa,2026-11-09,pmf,no invasion,0.9999
+2026-10-26,first confirmed case,2,Mweneditu,2026-11-09,pmf,invasion,0.000834
+2026-10-26,first confirmed case,2,Mweneditu,2026-11-09,pmf,no invasion,0.999166
+2026-10-26,first confirmed case,2,Mwenga,2026-11-09,pmf,invasion,0.001835
+2026-10-26,first confirmed case,2,Mwenga,2026-11-09,pmf,no invasion,0.998165
+2026-10-26,first confirmed case,2,Mweso,2026-11-09,pmf,invasion,0.004287
+2026-10-26,first confirmed case,2,Mweso,2026-11-09,pmf,no invasion,0.995713
+2026-10-26,first confirmed case,2,Ndage,2026-11-09,pmf,invasion,0.000274
+2026-10-26,first confirmed case,2,Ndage,2026-11-09,pmf,no invasion,0.999726
+2026-10-26,first confirmed case,2,Ndekesha,2026-11-09,pmf,invasion,0.001153
+2026-10-26,first confirmed case,2,Ndekesha,2026-11-09,pmf,no invasion,0.998847
+2026-10-26,first confirmed case,2,Ndesha,2026-11-09,pmf,invasion,0.000125
+2026-10-26,first confirmed case,2,Ndesha,2026-11-09,pmf,no invasion,0.999875
+2026-10-26,first confirmed case,2,Ndjili,2026-11-09,pmf,invasion,0.000117
+2026-10-26,first confirmed case,2,Ndjili,2026-11-09,pmf,no invasion,0.999883
+2026-10-26,first confirmed case,2,Ndjoko Mpunda,2026-11-09,pmf,invasion,0.00077
+2026-10-26,first confirmed case,2,Ndjoko Mpunda,2026-11-09,pmf,no invasion,0.99923
+2026-10-26,first confirmed case,2,Ngaba,2026-11-09,pmf,invasion,2.5e-05
+2026-10-26,first confirmed case,2,Ngaba,2026-11-09,pmf,no invasion,0.999975
+2026-10-26,first confirmed case,2,Ngandajika,2026-11-09,pmf,invasion,0.001929
+2026-10-26,first confirmed case,2,Ngandajika,2026-11-09,pmf,no invasion,0.998071
+2026-10-26,first confirmed case,2,Ngidinga,2026-11-09,pmf,invasion,7.6e-05
+2026-10-26,first confirmed case,2,Ngidinga,2026-11-09,pmf,no invasion,0.999924
+2026-10-26,first confirmed case,2,Ngiri Ngiri,2026-11-09,pmf,invasion,6.9e-05
+2026-10-26,first confirmed case,2,Ngiri Ngiri,2026-11-09,pmf,no invasion,0.999931
+2026-10-26,first confirmed case,2,Niangara,2026-11-09,pmf,invasion,0.036291
+2026-10-26,first confirmed case,2,Niangara,2026-11-09,pmf,no invasion,0.963708
+2026-10-26,first confirmed case,2,Nioki,2026-11-09,pmf,invasion,0.000129
+2026-10-26,first confirmed case,2,Nioki,2026-11-09,pmf,no invasion,0.999871
+2026-10-26,first confirmed case,2,Nsele,2026-11-09,pmf,invasion,0.000682
+2026-10-26,first confirmed case,2,Nsele,2026-11-09,pmf,no invasion,0.999318
+2026-10-26,first confirmed case,2,Nselo,2026-11-09,pmf,invasion,3.4e-05
+2026-10-26,first confirmed case,2,Nselo,2026-11-09,pmf,no invasion,0.999966
+2026-10-26,first confirmed case,2,Nsona Mpangu,2026-11-09,pmf,invasion,6.7e-05
+2026-10-26,first confirmed case,2,Nsona Mpangu,2026-11-09,pmf,no invasion,0.999933
+2026-10-26,first confirmed case,2,Ntandembelo,2026-11-09,pmf,invasion,0.000112
+2026-10-26,first confirmed case,2,Ntandembelo,2026-11-09,pmf,no invasion,0.999888
+2026-10-26,first confirmed case,2,Ntondo,2026-11-09,pmf,invasion,0.0001
+2026-10-26,first confirmed case,2,Ntondo,2026-11-09,pmf,no invasion,0.9999
+2026-10-26,first confirmed case,2,Nundu,2026-11-09,pmf,invasion,0.003011
+2026-10-26,first confirmed case,2,Nundu,2026-11-09,pmf,no invasion,0.996989
+2026-10-26,first confirmed case,2,Nyanga,2026-11-09,pmf,invasion,0.000153
+2026-10-26,first confirmed case,2,Nyanga,2026-11-09,pmf,no invasion,0.999847
+2026-10-26,first confirmed case,2,Nyangezi,2026-11-09,pmf,invasion,0.00156
+2026-10-26,first confirmed case,2,Nyangezi,2026-11-09,pmf,no invasion,0.99844
+2026-10-26,first confirmed case,2,Nyantende,2026-11-09,pmf,invasion,0.001049
+2026-10-26,first confirmed case,2,Nyantende,2026-11-09,pmf,no invasion,0.998951
+2026-10-26,first confirmed case,2,Nyarambe,2026-11-09,pmf,invasion,0.005543
+2026-10-26,first confirmed case,2,Nyarambe,2026-11-09,pmf,no invasion,0.994457
+2026-10-26,first confirmed case,2,Nyemba,2026-11-09,pmf,invasion,0.001721
+2026-10-26,first confirmed case,2,Nyemba,2026-11-09,pmf,no invasion,0.998279
+2026-10-26,first confirmed case,2,Nyiragongo,2026-11-09,pmf,invasion,0.00123
+2026-10-26,first confirmed case,2,Nyiragongo,2026-11-09,pmf,no invasion,0.99877
+2026-10-26,first confirmed case,2,Nyunzu,2026-11-09,pmf,invasion,0.001021
+2026-10-26,first confirmed case,2,Nyunzu,2026-11-09,pmf,no invasion,0.998979
+2026-10-26,first confirmed case,2,Nzaba,2026-11-09,pmf,invasion,0.000486
+2026-10-26,first confirmed case,2,Nzaba,2026-11-09,pmf,no invasion,0.999514
+2026-10-26,first confirmed case,2,Nzanza,2026-11-09,pmf,invasion,1.6e-05
+2026-10-26,first confirmed case,2,Nzanza,2026-11-09,pmf,no invasion,0.999984
+2026-10-26,first confirmed case,2,Obokote,2026-11-09,pmf,invasion,0.000734
+2026-10-26,first confirmed case,2,Obokote,2026-11-09,pmf,no invasion,0.999266
+2026-10-26,first confirmed case,2,Omendjadi,2026-11-09,pmf,invasion,0.001336
+2026-10-26,first confirmed case,2,Omendjadi,2026-11-09,pmf,no invasion,0.998664
+2026-10-26,first confirmed case,2,Opala,2026-11-09,pmf,invasion,0.001793
+2026-10-26,first confirmed case,2,Opala,2026-11-09,pmf,no invasion,0.998207
+2026-10-26,first confirmed case,2,Opienge,2026-11-09,pmf,invasion,0.004687
+2026-10-26,first confirmed case,2,Opienge,2026-11-09,pmf,no invasion,0.995313
+2026-10-26,first confirmed case,2,Oshwe,2026-11-09,pmf,invasion,0.000154
+2026-10-26,first confirmed case,2,Oshwe,2026-11-09,pmf,no invasion,0.999846
+2026-10-26,first confirmed case,2,Ototo,2026-11-09,pmf,invasion,0.000482
+2026-10-26,first confirmed case,2,Ototo,2026-11-09,pmf,no invasion,0.999518
+2026-10-26,first confirmed case,2,Panda,2026-11-09,pmf,invasion,5e-05
+2026-10-26,first confirmed case,2,Panda,2026-11-09,pmf,no invasion,0.99995
+2026-10-26,first confirmed case,2,Pangi,2026-11-09,pmf,invasion,0.000405
+2026-10-26,first confirmed case,2,Pangi,2026-11-09,pmf,no invasion,0.999595
+2026-10-26,first confirmed case,2,Pania Mutombo,2026-11-09,pmf,invasion,0.000228
+2026-10-26,first confirmed case,2,Pania Mutombo,2026-11-09,pmf,no invasion,0.999772
+2026-10-26,first confirmed case,2,Panzi,2026-11-09,pmf,invasion,0.000203
+2026-10-26,first confirmed case,2,Panzi,2026-11-09,pmf,no invasion,0.999797
+2026-10-26,first confirmed case,2,Pay Kongila,2026-11-09,pmf,invasion,0.000218
+2026-10-26,first confirmed case,2,Pay Kongila,2026-11-09,pmf,no invasion,0.999782
+2026-10-26,first confirmed case,2,Pendjwa,2026-11-09,pmf,invasion,0.000233
+2026-10-26,first confirmed case,2,Pendjwa,2026-11-09,pmf,no invasion,0.999767
+2026-10-26,first confirmed case,2,Pimu,2026-11-09,pmf,invasion,0.000424
+2026-10-26,first confirmed case,2,Pimu,2026-11-09,pmf,no invasion,0.999576
+2026-10-26,first confirmed case,2,Pinga,2026-11-09,pmf,invasion,0.003474
+2026-10-26,first confirmed case,2,Pinga,2026-11-09,pmf,no invasion,0.996526
+2026-10-26,first confirmed case,2,Poko,2026-11-09,pmf,invasion,0.032271
+2026-10-26,first confirmed case,2,Poko,2026-11-09,pmf,no invasion,0.967729
+2026-10-26,first confirmed case,2,Police,2026-11-09,pmf,invasion,7.1e-05
+2026-10-26,first confirmed case,2,Police,2026-11-09,pmf,no invasion,0.999929
+2026-10-26,first confirmed case,2,Popokabaka,2026-11-09,pmf,invasion,0.000171
+2026-10-26,first confirmed case,2,Popokabaka,2026-11-09,pmf,no invasion,0.999829
+2026-10-26,first confirmed case,2,Punia,2026-11-09,pmf,invasion,0.001827
+2026-10-26,first confirmed case,2,Punia,2026-11-09,pmf,no invasion,0.998173
+2026-10-26,first confirmed case,2,Pweto,2026-11-09,pmf,invasion,0.000177
+2026-10-26,first confirmed case,2,Pweto,2026-11-09,pmf,no invasion,0.999823
+2026-10-26,first confirmed case,2,Rethy,2026-11-09,pmf,invasion,0.087129
+2026-10-26,first confirmed case,2,Rethy,2026-11-09,pmf,no invasion,0.912871
+2026-10-26,first confirmed case,2,Ruashi,2026-11-09,pmf,invasion,9e-05
+2026-10-26,first confirmed case,2,Ruashi,2026-11-09,pmf,no invasion,0.99991
+2026-10-26,first confirmed case,2,Rutshuru,2026-11-09,pmf,invasion,0.003534
+2026-10-26,first confirmed case,2,Rutshuru,2026-11-09,pmf,no invasion,0.996466
+2026-10-26,first confirmed case,2,Ruzizi,2026-11-09,pmf,invasion,0.007044
+2026-10-26,first confirmed case,2,Ruzizi,2026-11-09,pmf,no invasion,0.992956
+2026-10-26,first confirmed case,2,Rwanguba,2026-11-09,pmf,invasion,0.003969
+2026-10-26,first confirmed case,2,Rwanguba,2026-11-09,pmf,no invasion,0.996031
+2026-10-26,first confirmed case,2,Sakania,2026-11-09,pmf,invasion,0.000103
+2026-10-26,first confirmed case,2,Sakania,2026-11-09,pmf,no invasion,0.999897
+2026-10-26,first confirmed case,2,Samba,2026-11-09,pmf,invasion,0.000939
+2026-10-26,first confirmed case,2,Samba,2026-11-09,pmf,no invasion,0.999061
+2026-10-26,first confirmed case,2,Sandoa,2026-11-09,pmf,invasion,0.000202
+2026-10-26,first confirmed case,2,Sandoa,2026-11-09,pmf,no invasion,0.999798
+2026-10-26,first confirmed case,2,Saramabila,2026-11-09,pmf,invasion,0.001767
+2026-10-26,first confirmed case,2,Saramabila,2026-11-09,pmf,no invasion,0.998233
+2026-10-26,first confirmed case,2,Seke Banza,2026-11-09,pmf,invasion,5.7e-05
+2026-10-26,first confirmed case,2,Seke Banza,2026-11-09,pmf,no invasion,0.999943
+2026-10-26,first confirmed case,2,Selembao,2026-11-09,pmf,invasion,0.000124
+2026-10-26,first confirmed case,2,Selembao,2026-11-09,pmf,no invasion,0.999876
+2026-10-26,first confirmed case,2,Shabunda,2026-11-09,pmf,invasion,0.002962
+2026-10-26,first confirmed case,2,Shabunda,2026-11-09,pmf,no invasion,0.997038
+2026-10-26,first confirmed case,2,Sia,2026-11-09,pmf,invasion,0.000168
+2026-10-26,first confirmed case,2,Sia,2026-11-09,pmf,no invasion,0.999832
+2026-10-26,first confirmed case,2,Sona Bata,2026-11-09,pmf,invasion,4.1e-05
+2026-10-26,first confirmed case,2,Sona Bata,2026-11-09,pmf,no invasion,0.999959
+2026-10-26,first confirmed case,2,Songa,2026-11-09,pmf,invasion,0.000209
+2026-10-26,first confirmed case,2,Songa,2026-11-09,pmf,no invasion,0.999791
+2026-10-26,first confirmed case,2,Tandala,2026-11-09,pmf,invasion,0.000381
+2026-10-26,first confirmed case,2,Tandala,2026-11-09,pmf,no invasion,0.999619
+2026-10-26,first confirmed case,2,Tembo,2026-11-09,pmf,invasion,8e-06
+2026-10-26,first confirmed case,2,Tembo,2026-11-09,pmf,no invasion,0.999992
+2026-10-26,first confirmed case,2,Titule,2026-11-09,pmf,invasion,0.003325
+2026-10-26,first confirmed case,2,Titule,2026-11-09,pmf,no invasion,0.996675
+2026-10-26,first confirmed case,2,Tshamilemba,2026-11-09,pmf,invasion,0.000213
+2026-10-26,first confirmed case,2,Tshamilemba,2026-11-09,pmf,no invasion,0.999787
+2026-10-26,first confirmed case,2,Tshela,2026-11-09,pmf,invasion,3e-06
+2026-10-26,first confirmed case,2,Tshela,2026-11-09,pmf,no invasion,0.999997
+2026-10-26,first confirmed case,2,Tshibala,2026-11-09,pmf,invasion,0.000959
+2026-10-26,first confirmed case,2,Tshibala,2026-11-09,pmf,no invasion,0.999041
+2026-10-26,first confirmed case,2,Tshikaji,2026-11-09,pmf,invasion,0.000485
+2026-10-26,first confirmed case,2,Tshikaji,2026-11-09,pmf,no invasion,0.999515
+2026-10-26,first confirmed case,2,Tshikapa,2026-11-09,pmf,invasion,0.00039
+2026-10-26,first confirmed case,2,Tshikapa,2026-11-09,pmf,no invasion,0.99961
+2026-10-26,first confirmed case,2,Tshikula,2026-11-09,pmf,invasion,0.000293
+2026-10-26,first confirmed case,2,Tshikula,2026-11-09,pmf,no invasion,0.999707
+2026-10-26,first confirmed case,2,Tshilenge,2026-11-09,pmf,invasion,0.000363
+2026-10-26,first confirmed case,2,Tshilenge,2026-11-09,pmf,no invasion,0.999637
+2026-10-26,first confirmed case,2,Tshishimbi,2026-11-09,pmf,invasion,0.000204
+2026-10-26,first confirmed case,2,Tshishimbi,2026-11-09,pmf,no invasion,0.999796
+2026-10-26,first confirmed case,2,Tshofa,2026-11-09,pmf,invasion,0.00186
+2026-10-26,first confirmed case,2,Tshofa,2026-11-09,pmf,no invasion,0.99814
+2026-10-26,first confirmed case,2,Tshudi Loto,2026-11-09,pmf,invasion,0.000351
+2026-10-26,first confirmed case,2,Tshudi Loto,2026-11-09,pmf,no invasion,0.999649
+2026-10-26,first confirmed case,2,Tshumbe,2026-11-09,pmf,invasion,0.000533
+2026-10-26,first confirmed case,2,Tshumbe,2026-11-09,pmf,no invasion,0.999467
+2026-10-26,first confirmed case,2,Tunda,2026-11-09,pmf,invasion,0.000381
+2026-10-26,first confirmed case,2,Tunda,2026-11-09,pmf,no invasion,0.999619
+2026-10-26,first confirmed case,2,Ubundu,2026-11-09,pmf,invasion,0.004872
+2026-10-26,first confirmed case,2,Ubundu,2026-11-09,pmf,no invasion,0.995128
+2026-10-26,first confirmed case,2,Uvira,2026-11-09,pmf,invasion,0.011494
+2026-10-26,first confirmed case,2,Uvira,2026-11-09,pmf,no invasion,0.988506
+2026-10-26,first confirmed case,2,Vaku,2026-11-09,pmf,invasion,2.7e-05
+2026-10-26,first confirmed case,2,Vaku,2026-11-09,pmf,no invasion,0.999973
+2026-10-26,first confirmed case,2,Vanga,2026-11-09,pmf,invasion,0.000503
+2026-10-26,first confirmed case,2,Vanga,2026-11-09,pmf,no invasion,0.999497
+2026-10-26,first confirmed case,2,Vanga Kete,2026-11-09,pmf,invasion,0.000571
+2026-10-26,first confirmed case,2,Vanga Kete,2026-11-09,pmf,no invasion,0.999429
+2026-10-26,first confirmed case,2,Vangu,2026-11-09,pmf,invasion,1.5e-05
+2026-10-26,first confirmed case,2,Vangu,2026-11-09,pmf,no invasion,0.999985
+2026-10-26,first confirmed case,2,Walikale,2026-11-09,pmf,invasion,0.006407
+2026-10-26,first confirmed case,2,Walikale,2026-11-09,pmf,no invasion,0.993593
+2026-10-26,first confirmed case,2,Walungu,2026-11-09,pmf,invasion,0.001651
+2026-10-26,first confirmed case,2,Walungu,2026-11-09,pmf,no invasion,0.998349
+2026-10-26,first confirmed case,2,Wamba Lwadi,2026-11-09,pmf,invasion,0.000146
+2026-10-26,first confirmed case,2,Wamba Lwadi,2026-11-09,pmf,no invasion,0.999854
+2026-10-26,first confirmed case,2,Wangata,2026-11-09,pmf,invasion,0.000275
+2026-10-26,first confirmed case,2,Wangata,2026-11-09,pmf,no invasion,0.999725
+2026-10-26,first confirmed case,2,Wasolo,2026-11-09,pmf,invasion,0.030597
+2026-10-26,first confirmed case,2,Wasolo,2026-11-09,pmf,no invasion,0.969403
+2026-10-26,first confirmed case,2,Watsa,2026-11-09,pmf,invasion,0.050634
+2026-10-26,first confirmed case,2,Watsa,2026-11-09,pmf,no invasion,0.949366
+2026-10-26,first confirmed case,2,Wema,2026-11-09,pmf,invasion,0.000157
+2026-10-26,first confirmed case,2,Wema,2026-11-09,pmf,no invasion,0.999843
+2026-10-26,first confirmed case,2,Wembo Nyama,2026-11-09,pmf,invasion,0.000417
+2026-10-26,first confirmed case,2,Wembo Nyama,2026-11-09,pmf,no invasion,0.999583
+2026-10-26,first confirmed case,2,Wikong,2026-11-09,pmf,invasion,0.000284
+2026-10-26,first confirmed case,2,Wikong,2026-11-09,pmf,no invasion,0.999716
+2026-10-26,first confirmed case,2,Yabaondo,2026-11-09,pmf,invasion,0.005152
+2026-10-26,first confirmed case,2,Yabaondo,2026-11-09,pmf,no invasion,0.994848
+2026-10-26,first confirmed case,2,Yahisuli,2026-11-09,pmf,invasion,0.002529
+2026-10-26,first confirmed case,2,Yahisuli,2026-11-09,pmf,no invasion,0.997471
+2026-10-26,first confirmed case,2,Yahuma,2026-11-09,pmf,invasion,0.002104
+2026-10-26,first confirmed case,2,Yahuma,2026-11-09,pmf,no invasion,0.997896
+2026-10-26,first confirmed case,2,Yakoma,2026-11-09,pmf,invasion,0.019436
+2026-10-26,first confirmed case,2,Yakoma,2026-11-09,pmf,no invasion,0.980564
+2026-10-26,first confirmed case,2,Yakusu,2026-11-09,pmf,invasion,0.035272
+2026-10-26,first confirmed case,2,Yakusu,2026-11-09,pmf,no invasion,0.964728
+2026-10-26,first confirmed case,2,Yaleko,2026-11-09,pmf,invasion,0.004053
+2026-10-26,first confirmed case,2,Yaleko,2026-11-09,pmf,no invasion,0.995947
+2026-10-26,first confirmed case,2,Yalifafu,2026-11-09,pmf,invasion,0.001417
+2026-10-26,first confirmed case,2,Yalifafu,2026-11-09,pmf,no invasion,0.998583
+2026-10-26,first confirmed case,2,Yalimbongo,2026-11-09,pmf,invasion,0.001075
+2026-10-26,first confirmed case,2,Yalimbongo,2026-11-09,pmf,no invasion,0.998925
+2026-10-26,first confirmed case,2,Yamaluka,2026-11-09,pmf,invasion,0.001057
+2026-10-26,first confirmed case,2,Yamaluka,2026-11-09,pmf,no invasion,0.998943
+2026-10-26,first confirmed case,2,Yambuku,2026-11-09,pmf,invasion,0.003385
+2026-10-26,first confirmed case,2,Yambuku,2026-11-09,pmf,no invasion,0.996615
+2026-10-26,first confirmed case,2,Yamongili,2026-11-09,pmf,invasion,0.000976
+2026-10-26,first confirmed case,2,Yamongili,2026-11-09,pmf,no invasion,0.999024
+2026-10-26,first confirmed case,2,Yangala,2026-11-09,pmf,invasion,0.00084
+2026-10-26,first confirmed case,2,Yangala,2026-11-09,pmf,no invasion,0.99916
+2026-10-26,first confirmed case,2,Yasa Bonga,2026-11-09,pmf,invasion,0.00035
+2026-10-26,first confirmed case,2,Yasa Bonga,2026-11-09,pmf,no invasion,0.99965
+2026-10-26,first confirmed case,2,Yumbi,2026-11-09,pmf,invasion,6.3e-05
+2026-10-26,first confirmed case,2,Yumbi,2026-11-09,pmf,no invasion,0.999937
+2026-10-26,first confirmed case,2,Zongo,2026-11-09,pmf,invasion,4.5e-05
+2026-10-26,first confirmed case,2,Zongo,2026-11-09,pmf,no invasion,0.999955

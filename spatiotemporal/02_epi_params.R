@@ -2,18 +2,22 @@
 # 02_epi_params.R — Epidemiological Parameter Estimation
 # BDBV 2026 DRC · Spatiotemporal Invasion Forecast Suite
 #
-# Purpose: Estimate and organise all epidemiological parameters required by
-#   the spatiotemporal model suite.  Outputs:
-#     - Generation time PMFs for each profile in GT_PROFILES
-#     - National R(t) estimates via EpiNow2 (not EpiEstim), with 60% & 90% bands
-#     - Onset-to-sample and onset-to-death delay distributions
-#     - Delay-adjusted cCFR point estimate and CI
+# Purpose: the epidemiological-parameter layer. What this file actually produces:
+#   - generation-time PMFs for each profile in GT_PROFILES, and the GT-prior grid
+#     (make_gt_pmf / compute_all_gt_pmfs / gt_prior_grid / make_gt_prior_pmfs)
+#   - national R(t) via EpiNow2, with 60% and 90% bands (estimate_rt_epinow2)
+#   - the RIGHT-TRUNCATION of the R(t) case series, estimated per regime
+#     (epinow2_truncation and the .trunc_* helpers)
+#   - the daily confirmed series every R(t) consumer shares (epinow2_daily_confirmed)
+#
+# It does NOT produce an onset-to-death delay or a cCFR: this suite forecasts INVASION and
+# projects confirmed cases, and models no deaths (see 00_config.R, where CFR_POINT_ESTIMATE
+# was removed). The onset-to-SAMPLE delay is fitted in 04c_dhis2_delay_windows.R and
+# resolved through effective_onset_sample_delay() (00_config.R).
 #
 # Sources / citations (documented inline):
 #   - Generation time: GT_PROFILES in 00_config.R
 #   - EpiNow2 >= 1.5.0 API (dist_spec Gamma()/LogNormal()); Abbott et al. 2020 Wellcome Open Res
-#   - Radiation model: Simini et al. 2012 Nature 484:96-100
-#   - Delay params: pipelines/cfr_analyses/tables/
 # =============================================================================
 
 source(file.path(here::here(), "spatiotemporal", "00_config.R"))
@@ -21,13 +25,15 @@ source(file.path(here::here(), "spatiotemporal", "00_config.R"))
 suppressPackageStartupMessages({
   library(tidyverse)
   library(lubridate)
-  library(fitdistrplus)   # for discretised gamma MLE on SI
 })
 # EpiNow2 (Abbott et al. 2020) — estimate_rt_epinow2() calls several of its
 # constructors BARE (generation_time_opts/trunc_opts/obs_opts/rt_opts/stan_opts), so it must be
-# attached when present. Guard the attach so a missing EpiNow2 does not abort the whole script at
-# source() time (R(t) is an optional diagnostic, not on the invasion-forecast path); the routine
-# returns NULL early when it is unavailable.
+# attached when present. The attach is guarded only so that a missing EpiNow2 does not abort the
+# whole script at source() time; EpiNow2 is NOT optional for the pipeline. Both truncation
+# regimes need it (the extract fit runs estimate_truncation(); the as-of fit returns an
+# EpiNow2::Gamma), and those truncations drive the live and back-test nowcasts; the two-week
+# projection's per-draw R (bayes_rt_week_draws(), 21_bayesian_renewal.R) is an EpiNow2 fit.
+# Without it each routine here that needs it returns NULL, and its caller refuses or warns.
 .HAVE_EPINOW2 <- requireNamespace("EpiNow2", quietly = TRUE)
 if (.HAVE_EPINOW2) suppressPackageStartupMessages(library(EpiNow2))
 
@@ -69,14 +75,16 @@ if (.HAVE_EPINOW2) suppressPackageStartupMessages(library(EpiNow2))
 #' @param max_tau Maximum generation time (days); PMF truncated + renormalised.
 #' @param method  "censored" (default; double-interval / primary-censored) or
 #'                "naive" (legacy single-interval F(tau)-F(tau-1); retained ONLY
-#'                for the regression test and the before/after comparison in §1.5).
+#'                for the regression test in tests/test_invasion_pipeline.R).
 #' @return Numeric vector of length max_tau on tau = 1..max_tau, summing to 1.
 #'         Natural Gamma params are shape = (mean/sd)^2, rate = mean/sd^2.
 make_gt_pmf <- function(mean, sd, max_tau, method = c("censored", "naive")) {
   method <- match.arg(method)
   stopifnot(mean > 0, sd > 0, max_tau >= 1)
 
-  # Method-of-moments Gamma parameters (natural params, reported per Charniga et al.)
+  # Method-of-moments Gamma parameters (natural params, reported as recommended by Charniga et
+  # al. 2024, PLOS Comput Biol, "Best practices for estimating and reporting epidemiological
+  # delay distributions of infectious diseases")
   shape <- (mean / sd)^2
   rate  <- mean  / sd^2
 
@@ -97,8 +105,10 @@ make_gt_pmf <- function(mean, sd, max_tau, method = c("censored", "naive")) {
   stopifnot(length(pmf) == max_tau, abs(sum(pmf) - 1) < 1e-9, all(pmf >= 0))
   # Carry the GENERATING parameters with the pmf. daily_to_weekly_gt() needs them to build the
   # WEEKLY kernel by censoring the Gamma at a 7-day window, which is a different distribution
-  # from summing this daily pmf into 7-day blocks. Attached AFTER normalisation because R drops
-  # non-`names` attributes through arithmetic. `method` travels too, so a pmf whose daily
+  # from summing this daily pmf into 7-day blocks. Attached last, once the vector is final:
+  # SUBSETTING drops non-`names` attributes (pday[-1L] above would have), while arithmetic such
+  # as the normalisation keeps them. A caller that subsets the pmf (g[1:k]) loses them too and
+  # gets the binned weekly kernel. `method` travels too, so a pmf whose daily
   # discretisation was explicitly requested as naive is never silently handed a censored weekly
   # kernel — the two would then disagree about which distribution the model is using.
   attr(pmf, "gt_mean")   <- mean
@@ -144,8 +154,8 @@ compute_all_gt_pmfs <- function() {
   pmfs <- lapply(names(GT_PROFILES), function(nm) {
     p  <- GT_PROFILES[[nm]]
     pmf <- make_gt_pmf(mean = p$mean, sd = p$sd, max_tau = p$max_tau)
-    # Report NATURAL Gamma parameters (shape/rate) alongside mean/sd (Charniga et al.;
-    # §5.6). Discretisation is double-interval censored (§1.5, make_gt_pmf).
+    # Report NATURAL Gamma parameters (shape/rate) alongside mean/sd (Charniga et al. 2024;
+    # see make_gt_pmf). Discretisation is double-interval censored (make_gt_pmf).
     .shape <- (p$mean / p$sd)^2; .rate <- p$mean / p$sd^2
     # REALISED moments of the PMF the models actually use. These need not equal the labelled
     # (mean, sd): make_gt_pmf() drops the tau = 0 cell and truncates at max_tau, then
@@ -236,30 +246,41 @@ make_gt_prior_pmfs <- function(prior = GT_PRIOR) {
 # 2. R(t) ESTIMATION — NATIONAL (EpiNow2)
 # ---------------------------------------------------------------------------
 
-#' Estimate national R(t) using EpiNow2 >= 1.4.0.
+#' Estimate national R(t) using EpiNow2 (>= 1.5.0 dist_spec API).
 #'
 #' Uses the daily confirmed case counts passed in; in this pipeline they are built by
-#' epinow2_daily_confirmed(), i.e. dated by date_index exactly as the weekly counts. A RIGHT-TRUNCATION model (trunc_opts, from the onset->sample reporting
-#' delay) is applied so the most recent, still-incomplete weeks are nowcast rather than
-#' read as a genuine decline — without it R(t) drops spuriously below 1 at the tail.
+#' epinow2_daily_confirmed(), i.e. dated by date_index exactly as the weekly counts. A
+#' RIGHT-TRUNCATION model (trunc_opts) is applied so the most recent, still-incomplete weeks
+#' are nowcast rather than read as a genuine decline — without it R(t) drops spuriously below
+#' 1 at the tail. The truncation is FITTED per regime by epinow2_truncation() (section 4b),
+#' not derived from the onset->sample delay.
 #' There is NO ascertainment scale: a constant-in-time ascertainment is confounded with the
 #' seeded infections and cannot move R(t) (Lison et al. 2024, PLOS Comput Biol
 #' 10.1371/journal.pcbi.1012021), so estimating one buys nothing and invites the reader to
 #' think a reporting fraction was inferred. See obs_opts() in the body.
 #'
-#' Caches results to outputs/diagnostics/epinow2_rt_{gt_profile_name}_{analysis_date}.rds.
-#' Returns NULL (with a warning) if EpiNow2 fails or if there is insufficient
-#' data.
+#' Caches results to OUT_DIAGNOSTICS as epinow2_rt_<profile>_<analysis date>_v<RT_CACHE_VERSION>_...rds,
+#' the name keyed on the GT parameters, the fitted truncation, the R prior, the Stan seed and the
+#' case series, with RT_CACHE_VERSION standing for the code (see the key below). Returns NULL
+#' (with a warning) if EpiNow2 fails or if there is insufficient data.
 #'
 #' @param cases_df            Tibble with columns `date` (Date) and `confirm` (integer).
 #'                            Must cover at least 14 days with at least 10 total cases.
 #' @param gt_profile_name     Character string naming a key in GT_PROFILES.
-#' @param generation_time_params List with elements `mean`, `sd` (days) — used to
-#'                            parameterise EpiNow2's Gamma generation-time object.
-#' @param analysis_date       Date used in the cache filename.
-#' @return Tibble with columns: date, R_mean, R_lo_60, R_hi_60, R_lo_90, R_hi_90
-#'         (the 60% [q20/q80] and 90% [q5/q95] credible bands — the pipeline
-#'         convention, never 50%/95%). Returns NULL on failure.
+#' @param generation_time_params List with elements `mean`, `sd` (days) and optionally
+#'                            `max_tau` (days; GT_PROFILES[[gt_profile_name]]$max_tau when
+#'                            absent) — used to parameterise EpiNow2's Gamma generation-time
+#'                            object.
+#' @param analysis_date       Date: with `issue_date`, it selects the truncation regime and the
+#'                            truncation panel's end date (epinow2_truncation()); it also names
+#'                            the cache file.
+#' @param issue_date          NULL for the deployed fit; otherwise a back-test origin
+#'                            (epinow2_truncation()).
+#' @param ll                  the line list, needed by the "asof" truncation regime.
+#' @return Tibble with columns: date, type (EpiNow2's estimate / estimate based on partial
+#'         data / forecast), R_mean, R_lo_60, R_hi_60, R_lo_90, R_hi_90 (the 60% [q20/q80] and
+#'         90% [q5/q95] credible bands — the pipeline convention, never 50%/95%), gt_profile.
+#'         Returns NULL on failure.
 estimate_rt_epinow2 <- function(cases_df,
                                 gt_profile_name,
                                 generation_time_params,
@@ -280,6 +301,19 @@ estimate_rt_epinow2 <- function(cases_df,
     return(NULL)
   }
 
+  # NO DATED ROW, NO SERIES. The padding below takes seq(min(date), max(date)), which errors on
+  # an empty (or all-NA) date column instead of reaching the insufficient-data return, so that
+  # case is caught here and handled exactly as documented. A row without a date cannot be placed
+  # on a daily series at all; it is dropped, and said so.
+  .undated <- is.na(cases_df$date)
+  if (any(.undated))
+    warning(sprintf("[epinow2] %d row(s) of cases_df have no date and are dropped.", sum(.undated)),
+            call. = FALSE)
+  cases_df <- cases_df[!.undated, , drop = FALSE]
+  if (!nrow(cases_df)) {
+    warning("[epinow2] Insufficient data for R(t) estimation: no dated case rows. Returning NULL.")
+    return(NULL)
+  }
   # EpiNow2 requires a strictly contiguous daily series. Case counts built via
   # count(date) omit zero-case days, leaving gaps that break EpiNow2's internal
   # date bookkeeping ("N items to be assigned to group of size N-1"). Pad the
@@ -310,15 +344,17 @@ estimate_rt_epinow2 <- function(cases_df,
   # masking the code change (this exact stale-cache bug served a spurious below-1 R(t) once).
   # RT_CACHE_VERSION is bumped whenever this function's model spec changes; the GT parameters
   # are folded into the name so different runs never collide on one key.
-  .rt_ver <- get0("RT_CACHE_VERSION", ifnotfound = 2L)
+  .rt_ver <- get0("RT_CACHE_VERSION", ifnotfound = 8L)
   # Fingerprint EVERY config-level input to the R(t) model spec below, not just (gt, date):
-  # the right-truncation delay (mean AND sd, resolved just below), the R prior and the GT
-  # support all enter the fit, so a change to any of them without a RT_CACHE_VERSION bump
-  # would otherwise silently serve a stale cache — the failure this key guards against.
-  # Ascertainment is NOT part of the spec (see obs_opts below: a constant scale cannot move
-  # R and is no longer passed), so it must not key the cache. The literal keeps the existing
-  # file-naming scheme so fits cached under an identical spec stay addressable.
-  .asc     <- 45
+  # the fitted right-truncation (resolved and hashed just below), the R prior, the GT support
+  # and the Stan seed all enter the fit, so a change to any of them without a RT_CACHE_VERSION
+  # bump would otherwise silently serve a stale cache — the failure this key guards against.
+  # ASCERTAINMENT IS NOT PART OF THE SPEC (see obs_opts below: a constant scale cannot move
+  # R and is no longer passed), so it must not key the cache. This literal is a FROZEN
+  # FILENAME COMPONENT, not a model parameter: it keeps the existing cache file names
+  # addressable so fits computed under an identical spec are still found. Do not read it as
+  # an ascertainment rate — this pipeline estimates none.
+  .cache_name_salt <- 45
   # RESOLVE THE TRUNCATION FIRST — it is part of the model spec, so the cache key depends on
   # it. Resolving before the cache check costs nothing after the first run: .trunc_fit() caches
   # its own Stan fit to disk, so this is a file read on every subsequent call.
@@ -349,23 +385,29 @@ estimate_rt_epinow2 <- function(cases_df,
   #                                             convolution. This gap was covered only by luck
   #                                             (max_tau 45->90 happened to land in the same
   #                                             commit as an unrelated cache-version bump).
-  # NOTE: do NOT use %||% here. It is not defined by 00_config.R, and 02_epi_params.R runs
-  # (run_all.R step 2) BEFORE 03_mobility_matrices.R, which is where the suite's copy is
-  # defined. Base R only gained %||% in 4.4, so relying on it would make this fail on 4.3.
+  # .num1() rather than %||% (00_config.R): besides a NULL it also rejects a non-scalar or
+  # non-finite value, which %||% would pass straight into sprintf() and the fit.
   .rpri    <- get0("EPINOW2_R_PRIOR", ifnotfound = list(mean = 2.0, sd = 0.5))
   .num1    <- function(x, default) {
     if (is.null(x) || length(x) != 1L || !is.finite(suppressWarnings(as.numeric(x)))) default
     else as.numeric(x)
   }
-  .gtmax   <- .num1(generation_time_params$max_tau, 0)
+  # ONE GT support for the key AND the fit (gt_max below): the caller's max_tau, else the
+  # profile's. The key used to read the caller's (0 when absent) while the fit read the
+  # profile's, so the two could describe different supports.
+  .gtmax   <- .num1(generation_time_params$max_tau, GT_PROFILES[[gt_profile_name]]$max_tau)
+  # THE STAN SEED. .epinow2_rt_fit() seeds the sampler with RANDOM_SEED, so two seeds give two
+  # posteriors; without it in the key a run varying RANDOM_SEED alone was served the other
+  # seed's posterior. (bayes_rt_week_draws() and the truncation fingerprint key it already.)
+  .seed    <- as.integer(get0("RANDOM_SEED", ifnotfound = 20260704L))
   # FINGERPRINT THE CASE SERIES ITSELF. Every other term here describes the MODEL SPEC; none
   # described the DATA being fitted, even though `cases_df` is what the model is estimated on.
   # cases_df comes from epinow2_daily_confirmed(dat$ll, ...), which depends on the onset
-  # imputation (a stochastic per-record draw reseeded from RANDOM_SEED inside load_linelist()),
-  # on ONSET_MODE, on APPEND_SITREP_CONFIRMED, and on the line-list snapshot. So varying
-  # RANDOM_SEED for a replicate — the documented way to propagate imputation uncertainty —
-  # found the previous replicate's rds and returned its posterior verbatim, giving R(t) exactly
-  # zero between-replicate variation while rt_national.pdf claimed to describe the new draw.
+  # imputation (each record's draw is a hash of (alert_id, ONSET_IMPUTE_SEED) inside
+  # load_linelist(), with no RNG stream), on ONSET_MODE, on APPEND_SITREP_CONFIRMED, and on the
+  # line-list snapshot. An imputation replicate (a different ONSET_IMPUTE_SEED) re-dates the
+  # imputed onsets; before this key existed a replicate found the previous replicate's rds and
+  # returned its posterior verbatim, giving R(t) exactly zero between-replicate variation.
   # RT_CACHE_VERSION is a manual discipline for code changes; it cannot see the data.
   .data_k <- local({
     cc <- cases_df[order(cases_df$date), , drop = FALSE]
@@ -380,14 +422,16 @@ estimate_rt_epinow2 <- function(cases_df,
   })
   cache_file <- file.path(
     OUT_DIAGNOSTICS,
-    sprintf("epinow2_rt_%s_%s_v%d_gt%.0f-%.0f-m%.0f_a%.0f_t%s_r%.0f-%.0f_y%09.0f.rds",
+    # "_ini": the fit's MCMC initial values are seeded (below); a file written before that was
+    # not reproducible from the seed in its name and must not be served.
+    sprintf("epinow2_rt_%s_%s_v%d_gt%.0f-%.0f-m%.0f_a%.0f_t%s_r%.0f-%.0f_s%d_y%09.0f_ini.rds",
             gt_profile_name,
             format(analysis_date, "%Y%m%d"), .rt_ver,
             generation_time_params$mean * 10, generation_time_params$sd * 10,
             .gtmax,
-            .asc * 100, .trunc_k,
+            .cache_name_salt * 100, .trunc_k,
             .num1(.rpri$mean, 2.0) * 100, .num1(.rpri$sd, 0.5) * 100,
-            .data_k)
+            .seed, .data_k)
   )
   if (file.exists(cache_file)) {
     message(sprintf("[epinow2] Loading cached R(t) from %s", basename(cache_file)))
@@ -396,13 +440,22 @@ estimate_rt_epinow2 <- function(cases_df,
 
   gt_mean   <- generation_time_params$mean
   gt_sd     <- generation_time_params$sd
-  gt_max    <- GT_PROFILES[[gt_profile_name]]$max_tau
+  gt_max    <- .gtmax
 
   message(sprintf(
     "[epinow2] Running EpiNow2 for GT profile '%s' (mean=%.1f d, sd=%.1f d) on %d days of data",
     gt_profile_name, gt_mean, gt_sd, n_days
   ))
 
+  # EpiNow2 draws its MCMC initial values from R's global RNG, so the fit is seeded with the seed
+  # the cache name records, and the caller's stream is restored afterwards (a cache miss and a
+  # cache hit then leave every later random number identical), as in bayes_rt_week_draws().
+  .old_seed <- if (exists(".Random.seed", envir = .GlobalEnv)) get(".Random.seed", envir = .GlobalEnv) else NULL
+  on.exit({
+    if (!is.null(.old_seed)) assign(".Random.seed", .old_seed, envir = .GlobalEnv)
+    else if (exists(".Random.seed", envir = .GlobalEnv)) rm(".Random.seed", envir = .GlobalEnv)
+  }, add = TRUE)
+  set_fixed_seed(.seed)
   result <- tryCatch({
     fit <- .epinow2_rt_fit(cases_df, gt_mean, gt_sd, gt_max, truncation = .trunc_dist)
 
@@ -420,8 +473,7 @@ estimate_rt_epinow2 <- function(cases_df,
     # OF PROJECTION past the data, tagged in the `type` column as "forecast" (vs "estimate" /
     # "estimate based on partial data"). Dropping that column and keeping every row is how
     # run_all.R came to report tail(R_mean, 1) — a 7-day-ahead projection, with its wider
-    # forecast band — as the "Primary R(t) estimate". 44_reff_epinow2_check.R:118-125
-    # documents and guards against exactly this; the diagnostic path did not.
+    # forecast band — as the "Primary R(t) estimate".
     # Consumers filter on `type` (or on date <= analysis_date) to get estimates only.
     rt_tbl <- rt_raw %>%
       dplyr::filter(variable == "R") %>%
@@ -455,17 +507,17 @@ estimate_rt_epinow2 <- function(cases_df,
 #' Daily national CONFIRMED cases for EpiNow2, dated EXACTLY as the weekly case counts.
 #'
 #' Dating is `date_index` (load_linelist(), 01_data_prep.R): the symptom onset where it is
-#' usable, otherwise an onset imputed as sample date minus a drawn onset->sample delay, clamped
-#' to the outbreak-week floor. This is the only dating consistent with EpiNow2's right-truncation
-#' model (.epinow2_rt_fit()), which treats every case as onset-dated and still subject to the
-#' onset->sample delay. Dating onset-less cases at their SAMPLE date instead (the former
+#' usable, otherwise an onset imputed as sample date minus a sample-to-onset interval drawn from
+#' same-week donors (01_data_prep.R), clamped to the outbreak floor. This is the dating the
+#' fitted right-truncation describes (02_epi_params.R, SERIES BASIS), which treats every case as
+#' onset-dated. Dating onset-less cases at their SAMPLE date instead (the former
 #' convention) presents already-complete cases to that model as incomplete, so the recent tail
 #' was inflated a second time and R biased upward (7 Sep 2026 snapshot, weekly R for 1-7 Sep:
 #' 1.50 with sample-date dating vs 0.82 with this dating). Records without a date_index (the
 #' complete_case onset mode) are excluded, exactly as in the weekly counts.
 #'
-#' Shared by the R(t) diagnostic (run_all.R), the cascade's EpiNow2 check
-#' (44_reff_epinow2_check.R) and the Bayesian suite's R draws (bayes_rt_week_draws()).
+#' Shared by the R(t) diagnostic (run_all.R) and the Bayesian suite's R draws
+#' (bayes_rt_week_draws(), 21_bayesian_renewal.R).
 #'
 #' @param ll line list (load_linelist() output; needs `confirmed` and `date_index`).
 #' @param end_date last day of the series (inclusive); trailing days without cases are zeros.
@@ -507,17 +559,43 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
 # It used to be told the onset->SAMPLE delay, which is the wrong leg — see RT_CACHE_VERSION v8
 # in 00_config.R for the measurements. These functions estimate the right one from data.
 #
-# TWO REGIMES (see 00_config.R): "extract" for the deployed fit, "asof" for an LFO fold's fit.
-# Both build a list of (date, confirm) frames, oldest first, as EpiNow2::estimate_truncation()
-# requires, and each frame is the daily confirmed series AS IT STOOD at that vintage.
+# TWO REGIMES (see 00_config.R): "extract" for the deployed fit (and a snapshot round's), "asof"
+# for a re-censored back-test round's. The extract regime builds a list of (date, confirm)
+# frames, oldest first, as EpiNow2::estimate_truncation() requires, each frame the daily
+# confirmed series AS IT STOOD at that vintage. The as-of regime builds no frames: its lag is
+# recorded on every record, so it is measured per record (.trunc_fit_asof_cohort()).
 #
-# SERIES BASIS: RECORDED onsets only, on both regimes, even though EpiNow2 is fitted to the full
-# date_index series (recorded onset where usable, imputed otherwise). Reconstructing a vintage's
-# date_index is not possible faithfully — the imputed delay is drawn positionally for all rows in
-# one seeded vectorised call, row order does not replay across vintages, and only one archive
-# folder carries its own delay parameters, so a June vintage would be re-imputed with a September
-# fit. The recorded-onset basis has none of those dependencies. It is an approximation, and
-# .trunc_basis_guard() below measures the approximation error on every run rather than assuming it.
+# SERIES BASIS. Both consumers correct the DATE_INDEX series: the recorded onset where usable,
+# otherwise an onset imputed from the sample date (aggregate_to_zone_week() for the nowcast,
+# epinow2_daily_confirmed() for R(t)). The truncation must therefore describe how complete THAT
+# series is at each lag.
+#   extract  date_index, by replaying every vintage through load_linelist() as of its own date
+#            (load_linelist_vintage(), 01_data_prep.R; .trunc_frame_vintage() below). Until
+#            2026-10-14 this panel used RECORDED onsets, and that is not a small approximation
+#            here: when a snapshot is taken only about a third of the newest week's confirmed
+#            records carry a recorded onset (about 70% eventually do); the rest are in the
+#            date_index series already, at an imputed onset, but were absent from the
+#            recorded-onset panel until their onset was entered. So the newest week of a
+#            snapshot was far more complete on the date_index basis than the recorded-onset fit
+#            assumed (about 0.19 on the 2026-10-09 frame), and the live nowcast multiplied that
+#            week about twice too much; the live R(t) was corrected by the same distribution.
+#            52_vintage_level_check.R compares, every run, the newest-week completeness the
+#            extract fit assumes with the one observed (diagnostics/vintage_level_check.csv).
+#            The objection that once ruled the replay out -- imputed onsets would be re-drawn
+#            with a later delay fit -- no longer arises: each vintage imputes from its OWN donors
+#            (records sampled in the same week whose onset that vintage records), exactly as the
+#            live pipeline imputes on its date, and a record's draw depends only on its id and
+#            the seed. Imputed onsets that move between vintages (an onset later entered, or a
+#            changed donor pool) are re-dating noise the negative-binomial observation model
+#            absorbs like any other.
+#   asof     date_index of the records whose recorded onset is USABLE (.trunc_fit_asof_cohort()):
+#            the recorded onset exactly as the corrected series dates it, i.e. censored at the
+#            specimen date when it was entered a day or two after it, and never a pre-outbreak
+#            typo. The as-of lag is that date -> observation date, both on every record.
+#            Records with an IMPUTED date_index are left out, because their lag there would be
+#            their own imputation draw. .trunc_basis_guard() measures what leaving them out
+#            costs on every run; 52_vintage_level_check.R compares the as-of nowcast's assumed
+#            origin-week completeness with the observed one (diagnostics/vintage_level_check.csv).
 
 #' Archive vintage dates, thinned and windowed.
 #' @return Date vector, ascending, or length 0.
@@ -542,25 +620,35 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
   sort(unique(c(d[keep_i], d[length(d)])))
 }
 
-#' Daily confirmed-by-recorded-onset series from ONE archive vintage.
-#' Every column is read as character and only two are REQUIRED (the classification and the
-#' recorded onset). That is deliberate: the archive spans 13 header signatures (26-36 columns)
-#' and six early files lack lab_analysis_date, so naming a fixed column set would drop vintages.
-#' Do not "restore" a column list here.
+#' Daily confirmed series from ONE archive vintage, dated by date_index exactly as the live
+#' series is.
+#'
+#' The vintage is replayed through the full loader as of its own date (load_linelist_vintage(),
+#' 01_data_prep.R), so its date_index is what the live pipeline would have built on that day:
+#' the recorded onset where usable, otherwise an onset imputed from the sample date, plus the
+#' sitrep top-up rows. Confirmed records only, as in the counts the nowcast corrects
+#' (aggregate_to_zone_week()) and the series the R(t) fit reads (epinow2_daily_confirmed()).
+#' See SERIES BASIS above for why this is not the recorded-onset series.
 .trunc_frame_vintage <- function(dir, vintage, start) {
-  f <- file.path(dir, sprintf("LINELIST_%s", format(vintage, "%d%m%Y")),
-                 "dhis2_processed_linelist.csv")
-  if (!file.exists(f)) return(NULL)
-  x <- tryCatch(suppressWarnings(readr::read_csv(f, col_types = readr::cols(.default = "c"),
-                                                 show_col_types = FALSE)),
-                error = function(e) NULL)
-  if (is.null(x)) return(NULL)
-  need <- c("final_mve_case_classification", "date_of_symptom_onset")
-  if (!all(need %in% names(x))) return(NULL)
-  ons <- suppressWarnings(as.Date(x$date_of_symptom_onset))
-  keep <- (x$final_mve_case_classification %in% CONFIRMED_STATUS) &
-          !is.na(ons) & ons >= start & ons <= vintage
-  .trunc_tabulate(ons[keep], start, vintage)
+  folder <- sprintf("LINELIST_%s", format(vintage, "%d%m%Y"))
+  if (!file.exists(file.path(dir, folder, "dhis2_processed_linelist.csv"))) return(NULL)
+  if (!exists("load_linelist_vintage", mode = "function"))
+    stop("[trunc] load_linelist_vintage() is not loaded (01_data_prep.R): the extract panel ",
+         "cannot be built on the date_index basis.", call. = FALSE)
+  # load_linelist() reads LINELIST_DIR, so a different archive directory here would silently
+  # build the panel from another archive than the one listed.
+  if (!identical(normalizePath(dir), normalizePath(get0("LINELIST_DIR", ifnotfound = ""))))
+    stop("[trunc] TRUNC_ARCHIVE_DIR must be LINELIST_DIR: vintages are replayed through ",
+         "load_linelist(), which reads LINELIST_DIR.", call. = FALSE)
+  # A vintage the loader cannot read is DROPPED and said so, as an unreadable file always was;
+  # .trunc_validate_panel() then refuses the panel if too few vintages remain.
+  vll <- tryCatch(load_linelist_vintage(folder, vintage), error = function(e) {
+    message(sprintf("[trunc] extract: vintage %s dropped, it could not be loaded: %s",
+                    folder, conditionMessage(e))); NULL })
+  if (is.null(vll)) return(NULL)
+  di <- suppressWarnings(as.Date(vll$date_index))
+  keep <- (vll$confirmed %in% TRUE) & !is.na(di) & di >= start & di <= vintage
+  .trunc_tabulate(di[keep], start, vintage)
 }
 
 #' Tabulate onset dates onto a GAPLESS daily spine. estimate_truncation() requires a contiguous
@@ -580,13 +668,39 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
              confirm = as.integer(tabulate(idx, nbins = length(days))))
 }
 
+#' The onset date the AS-OF regime measures its lag from: date_index, for the records whose
+#' recorded onset is USABLE (load_linelist(), 01_data_prep.R), NA for every other record.
+#'
+#' That is the recorded onset exactly as the corrected series dates it: censored at the specimen
+#' date when it was entered a day or two after it, and never a pre-outbreak typo (those are
+#' unusable, so the series dates them by imputation). The raw date_of_symptom_onset is NOT that
+#' series: measuring from it drops the post-specimen onsets that the series holds at lag 0 and
+#' admits the onsets the series replaces, so the fitted completeness described a different
+#' series from the one corrected. Records with an IMPUTED date_index stay out: their lag would be
+#' their own imputation draw (.trunc_basis_guard() measures what leaving them out costs).
+#' Because only recorded onsets enter, the result does not depend on ONSET_IMPUTE_SEED.
+#' @return Date vector, one per row of `ll`, or NULL when `ll` lacks the loader's columns.
+.trunc_asof_onset <- function(ll) {
+  miss <- setdiff(c("date_index", "onset_usable"), names(ll))
+  if (length(miss)) {
+    message(sprintf("[trunc] asof: the line list lacks %s (load_linelist()); cannot fit.",
+                    paste(miss, collapse = ", ")))
+    return(NULL)
+  }
+  ons <- suppressWarnings(as.Date(ll$date_index))
+  ons[!(ll$onset_usable %in% TRUE)] <- as.Date(NA)
+  ons
+}
+
 #' The as-of completeness curve, measured by ONSET COHORT, then fitted parametrically.
 #'
 #' WHY NOT estimate_truncation(). That deconvolves a lag from SNAPSHOTS, which is the only
 #' option when the lag is recorded nowhere — true for the extract regime, where "appearance in
 #' the extract" exists only as the difference between two archive vintages. Here the lag is
-#' onset -> linelist_observation_date() and BOTH are columns on every record (the observation
-#' date IS the sample date for 100% of confirmed records), so nothing needs deconvolving.
+#' onset -> linelist_observation_date() and BOTH are on every record (the observation date is
+#' the sample date for all but a handful of confirmed records: 9,046 of 9,054 on the 2026-10-09
+#' frame), so nothing needs deconvolving. The onset is the date_index of the records with a
+#' usable recorded onset (.trunc_asof_onset()).
 #' An earlier version built deterministic pseudo-vintages and handed them to
 #' estimate_truncation(): a record with observation <= v appears in EVERY later vintage and
 #' never changes, so the panel was perfectly nested (0 of 721 shared day-cells non-monotone,
@@ -604,54 +718,85 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
 #' likelihood itself is right: on simulated data with a known truncated LogNormal it recovered
 #' mean 9.78 d against a truth of 9.92 d, where the naive estimate gave 8.55 d.)
 #'
-#' WHAT THIS DOES INSTEAD. For a lag L, every record whose onset is at least L days old has a
-#' FULLY DETERMINED answer to "was it observed within L days?" — no truncation, no censoring,
-#' no extrapolation. So estimate the completeness curve cohort-wise,
-#'     F_hat(L) = P(delay <= L | onset <= end - L),
-#' each lag using the largest unbiased sample available to it, and fit a parametric family to
-#' that curve by least squares weighted by cohort size. Matching F(L + 0.5) to
-#' P(delay <= L) is the same daily-rounding convention compute_truncation_weights() evaluates
-#' under, so the fitted spec reproduces the measured completeness where it is used.
+#' WHAT THIS DOES INSTEAD. The completeness curve is estimated NONPARAMETRICALLY with the
+#' right-truncation-corrected reverse-hazard (Lynden-Bell) estimator,
+#'     h(k) = #{delay = k, end - onset >= k} / #{delay <= k, end - onset >= k},
+#'     F_hat(L) = prod_{k = L+1..TRUNC_MAX_DAYS} (1 - h(k)),
+#' which needs no parametric family, and a gamma is then fitted to that curve by least squares
+#' weighted by cohort size. (Until 2026-10-15 the curve was the plain cohort share
+#' P(delay <= L | onset <= end - L), which is NOT free of truncation: records whose delay
+#' exceeds end - onset are absent from the data, so it over-states completeness, by 1.5% at the
+#' newest week on the 2026-10-09 frame and by 5-18% on synthetic data growing at 0.01-0.03/d.)
 #'
-#' GAMMA, NOT LOGNORMAL: fitted to the same curve, gamma tracks it to a maximum absolute error
-#' of 0.040 across lags 0-45 against 0.083 for lognormal, and its anchor-week weight is within
-#' 1.3% of the measured one against 9% for lognormal.
+#' THE CURVE IS FITTED AS THE MODEL DESCRIBES IT. F_hat lives on 0..TRUNC_MAX_DAYS with
+#' F_hat(TRUNC_MAX_DAYS) = 1, and the returned Gamma is a distribution on that support,
+#' renormalised there: its `max` is chosen so EpiNow2 discretises it on 0..TRUNC_MAX_DAYS
+#' (.trunc_support_max()), and the nowcast divides by F(TRUNC_MAX_DAYS + 0.5)
+#' (.trunc_as_delay_spec()). So F(L + 0.5) / F(TRUNC_MAX_DAYS + 0.5) is what is matched to
+#' F_hat(L): F(L + 0.5) = P(delay <= L) is the daily-rounding convention
+#' compute_truncation_weights() evaluates under, and the renormalisation is the one both
+#' consumers apply, so the fitted spec reproduces the estimated completeness where it is used.
+#'
+#' GAMMA, NOT LOGNORMAL. Fitted to the same curve on the 2026-10-09 frame, gamma tracks it to a
+#' maximum absolute error of 0.053 across the fitted lags against 0.090 for lognormal, and its
+#' newest-week completeness is within 0.1% of the estimated one against 2.7% for lognormal.
 #'
 #' NO ROLLING WINDOW, unlike the extract panel. Windowing would starve the long lags (a 56-day
-#' window leaves 11 days of onsets at lag 45). It is not needed for recency either: the
-#' epidemic grew, so the short-lag cohorts that determine the anchor week are already dominated
-#' by recent cases -- the lag-6 cohort holds 5,005 records against the 2,882 that are old
-#' enough to be fully observed.
+#' window leaves 11 days of onsets at lag 45). The cost, stated: the fit is NOT dominated by
+#' recent cases. On the 2026-10-09 frame 72% of the lag-6 risk set (4,900 of 6,790 records) is
+#' old enough to be fully observed, so the curve is close to an outbreak-wide average of the
+#' onset -> sample delay rather than the delay at any one date. That is what this fit is for:
+#' ONE shared nuisance estimate for every re-censored round (epinow2_truncation()), and those are
+#' the early rounds the archive does not cover.
 #'
-#' CONFIRMED ONLY, deliberately: the folds correct the confirmed series.
-#' effective_onset_sample_delay() pooled over every classification (~14k pairs against ~5.0k
-#' confirmed) and suspected cases are sampled on an alert-driven schedule, so it returns
-#' 7.67 d where the CONFIRMED stratum gives 10.14 d. That is why the fold nowcast
-#' under-corrected even though its LEG was already right. (Both are the EpiDist marginal; the
-#' interval-censored MLE puts the same contrast at 7.67 vs 9.11 d.)
+#' CONFIRMED ONLY, deliberately: the folds correct the confirmed series, and the onset->sample
+#' delay differs by classification (suspected cases are sampled on an alert-driven schedule), so
+#' effective_onset_sample_delay() pooled over every classification is shorter than its
+#' CONFIRMED stratum. Using the pooled delay is why the fold nowcast once under-corrected even
+#' though its LEG was already right.
 #'
 #' @return an EpiNow2 dist_spec (Gamma), or NULL.
 .trunc_fit_asof_cohort <- function(ll, end, start) {
   if (!exists("linelist_observation_date", mode = "function")) return(NULL)
+  ons <- .trunc_asof_onset(ll)
+  if (is.null(ons)) return(NULL)
   obs <- tryCatch(linelist_observation_date(ll, as.Date(end), caller = "trunc-asof"),
                   error = function(e) NULL)
   if (is.null(obs)) return(NULL)
-  ons <- suppressWarnings(as.Date(ll$date_of_symptom_onset))
-  end <- as.Date(end)
-  keep <- (ll$confirmed %in% TRUE) & !is.na(obs) & !is.na(ons) & as.Date(obs) <= end
+  end <- as.Date(end); start <- as.Date(start)
+  keep <- (ll$confirmed %in% TRUE) & !is.na(obs) & !is.na(ons) & ons >= start &
+          as.Date(obs) <= end
   o  <- ons[keep]
   dl <- as.numeric(as.Date(obs[keep]) - o)
-  # dl < 0 is a data error (observation before onset), not a short delay. Dropped rather than
-  # clamped to 0, which would pile spurious mass on the shortest lag — exactly where the
-  # anchor-week weight is most sensitive.
-  ok <- is.finite(dl) & dl >= 0; o <- o[ok]; dl <- dl[ok]
+  # A NEGATIVE lag counts at lag 0, as the corrected series counts it. On this basis the
+  # usual source (an onset entered a day or two after its own specimen) is already censored at
+  # the specimen, so a remaining dl < 0 is a record observed before its date_index (an
+  # observation date from a fallback column, or a specimen taken before the outbreak floor that
+  # date_index is clamped to). reaggregate_asof() makes such a record visible from its
+  # date_index onward, i.e. complete at lag 0, and that is where it belongs in the curve.
+  dl <- pmax(dl, 0)
   mx <- as.integer(get0("TRUNC_MAX_DAYS", ifnotfound = 45L))
+  # The model's support is 0..mx (the pmf is renormalised over it), so a delay beyond mx is
+  # outside the distribution being estimated.
+  ok <- is.finite(dl) & dl <= mx; o <- o[ok]; dl <- dl[ok]
   lags <- 0:mx
-  n_l <- vapply(lags, function(L) sum(o <= end - L), integer(1))
-  f_l <- vapply(lags, function(L) {
-    c_ <- o <= end - L
-    if (!any(c_)) NA_real_ else mean(dl[c_] <= L)
+  # RIGHT TRUNCATION, CORRECTED EXACTLY. A record is in the as-of data only if its delay is at
+  # most its truncation time Tt = end - onset, so recent onsets are represented only by their
+  # short delays and a plain cohort share P(delay <= L | onset <= end - L) over-states
+  # completeness (it misses the long delays still unobserved). The reverse hazard
+  #     h(k) = P(delay = k | delay <= k)  =  #{dl = k, Tt >= k} / #{dl <= k, Tt >= k}
+  # is estimable without bias from the truncated data (Lynden-Bell 1971; Lagakos et al. 1988),
+  # and F(L) = prod_{k = L+1..mx} (1 - h(k)) with F(mx) = 1. (2026-10-09 frame, newest week:
+  # cohort share 0.371, this estimator 0.366, onsets old enough to be fully observed 0.367; on
+  # synthetic data the cohort share was biased by 5-18% at growth 0.01-0.03/d.)
+  Tt  <- as.numeric(end - o)
+  n_l <- vapply(lags, function(L) sum(Tt >= L), integer(1))
+  h_k <- vapply(lags, function(k) {
+    r <- dl <= k & Tt >= k
+    if (!any(r)) 0 else sum(r & dl == k) / sum(r)
   }, numeric(1))
+  f_l <- numeric(length(lags)); f_l[length(lags)] <- 1
+  for (i in rev(seq_len(length(lags) - 1L))) f_l[i] <- f_l[i + 1L] * (1 - h_k[i + 1L])
   n_min <- get0("TRUNC_MIN_FRAME_CASES", ifnotfound = 200L)
   usable <- is.finite(f_l) & n_l >= n_min
   if (sum(usable) < 10L) {
@@ -662,11 +807,14 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
   # Weighted least squares on the CDF. Not a likelihood: the cohorts overlap, so their
   # contributions are not independent and a product of binomials would overstate precision.
   # Weighting by cohort size is what keeps the long, thin lags from dominating the short ones.
+  # The model CDF is renormalised on 0..mx, as both consumers evaluate it (see the docstring).
   w <- as.numeric(n_l[usable]); fu <- f_l[usable]; lu <- lags[usable]
+  cdf_on_support <- function(sh, rt)
+    pmin(pgamma(lu + 0.5, shape = sh, rate = rt) / pgamma(mx + 0.5, shape = sh, rate = rt), 1)
   sse <- function(par) {
     sh <- exp(par[1]); rt <- exp(par[2])
     if (!is.finite(sh) || !is.finite(rt) || sh <= 0 || rt <= 0) return(1e10)
-    cdf <- pgamma(lu + 0.5, shape = sh, rate = rt)
+    cdf <- cdf_on_support(sh, rt)
     if (any(!is.finite(cdf))) return(1e10)
     sum(w * (cdf - fu)^2)
   }
@@ -682,19 +830,29 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
     return(NULL)
   }
   sh <- exp(fit$par[1]); rt <- exp(fit$par[2])
-  err <- max(abs(pgamma(lu + 0.5, shape = sh, rate = rt) - fu))
-  message(sprintf(paste0("[trunc] asof: cohort completeness on %d confirmed records ",
+  err <- max(abs(cdf_on_support(sh, rt) - fu))
+  message(sprintf(paste0("[trunc] asof: truncation-corrected completeness on %d confirmed records ",
                          "(lag-0 cohort %d, lag-%d cohort %d); gamma fit max |F - F_hat| = %.4f"),
                   length(dl), n_l[1], mx, n_l[mx + 1L], err))
   # A curve the family cannot follow is a wrong family, not a noisy fit — refuse rather than
-  # correct every week with it. 0.08 is twice the realised gamma error and below the lognormal
-  # error the family comparison rejected.
+  # correct every week with it. 0.08 lies between the realised gamma error and the lognormal
+  # error the family comparison rejected (0.053 and 0.090 on the 2026-10-09 frame).
   if (!is.finite(err) || err > 0.08) {
     warning(sprintf("[trunc] asof: gamma cannot follow the measured completeness curve (max |F - F_hat| = %.3f); REFUSED.",
                     err), call. = FALSE)
     return(NULL)
   }
-  tryCatch(EpiNow2::Gamma(shape = sh, rate = rt, max = mx), error = function(e) NULL)
+  # EPINOW2 MUST SEE THE SUPPORT THE CURVE WAS ESTIMATED ON, 0..mx. A fixed-parameter dist is
+  # discretised one day shorter than its `max` (.trunc_support_max()), so the `max` that gives
+  # 0..mx is found by measuring the support rather than assumed; a dist that cannot be given
+  # it is refused.
+  for (m in c(mx, mx + 1L)) {
+    g <- tryCatch(EpiNow2::Gamma(shape = sh, rate = rt, max = m), error = function(e) NULL)
+    if (!is.null(g) && identical(.trunc_support_max(g), as.numeric(mx))) return(g)
+  }
+  warning(sprintf("[trunc] asof: no Gamma(max = ) gives EpiNow2 the support 0..%d d; REFUSED.", mx),
+          call. = FALSE)
+  NULL
 }
 
 #' Extract-basis panel: one frame per archive vintage.
@@ -732,62 +890,64 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
   panel
 }
 
-#' Measure the recorded-onset vs date_index approximation, per run.
-#' Compares the completeness curve of the panel's own basis against one dated by the LIVE
-#' date_index but censored by MEMBERSHIP ONLY (which records were confirmed-and-visible at each
-#' vintage). No re-imputation, no RNG — so it measures the basis difference and nothing else.
+#' Measure, per run, what the AS-OF fit's record set costs (the extract regime is fitted on the
+#' whole date_index series of each vintage; see SERIES BASIS).
+#' The as-of fit measures its lag only on the records with a usable recorded onset
+#' (.trunc_asof_onset()), while the series it corrects also holds every record with an IMPUTED
+#' date_index. Both are dated by the same date_index; the guard compares the share observed
+#' within each lag (k = 0..TRUNC_MAX_DAYS, as observed by `end`, plain shares) for the fit's
+#' records against all confirmed records. No re-imputation, no RNG — so it measures the
+#' record-set difference and nothing else.
 .trunc_basis_guard <- function(ll, end, start, regime, tol = 0.05) {
-  ons <- suppressWarnings(as.Date(ll$date_of_symptom_onset))
+  ons <- .trunc_asof_onset(ll)
+  if (is.null(ons)) return(invisible(NA_real_))
   di  <- suppressWarnings(as.Date(ll$date_index))
   obs <- tryCatch(linelist_observation_date(ll, as.Date(end), caller = "trunc-guard"),
                   error = function(e) NULL)
   if (is.null(obs)) return(invisible(NA_real_))
-  # THE TWO BASES ARE TAKEN OVER DIFFERENT RECORD SETS, and that is the entire point.
-  # The first version required !is.na(ons) AND !is.na(di) and computed both curves on that one
-  # subset. But date_index EQUALS date_of_symptom_onset wherever a usable recorded onset
-  # exists, so that subset is precisely where the two bases agree by definition: it excluded
-  # the ~24% of confirmed cases whose date_index is IMPUTED, which are the only records that
-  # create a basis difference at all. The guard reported 0.0082 and could never have fired.
-  # Compared honestly it is 0.0355 (5,106 recorded-onset records vs 6,669 date_index ones).
+  # THE TWO CURVES ARE TAKEN OVER DIFFERENT RECORD SETS, and that is the entire point. On one
+  # common subset the two dates are EQUAL wherever a usable recorded onset exists, so a
+  # comparison there could never fire (the first version of this guard did exactly that): the
+  # records that make the difference are the ones whose date_index is imputed.
   #
   # RESTRICT TO THE RECORDS THIS REGIME ACTUALLY SEES (observable by `end`), so the number
-  # describes the panel that was just built rather than the whole line list.
+  # describes the fit that was just made rather than the whole line list. A negative lag counts
+  # at lag 0 in both curves, as it does in the fit.
   base  <- (ll$confirmed %in% TRUE) & !is.na(obs) & as.Date(obs) <= as.Date(end)
-  k_rec <- base & !is.na(ons) & ons >= start
-  k_idx <- base & !is.na(di)  & di  >= start
-  if (sum(k_rec) < 100L || sum(k_idx) < 100L) return(invisible(NA_real_))
-  lag_rec <- as.numeric(as.Date(obs[k_rec]) - ons[k_rec])
-  lag_idx <- as.numeric(as.Date(obs[k_idx]) - di[k_idx])
+  k_fit <- base & !is.na(ons) & ons >= start
+  k_all <- base & !is.na(di)  & di  >= start
+  if (sum(k_fit) < 100L || sum(k_all) < 100L) return(invisible(NA_real_))
+  lag_fit <- pmax(as.numeric(as.Date(obs[k_fit]) - ons[k_fit]), 0)
+  lag_all <- pmax(as.numeric(as.Date(obs[k_all]) - di[k_all]), 0)
   ks <- 0:get0("TRUNC_MAX_DAYS", ifnotfound = 45L)
-  z_rec <- vapply(ks, function(k) mean(lag_rec >= 0 & lag_rec <= k), numeric(1))
-  z_idx <- vapply(ks, function(k) mean(lag_idx >= 0 & lag_idx <= k), numeric(1))
-  d <- max(abs(z_rec - z_idx), na.rm = TRUE)
-  # DIRECTION MATTERS MORE THAN MAGNITUDE. The difference is one-signed on this snapshot
-  # (z_idx >= z_rec at every lag): the imputed-onset records are observed sooner after their
-  # date_index than the recorded-onset records are after their onset, so the series EpiNow2 is
-  # fitted to is LESS truncated than the panel the truncation is fitted on. A truncation
-  # fitted on the recorded-onset basis is therefore slightly too long, and both consumers
-  # over-correct the recent weeks rather than under-correcting them. Reported, not silently
-  # absorbed: it cannot be removed without a date_index that replays per vintage, which the
-  # archive does not support (see the SERIES BASIS note at the top of this section).
-  .dir <- if (all(z_idx >= z_rec - 1e-12)) " (one-signed: fitted truncation is too LONG, so both consumers over-correct)"
-          else if (all(z_rec >= z_idx - 1e-12)) " (one-signed: fitted truncation is too SHORT, so both consumers under-correct)"
+  z_fit <- vapply(ks, function(k) mean(lag_fit <= k), numeric(1))
+  z_all <- vapply(ks, function(k) mean(lag_all <= k), numeric(1))
+  d <- max(abs(z_fit - z_all), na.rm = TRUE)
+  # DIRECTION MATTERS MORE THAN MAGNITUDE. Where z_all >= z_fit at every lag, the full series is
+  # observed sooner after its date_index than the fit's records are, so the fitted truncation is
+  # slightly too LONG and both consumers over-correct the recent weeks; the reverse means they
+  # under-correct. The message says which, so the sign is reported rather than silently absorbed.
+  .dir <- if (all(z_all >= z_fit - 1e-12)) " (one-signed: fitted truncation is too LONG, so both consumers over-correct)"
+          else if (all(z_fit >= z_all - 1e-12)) " (one-signed: fitted truncation is too SHORT, so both consumers under-correct)"
           else ""
   if (is.finite(d) && d > tol)
-    warning(sprintf(paste0("[trunc] %s: the recorded-onset basis used for the truncation fit ",
-                           "differs from the date_index basis EpiNow2 is fitted to by %.3f at ",
-                           "worst (tolerance %.2f)%s. The fitted truncation may not describe the ",
-                           "fitted series."), regime, d, tol, .dir), call. = FALSE)
+    warning(sprintf(paste0("[trunc] %s: the usable-onset records the truncation is fitted on ",
+                           "differ from the whole date_index series (imputed onsets included) by ",
+                           "%.3f at worst (tolerance %.2f)%s. The fitted truncation may not ",
+                           "describe the corrected series."), regime, d, tol, .dir), call. = FALSE)
   else
-    message(sprintf("[trunc] %s: recorded-onset vs date_index basis agree to %.4f (tol %.2f)%s",
+    message(sprintf("[trunc] %s: usable-onset records vs the whole date_index series agree to %.4f (tol %.2f)%s",
                     regime, d, tol, .dir))
   invisible(d)
 }
 
 #' Fingerprint a panel so a cached truncation fit cannot be served for a different one.
 .trunc_fingerprint <- function(panel, regime) {
-  parts <- vapply(panel, function(z)
-    sprintf("%s:%s:%.0f", format(min(z$date)), format(max(z$date)), sum(z$confirm)), character(1))
+  # THE FULL DAILY SERIES of every frame, not a summary of it. The key used to be each frame's
+  # first date, last date and total count, which re-dating cases leaves unchanged (a change to the
+  # onset imputation moves cases between days, not in or out), so a fit made on one series was
+  # served for another.
+  parts <- rlang::hash(lapply(panel, function(z) list(format(z$date), as.integer(z$confirm))))
   # THE ESTIMATOR IS PART OF THE KEY, not just the panel. TRUNC_SERIES_VERSION covers the
   # panel DEFINITION, but changing the prior, the observation family, the sampler settings or
   # the seed changes the fit on an unchanged panel — and nothing else here would notice, so the
@@ -811,7 +971,11 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
     d <- tryCatch(readRDS(cache), error = function(e) NULL)
     if (!is.null(d)) {
       message(sprintf("[trunc] %s: cached fit %s", regime, basename(cache)))
-      return(d)
+      # THE GATES ARE RE-APPLIED TO A CACHED FIT. They are not part of the key (a gate change
+      # does not change the fit, so it must not force a Stan refit), so without this a fit
+      # accepted under looser TRUNC_MEAN_RANGE / TRUNC_Z3_MAX would still be served after they
+      # were tightened. A refused cached fit is refused exactly as a fresh one would be.
+      return(if (.trunc_sanity(d, regime)) d else NULL)
     }
   }
   mx <- get0("TRUNC_MAX_DAYS", ifnotfound = 45L)
@@ -825,7 +989,7 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
     if (!is.null(.old)) assign(".Random.seed", .old, envir = .GlobalEnv)
     else if (exists(".Random.seed", envir = .GlobalEnv)) rm(".Random.seed", envir = .GlobalEnv)
   }, add = TRUE)
-  set.seed(get0("RANDOM_SEED", ifnotfound = 20260704L))
+  set_fixed_seed(get0("RANDOM_SEED", ifnotfound = 20260704L))
   est <- tryCatch(
     EpiNow2::estimate_truncation(
       panel,
@@ -896,18 +1060,51 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
   ok
 }
 
+#' The longest delay (days) EpiNow2 gives mass to when `dist` is the truncation passed to
+#' trunc_opts(): the support on which it renormalises the truncation pmf.
+#'
+#' Mirrors EpiNow2's create_stan_delays() (verified on the installed 1.8.0.9000, and pinned by
+#' tests/test_epi_params.R against that function). Both paths start from
+#' discretise(fix_parameters(dist)), a pmf of length n:
+#'   * UNCERTAIN parameters (the extract fit from estimate_truncation()) are passed to Stan
+#'     parametrically with delay_max = n, and Stan evaluates the primary-censored pmf on 0..n,
+#'     normalised by its CDF at n + 1;
+#'   * FIXED parameters (the as-of Gamma, the legacy delay) are passed as that discretised pmf
+#'     itself, on 0..n-1, normalised at n.
+#' So the same `max` gives a support one day shorter on the fixed path; it is measured here,
+#' never assumed.
+#' @return numeric scalar, or NA when the distribution cannot be discretised.
+.trunc_support_max <- function(dist) {
+  n <- tryCatch(length(EpiNow2::get_pmf(EpiNow2::discretise(EpiNow2::fix_parameters(dist)))),
+                error = function(e) NA_integer_)
+  if (length(n) != 1L || !is.finite(n) || n < 1L) return(NA_real_)
+  fixed <- !is.null(tryCatch(EpiNow2::discretise(dist), error = function(e) NULL))
+  as.numeric(if (fixed) n - 1L else n)
+}
+
 #' Convert a fitted truncation dist_spec into the pipeline's own delay-spec shape.
 #'
 #' The NOWCAST (04_nowcasting.R) evaluates a delay through delay_cdf() (00_config.R), which
 #' takes a list(family, params, rate, mean, sd) — not an EpiNow2 dist_spec. Both consumers must
 #' describe the SAME truncation, so this converts rather than re-deriving.
 #'
+#' THE SUPPORT TRAVELS WITH THE SPEC (`trunc_max`). EpiNow2 renormalises the truncation pmf on
+#' 0..trunc_max days (.trunc_support_max()), so the fitted parameters describe the delay
+#' CONDITIONED on being at most trunc_max days; the extract fit is estimated under that
+#' normalisation, and the as-of curve is fitted to it. Evaluated without it, the parametric CDF
+#' leaves out the mass beyond trunc_max and reads every recent week as less complete than
+#' EpiNow2 does. A consumer evaluating completeness at an integer lag L under the daily-rounding
+#' convention must therefore use F(L + 0.5) / F(trunc_max + 0.5), capped at 1 (04_nowcasting.R).
+#' `mean` and `sd` are the moments of that same conditioned delay (continuous delay below
+#' trunc_max + 0.5), so the spec's summary describes the distribution both consumers use.
+#'
 #' The uncertain parameters are collapsed to their means (fix_parameters): the nowcast applies a
 #' deterministic weight per week, so it has nowhere to put the uncertainty. That is a real
 #' difference between the two consumers, stated here rather than hidden — the R(t) fit keeps the
 #' posterior, the nowcast uses the point estimate.
 #'
-#' @return list in delay_cdf() shape, or NULL if the distribution cannot be represented.
+#' @return list in delay_cdf() shape plus `trunc_max`, or NULL if the distribution cannot be
+#'   represented.
 .trunc_as_delay_spec <- function(dist, regime = "unknown") {
   if (is.null(dist)) return(NULL)
   fx <- tryCatch(EpiNow2::fix_parameters(dist), error = function(e) NULL)
@@ -915,28 +1112,52 @@ epinow2_daily_confirmed <- function(ll, end_date, issue_date = NULL, caller = "e
   pr <- tryCatch(EpiNow2::get_parameters(fx), error = function(e) NULL)
   if (is.null(pr) || !length(pr)) return(NULL)
   nm <- names(pr)
-  # Only the families delay_cdf() can evaluate. estimate_truncation() is fitted with a
-  # LogNormal here, so `lnorm` is the live path; gamma is accepted in case the prior family
-  # is ever changed. Anything else returns NULL rather than silently degrading to pexp().
+  tmax <- .trunc_support_max(dist)
+  if (!is.finite(tmax)) {
+    warning(sprintf("[trunc] %s: the truncation's support could not be determined; REFUSED.",
+                    regime), call. = FALSE)
+    return(NULL)
+  }
+  b <- tmax + 0.5                     # continuous bound of "rounded delay <= trunc_max"
+  # Only the families delay_cdf() can evaluate: `lnorm` is the extract regime (estimate_truncation()
+  # is fitted with a LogNormal prior family), `gamma` the as-of regime (.trunc_fit_asof_cohort()),
+  # and the legacy delay takes its own family. Anything else returns NULL rather than silently
+  # degrading to pexp().
+  # Moments of the delay conditioned on D < b, in closed form:
+  #   lognormal  E[D^j; D < b] = exp(j ml + j^2 sl^2 / 2) * pnorm((log b - ml - j sl^2) / sl)
+  #   gamma      E[D^j; D < b] = (sh)_j / rt^j * pgamma(b, sh + j, rt)   ((sh)_j rising factorial)
   if (all(c("meanlog", "sdlog") %in% nm)) {
     ml <- as.numeric(pr$meanlog); sl <- as.numeric(pr$sdlog)
     if (!is.finite(ml) || !is.finite(sl) || sl <= 0) return(NULL)
-    mean <- exp(ml + sl^2 / 2)
-    sd   <- sqrt((exp(sl^2) - 1) * exp(2 * ml + sl^2))
-    out <- list(family = "lnorm", params = c(meanlog = ml, sdlog = sl),
-                mean = mean, sd = sd)
+    Fb <- stats::plnorm(b, ml, sl)
+    m1 <- exp(ml + sl^2 / 2) * stats::pnorm((log(b) - ml - sl^2) / sl) / Fb
+    m2 <- exp(2 * ml + 2 * sl^2) * stats::pnorm((log(b) - ml - 2 * sl^2) / sl) / Fb
+    out <- list(family = "lnorm", params = c(meanlog = ml, sdlog = sl))
   } else if (all(c("shape", "rate") %in% nm)) {
     sh <- as.numeric(pr$shape); rt <- as.numeric(pr$rate)
     if (!is.finite(sh) || !is.finite(rt) || sh <= 0 || rt <= 0) return(NULL)
-    out <- list(family = "gamma", params = c(shape = sh, rate = rt),
-                mean = sh / rt, sd = sqrt(sh) / rt)
+    Fb <- stats::pgamma(b, sh, rt)
+    m1 <- sh / rt * stats::pgamma(b, sh + 1, rt) / Fb
+    m2 <- sh * (sh + 1) / rt^2 * stats::pgamma(b, sh + 2, rt) / Fb
+    out <- list(family = "gamma", params = c(shape = sh, rate = rt))
   } else return(NULL)
+  if (!is.finite(Fb) || Fb <= 0 || !is.finite(m1) || m1 <= 0) return(NULL)
+  out$mean <- m1
+  out$sd   <- sqrt(max(m2 - m1^2, 0))
+  out$trunc_max <- tmax
   # delay_cdf() falls back to pexp(q, dp$rate) when the named parameters are unusable, and
   # compute_truncation_weights() VALIDATES that `rate` is finite and positive, so it must be
   # present and sane even though the lnorm/gamma branch never reads it. 1/mean is the
   # moment-matched exponential rate — the correct fallback if it is ever reached.
   out$rate <- 1 / out$mean
-  out$estimator <- sprintf("estimate_truncation_%s", regime)
+  # THE LABEL NAMES THE ESTIMATOR THAT PRODUCED `dist`, as epinow2_truncation() dispatches it:
+  # the legacy delay under TRUNC_SOURCE = "legacy" (either regime), else the Lynden-Bell cohort
+  # gamma for "asof" and estimate_truncation() for "extract".
+  out$estimator <-
+    if (identical(get0("TRUNC_SOURCE", ifnotfound = "fitted"), "legacy"))
+      sprintf("legacy_onset_sample_%s", regime)
+    else if (identical(regime, "asof")) "lynden_bell_cohort_gamma_asof"
+    else sprintf("estimate_truncation_%s", regime)
   out$source <- "fitted_truncation"
   out
 }
@@ -986,9 +1207,10 @@ epinow2_truncation <- function(issue_date = NULL, ll = NULL,
   src <- get0("TRUNC_SOURCE", ifnotfound = "fitted")
   if (identical(src, "legacy")) {
     warning(paste0("[trunc] TRUNC_SOURCE='legacy': using the RETIRED onset->sample delay. That ",
-                   "delay describes the wrong reporting leg (onset->sample ~7.7 d against a ",
-                   "measured onset->appearance ~11.4 d) and biases R(t) DOWN at the present. ",
-                   "For comparison only."), call. = FALSE)
+                   "delay is not the lag that truncates either corrected series (onset -> ",
+                   "appearance in the extract, or onset -> observation on the date_index basis), ",
+                   "so the recent weeks and R(t) at the present are mis-corrected. For ",
+                   "comparison only."), call. = FALSE)
     lg <- .trunc_legacy_dist()
     if (is.null(lg))
       warning("[trunc] TRUNC_SOURCE='legacy' but the retired delay could not be expressed as a ",
@@ -1007,15 +1229,16 @@ epinow2_truncation <- function(issue_date = NULL, ll = NULL,
     deployed <- is.null(issue_date) || as.Date(issue_date) >= as.Date(analysis_date)
     regime <- if (deployed) "extract" else "asof"
   }
-  # PANEL END DATE — and the ASOF REGIME IS SHARED ACROSS FOLDS, deliberately.
+  # END DATE — and the ASOF REGIME IS SHARED ACROSS FOLDS, deliberately.
   #
   # The extract panel ends at the issue date (or the analysis date when none is given).
   #
-  # The AS-OF panel always ends at the ANALYSIS DATE, whatever issue_date says. The truncation
+  # The AS-OF fit (a cohort estimator, no panel) always ends at the ANALYSIS DATE, whatever
+  # issue_date says. The truncation
   # is a SHARED NUISANCE PARAMETER of the LFO — the same choice run_invasion_lfo() already
   # makes for its nowcast delay, and for the same reason: a nuisance parameter refitted per
   # fold is correlated with fold index, so apparent skill drifts with calendar time for a
-  # purely artefactual reason. Ending every fold's panel at the analysis date makes the fitted
+  # purely artefactual reason. Ending every fold's as-of fit at the analysis date makes the fitted
   # truncation identical across folds by construction.
   #
   # It also removes a failure that per-fold fitting caused: THE EARLY FOLDS HAD NO TRUNCATION
@@ -1030,20 +1253,21 @@ epinow2_truncation <- function(issue_date = NULL, ll = NULL,
   # THE COST, STATED: the as-of estimate then uses line-list rows that postdate a fold's origin.
   # That is look-ahead in the NUISANCE parameter — it is not a leak of the outcome being
   # scored, and it is the LFO's established policy for exactly this class of quantity, but it
-  # is one more reason fold skill is optimistic relative to deployment. See the "RESIDUAL, AND
-  # IT IS ACCEPTED" note in 04_nowcasting.R.
+  # is one more reason fold skill is optimistic relative to deployment. See the "RESIDUAL, FOR
+  # THE RE-CENSORED ROUNDS ONLY" note in 04_nowcasting.R.
   end <- if (deployed && !is.null(issue_date)) as.Date(issue_date) else as.Date(analysis_date)
 
   # TWO REGIMES, TWO ESTIMATORS — because the lag is observable in one and not the other.
   #   extract : the appearance lag exists only as the difference between archive vintages,
   #             so it is DECONVOLVED from snapshots (estimate_truncation(), Stan, cached).
-  #   asof    : the lag is onset -> linelist_observation_date() and both are columns, so the
-  #             completeness curve is MEASURED by onset cohort and a gamma fitted to it (no
-  #             Stan, no cache — it is deterministic and sub-second).
+  #   asof    : the lag is onset (date_index of a usable recorded onset) ->
+  #             linelist_observation_date(), both on every record, so the completeness curve is
+  #             MEASURED by onset cohort and a gamma fitted to it (no Stan, no cache — it is
+  #             deterministic and sub-second).
   if (deployed) {
+    # No basis guard here: the extract panel IS the date_index series (SERIES BASIS above).
     panel <- .trunc_validate_panel(.trunc_panel_extract(end, start), regime)
     if (is.null(panel)) return(NULL)
-    if (!is.null(ll)) .trunc_basis_guard(ll, end, start, regime)
     return(.trunc_fit(panel, regime))
   }
   if (is.null(ll)) {
@@ -1084,16 +1308,19 @@ epinow2_truncation <- function(issue_date = NULL, ll = NULL,
   )
 
   # ---- RIGHT TRUNCATION -------------------------------------------------------
-  # The distribution is ESTIMATED from line-list vintages (section 4b above), not derived from
-  # the onset->sample delay. That delay describes the wrong leg: this series is truncated by
-  # onset -> APPEARANCE IN THE EXTRACT, which adds an unrecorded data-entry lag (measured
-  # sample->appearance median 2.0 d, mean 2.6 d). Understating it made EpiNow2 treat the recent
-  # weeks as near-complete, read the reporting dip as a decline, and return an R(t) biased DOWN
-  # at the present — the value RT_WINDOW_WEEKS = 1 hands to the 2-week forecast and the cascade.
+  # The distribution is ESTIMATED per regime (section 4b above: from the archived vintages for
+  # the extract regime, from the line list's onset cohorts for the as-of regime), not derived
+  # from the onset->sample delay. That delay describes the wrong leg for the deployed series,
+  # which is truncated by onset -> APPEARANCE IN THE EXTRACT, including an unrecorded data-entry
+  # lag (sample->appearance measured at median 2.0 d, mean 2.6 d). While that delay was used
+  # (until 2026-09-21) EpiNow2 treated the recent weeks as near-complete, read the reporting dip
+  # as a decline, and returned an R(t) biased DOWN at the present — the value RT_WINDOW_WEEKS = 1
+  # hands to the 2-week forecast and the cascade.
   #
   # `truncation` is supplied by the CALLER, which knows which series it is fitting:
-  #   estimate_rt_epinow2()  -> deployed fit  -> extract regime  (onset -> appearance)
-  #   bayes_rt_week_draws()  -> one LFO fold  -> asof regime     (onset -> sample)
+  #   estimate_rt_epinow2()  -> deployed fit         -> extract regime (onset -> appearance)
+  #   bayes_rt_week_draws()  -> snapshot round       -> extract regime fitted on that date
+  #                          -> re-censored round    -> asof regime    (onset -> sample)
   # See epinow2_truncation() for why those differ and why using one for both is wrong.
   #
   # NULL is NOT silently tolerated. Falling back to an un-truncated fit would overstate the
@@ -1163,31 +1390,9 @@ epinow2_truncation <- function(issue_date = NULL, ll = NULL,
 }
 
 # ---------------------------------------------------------------------------
-# 6. MAIN — Compute and summarise all parameters
+# This file is a LIBRARY: sourcing it defines the estimators and computes nothing.
 # ---------------------------------------------------------------------------
-
-if (interactive()) {
-message("\n=== 02_epi_params.R: Computing all epidemiological parameters ===\n")
-
-# --- 6a. Generation time PMFs ---
-message("--- Generation time PMFs ---")
-GT_PMFS <- compute_all_gt_pmfs()
-
-for (nm in names(GT_PMFS)) {
-  p   <- GT_PROFILES[[nm]]
-  pmf <- GT_PMFS[[nm]]
-  # Verify moments approximately match requested parameters
-  tau_seq      <- seq_len(length(pmf))
-  pmf_mean     <- sum(tau_seq * pmf)
-  pmf_sd       <- sqrt(sum(tau_seq^2 * pmf) - pmf_mean^2)
-  message(sprintf(
-    "  [check] %s PMF: requested mean=%.1f d, sd=%.1f d | PMF mean=%.2f d, sd=%.2f d",
-    nm, p$mean, p$sd, pmf_mean, pmf_sd
-  ))
-}
-
-# --- 6e. Summary printout ---
-message("\n=== Parameter summary ===")
-message(sprintf("GT profiles computed: %s", paste(names(GT_PMFS), collapse = ", ")))
-message("=== 02_epi_params.R complete ===\n")
-}
+# An `if (interactive())` block here used to recompute every GT PMF and print its realised
+# moments. It could not run under Rscript (interactive() is FALSE), so it was dead in every
+# pipeline run, and compute_all_gt_pmfs() already reports and warns on those moments itself.
+# Call compute_all_gt_pmfs() to get them.

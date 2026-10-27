@@ -12,6 +12,8 @@
 #   - build_M15()              symmetrised relocation-OD kernel O + t(O) (NOT inflow-informed:
 #                              no independent inflow table exists)
 #   - build_M17()              all-kernel consensus ensemble (convex mean + overlaid source rows)
+#   - the MAIN-block guard, load_osrm()'s column alignment, .short_trip_tag_asof(), and the
+#     manifest fingerprint (mobility_fingerprint_string(); 46's mirror of 03's fields)
 #
 # Most tests use small in-memory matrices so no data files are required; the one
 # build_M15 real-data test skips when the Flowminder OD file is absent.
@@ -778,4 +780,111 @@ test_that("built kernels: every manifest entry has a kernel file on disk", {
               info = paste("manifest entries with no file:",
                            paste(setdiff(man$matrix_id, fs), collapse = ", ")))
   expect_gt(nrow(man), 0L)
+})
+
+# =============================================================================
+# Review fixes (2026-10-17): MAIN guard, fill guard, OSRM column order, snapshot
+# tag, and the manifest fingerprint that 46_bayes_posterior_draws.R mirrors
+# =============================================================================
+
+.mob_file <- function(f) file.path(here::here(), "spatiotemporal", f)
+
+test_that("03's MAIN block does not fire on a source() under the generic FORCE_RUN=1", {
+  # Scripts forced with FORCE_RUN=1 (46/47/48/52) source 03 through load_pipeline_modules();
+  # the guard used to honour FORCE_RUN and rebuild + overwrite every kernel from inside them.
+  # The condition is evaluated from the parsed file, never by sourcing it, so a regression
+  # cannot itself overwrite outputs/mobility/.
+  ex <- parse(.mob_file("03_mobility_matrices.R"), keep.source = FALSE)
+  is_main <- function(e) is.call(e) && identical(e[[1]], as.name("if")) &&
+    any(grepl("MOBILITY_MATRICES <- build_all_mobility_matrices", deparse(e[[3]]), fixed = TRUE))
+  main <- Filter(is_main, as.list(ex))
+  expect_length(main, 1L)
+  old <- Sys.getenv(c("FORCE_RUN", "MOBILITY_FORCE_RUN"), unset = NA)
+  on.exit(for (v in names(old)) if (is.na(old[[v]])) Sys.unsetenv(v) else
+    do.call(Sys.setenv, stats::setNames(list(old[[v]]), v)), add = TRUE)
+  Sys.setenv(FORCE_RUN = "1"); Sys.unsetenv("MOBILITY_FORCE_RUN")
+  env <- new.env(parent = globalenv())   # MOBILITY_MATRICES does not exist here
+  if (!exists("MOBILITY_MATRICES")) expect_false(eval(main[[1]][[2]], env))
+  # ...and the call passes the road-distance matrix, as run_all.R does.
+  expect_true(any(grepl("osrm_dist_mat", deparse(main[[1]][[3]]), fixed = TRUE)))
+})
+
+test_that("compose_epicentre(fill != 'none') with nothing to refill keeps the base row for an empty source", {
+  skip_if_missing("compose_epicentre")
+  f <- .fill_fixture()
+  epi <- f$epi
+  epi["A", ] <- 0
+  attr(epi, "measured") <- NULL; attr(epi, "source_origins") <- NULL   # U is empty
+  W <- suppressWarnings(compose_epicentre(f$base, epi, "A", f$zones, "T", fill = "unmeasured"))
+  expect_equal(unname(W["A", ]), unname(f$base["A", ]))
+  expect_equal(sum(W["A", ]), 1)
+  expect_false("A" %in% attr(W, "source_rows"))
+  expect_warning(compose_epicentre(f$base, epi, "A", f$zones, "T", fill = "unmeasured"),
+                 "carries no mass")
+})
+
+test_that("load_osrm puts the columns in ROW order (a column-permuted file is aligned by name)", {
+  skip_if_missing("load_osrm")
+  z <- c("A", "B", "C")
+  M <- matrix(c(0, 10, 20,
+                11, 0, 30,
+                21, 31, 0), 3, byrow = TRUE, dimnames = list(z, z))
+  perm <- c("C", "A", "B")
+  df <- data.frame(nom = z, M[, perm], check.names = FALSE)
+  d <- tempfile("osrm"); dir.create(d)
+  readr::write_csv(df, file.path(d, "osrm__travel_time__static.matrix.csv"))
+  old_dir <- get0("OSRM_DIR", envir = globalenv(), ifnotfound = NULL)
+  old_gf  <- get0("OSRM_GAP_FILL", envir = globalenv(), ifnotfound = NULL)
+  on.exit({
+    if (is.null(old_dir)) rm("OSRM_DIR", envir = globalenv()) else assign("OSRM_DIR", old_dir, envir = globalenv())
+    if (is.null(old_gf)) rm("OSRM_GAP_FILL", envir = globalenv()) else assign("OSRM_GAP_FILL", old_gf, envir = globalenv())
+  }, add = TRUE)
+  assign("OSRM_DIR", d, envir = globalenv()); assign("OSRM_GAP_FILL", FALSE, envir = globalenv())
+  L <- suppressMessages(load_osrm("travel_time"))
+  expect_identical(colnames(L), rownames(L))
+  expect_equal(unname(L), unname(M))
+  expect_equal(unname(diag(L)), c(0, 0, 0))
+})
+
+test_that(".short_trip_tag_asof: latest snapshot on or before the date, else the EARLIEST", {
+  skip_if_missing(".short_trip_tag_asof")
+  f <- .short_trip_tag_asof
+  environment(f) <- list2env(list(
+    FLOWMINDER_ST_TAGS  = c("20260507", "20260430", "20260524"),
+    FLOWMINDER_ST_DATES = as.Date(c("2026-05-07", "2026-04-30", "2026-05-24"))),
+    parent = globalenv())
+  expect_identical(f(as.Date("2026-05-10")), "20260507")
+  expect_identical(f(as.Date("2026-06-01")), "20260524")
+  expect_identical(f(as.Date("2026-04-01")), "20260430")   # all post-date: earliest, never latest
+})
+
+test_that("mobility_fingerprint_string: one string per field, the historical format for scalars", {
+  skip_if_missing("mobility_fingerprint_string")
+  cfg <- list(a = "x", b = NA_character_, c = c("p", "q"), d = character(0))
+  expect_identical(mobility_fingerprint_string(cfg), "a=x; b=NA; c=p,q; d=")
+  sc <- list(a = "x", b = "2026-10-09")
+  expect_identical(mobility_fingerprint_string(sc),
+                   paste(names(sc), unlist(sc), sep = "=", collapse = "; "))
+})
+
+test_that("46's manifest check mirrors exactly the fields 03 fingerprints, in 03's order", {
+  # 46 compares the human-readable config string, so a field present on one side only makes it
+  # refuse the cached kernels; this catches the omission before a run does.
+  # The names of the list(...) assigned to `lhs`, read from the parse data (no code is run).
+  list_names <- function(file, lhs) {
+    pd  <- utils::getParseData(parse(.mob_file(file), keep.source = TRUE))
+    sym <- pd[pd$token == "SYMBOL" & pd$text == lhs, ]
+    for (pid in pd$parent[match(sym$id, pd$id)]) {
+      asg <- pd$parent[pd$id == pid]
+      e <- tryCatch(str2lang(utils::getParseText(pd, asg)), error = function(err) NULL)
+      if (is.call(e) && identical(e[[1]], as.name("<-")) && identical(e[[2]], as.name(lhs)) &&
+          is.call(e[[3]]) && identical(e[[3]][[1]], as.name("list")))
+        return(names(as.list(e[[3]]))[-1])
+    }
+    NULL
+  }
+  n03 <- list_names("03_mobility_matrices.R", ".cfg")
+  n46 <- list_names("46_bayes_posterior_draws.R", ".cfg_now")
+  expect_true(length(n03) > 5L)
+  expect_identical(n46, n03)
 })

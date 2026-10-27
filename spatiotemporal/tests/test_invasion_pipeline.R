@@ -5,7 +5,7 @@
 #
 # These are non-trivial logic/invariant tests (not "function exists" checks)
 # for the modules run_all.R actually sources. Scripts 09–14 are STALE (moved to
-# spatiotemporal/stale/) and are never referenced here; metric assertions that
+# deleted, not archived) and are never referenced here; metric assertions that
 # used to live in stale/11_metrics.R are ported to their live equivalents:
 #   * AUC-PR / log-score / Brier  -> 16_invasion_eval.R (.auc_pr/.log_score/.brier)
 #   * Weighted Interval Score     -> the live `wis_one` inside 04b_epinowcast.R
@@ -41,8 +41,12 @@ skip_if_missing <- function(nm) if (!.exists_fn(nm))
 
 # If a sentinel function is absent (file run standalone), source the live modules
 # the tests depend on. No-op when run through run_tests.R (already sourced).
+# SENTINELS MUST BE FUNCTIONS THAT STILL EXIST. This tested for forecast_workhorse(), which
+# went with the frequentist arm, so the guard never fired and the eight modules below were
+# re-sourced on EVERY run — including under run_tests.R, which had already loaded them, and
+# which re-sourcing 00_config.R mid-suite resets RANDOM_SEED and WEEK_ANCHOR underneath.
 .ensure_sourced <- function() {
-  if (.exists_fn("forecast_workhorse") && .exists_fn(".auc_pr")) return(invisible())
+  if (.exists_fn("compute_foi") && .exists_fn(".auc_pr")) return(invisible())
   if (!requireNamespace("here", quietly = TRUE)) return(invisible())
   st <- file.path(here::here(), "spatiotemporal")
   for (m in c("00_config.R", "01_data_prep.R", "02_epi_params.R", "04_nowcasting.R",
@@ -342,7 +346,7 @@ test_that("nowcast truncation weights are in (0,1], monotone with lag, NA for fu
 # These tests covered .invasion_prob() and forecast_workhorse(), the frequentist renewal
 # engine, and the p_infection_* ascertainment band it emitted. Both were removed on
 # 2026-09-19: the frequentist arm scored ZERO models in the shipped evaluation (the field is
-# 54 Bayesian models plus three structural baselines), and ascertainment was removed from the
+# the Bayesian grid plus the structural baselines), and ascertainment was removed from the
 # pipeline entirely because a constant ascertainment cannot identify anything the confirmed-
 # case scale does not already carry. The Bayesian hazard->probability conversion that
 # replaced .invasion_prob() is covered in test_bayes_projection.R.
@@ -682,6 +686,8 @@ test_that("compute_risk_scores generalises within-province RR to every province 
 # 13-week cascade adopts the featured model's mobility kernel, the choice
 # propagated into the long-horizon projection. These tests pin the composite.
 test_that("selection uses the pooled CV composite, not AUC-PR skill alone", {
+  # These fixtures carry the axis columns directly (no sel_* columns), so they pin the
+  # PREVIOUS basis explicitly; the per-date / post-burn-in basis has its own tests below.
   # Two horizons, three models. `disc` wins AUC-PR skill at BOTH horizons by a
   # hair but is worst on rank-of-truth and log score; `bal` is a close second on
   # skill and best on the other two. The composite must prefer `bal`.
@@ -699,12 +705,12 @@ test_that("selection uses the pooled CV composite, not AUC-PR skill alone", {
   # back to the raw axis with a warning. The fallback is correct behaviour, but a test of the
   # COMPOSITE rule must not silently change meaning when that flag moves — pin the axis here
   # and let the recalibration tests cover the recalibrated one.
-  expect_equal(best_invasion_model(ev, rule = "composite", select_on_recal = FALSE), "bal")
+  expect_equal(best_invasion_model(ev, rule = "composite", select_on_recal = FALSE, basis = "pooled_all_dates"), "bal")
   # the previous rule is still reachable and still returns the discrimination lead
-  expect_equal(best_invasion_model(ev, rule = "aucpr", select_on_recal = FALSE), "disc")
+  expect_equal(best_invasion_model(ev, rule = "aucpr", select_on_recal = FALSE, basis = "pooled_all_dates"), "disc")
 
   # composite arithmetic is exactly sum-of-within-horizon-ranks, pooled
-  tb <- invasion_selection_table(ev, select_on_recal = FALSE)
+  tb <- invasion_selection_table(ev, select_on_recal = FALSE, basis = "pooled_all_dates")
   comp <- tb[!duplicated(tb$method), c("method", "composite")]
   # h1 & h2 ranks are identical here: bal = 2+1+1 = 4, disc = 1+2+2 = 5, poor = 3+3+3 = 9
   expect_equal(comp$composite[comp$method == "bal"],  8L)
@@ -723,19 +729,19 @@ test_that("selection gates still bind ahead of the composite", {
     "spiky", 2L,       99.0,          200.0,               0.010,      FALSE,
     "solid", 2L,       30.0,           18.0,               0.040,      FALSE,
     "other", 2L,       29.0,           19.0,               0.041,      FALSE)
-  expect_equal(best_invasion_model(ev, select_on_recal = FALSE), "solid")
+  expect_equal(best_invasion_model(ev, select_on_recal = FALSE, basis = "pooled_all_dates"), "solid")
 
   # a partial-CV model is scored on an incomparable support and must be excluded
   # even when it sweeps every axis
   ev2 <- ev
   ev2$partial_cv[ev2$method == "spiky"] <- TRUE
   ev2$mean_rank_of_truth[ev2$method == "spiky"] <- 1
-  expect_equal(best_invasion_model(ev2), "solid")
+  expect_equal(best_invasion_model(ev2, basis = "pooled_all_dates"), "solid")
 
   # a model absent at the harder horizon cannot win by sitting it out
   ev3 <- ev[!(ev$method == "spiky" & ev$horizon == 2L), ]
   ev3$mean_rank_of_truth[ev3$method == "spiky"] <- 1
-  expect_equal(best_invasion_model(ev3), "solid")
+  expect_equal(best_invasion_model(ev3, basis = "pooled_all_dates"), "solid")
 })
 
 test_that("NA metrics rank last on their own axis rather than winning silently", {
@@ -745,7 +751,7 @@ test_that("NA metrics rank last on their own axis rather than winning silently",
     "solid", 1L,       29.0,          18.0,                0.040,      FALSE,
     "nas",   2L,       30.0,          NA_real_,            NA_real_,   FALSE,
     "solid", 2L,       29.0,          18.0,                0.040,      FALSE)
-  expect_equal(best_invasion_model(ev, select_on_recal = FALSE), "solid")
+  expect_equal(best_invasion_model(ev, select_on_recal = FALSE, basis = "pooled_all_dates"), "solid")
 })
 
 # -----------------------------------------------------------------------------
@@ -935,4 +941,52 @@ test_that("fs_lfo_col is not defeated by rank-only rows that cannot carry p_reca
   d2 <- d; d2$p_recal[1] <- NA_real_
   expect_warning(col2 <- fs_lfo_col(d2, scale = "recalibrated"), "no recalibrated probability")
   expect_identical(col2, "p_invasion")
+})
+
+test_that("zone_spatial_error puts mean_p / max_p on the recalibrated scale and says so", {
+  if (!exists("zone_spatial_error", mode = "function"))
+    testthat::skip("zone_spatial_error() unavailable")
+  # The per-fold recalibration factor differs by fold, so a MEAN over folds is not invariant to
+  # it (the within-fold ranks are). mean_p, max_p and the false-alarm threshold used to be
+  # computed on the raw column with no scale label.
+  set.seed(3)
+  d <- expand.grid(health_zone = paste0("Z", 1:30), fold_id = 1:4, stringsAsFactors = FALSE)
+  d$method <- "m"; d$horizon <- 1L; d$cutoff <- as.Date("2026-06-01") + 7 * d$fold_id
+  d$p_invasion <- stats::runif(nrow(d), 0, 0.3); d$is_new_invasion <- 0L
+  d$p_invasion[d$health_zone == "Z1"] <- 0.9
+  d$is_new_invasion[d$health_zone %in% c("Z1", "Z2") & d$fold_id == 4] <- 1L
+  d$p_recal <- 1 - (1 - d$p_invasion)^c(0.2, 0.5, 1, 3)[d$fold_id]
+  e <- zone_spatial_error(d, horizon = 1L, method = "m", k = 5L)
+  ex <- stats::aggregate(p_recal ~ health_zone, d, mean)
+  expect_equal(e$mean_p[match(ex$health_zone, e$health_zone)], ex$p_recal)
+  expect_true(all(e$prob_scale == "recalibrated (prequential)"))
+  # Rounds with no fitted factor carry their raw probability in p_recal, and the stamp counts them.
+  d2 <- d; d2$delta_estimable <- d2$fold_id >= 3
+  e2 <- zone_spatial_error(d2, horizon = 1L, method = "m", k = 5L)
+  expect_true(all(e2$prob_scale == "recalibrated (prequential); 2 of 4 rounds uncorrected"))
+  expect_identical(e$flag[e$health_zone == "Z1"], "hit")
+  raw <- d; raw$p_recal <- NULL
+  expect_warning(er <- zone_spatial_error(raw, horizon = 1L, method = "m", k = 5L), "RAW")
+  expect_true(all(er$prob_scale == "raw"))
+  # Ranks are within-fold, so they do not depend on the scale.
+  expect_identical(e$best_rank[order(e$health_zone)], er$best_rank[order(er$health_zone)])
+})
+
+test_that("prospective_invasion_check names the probability scale of each column", {
+  if (!exists("prospective_invasion_check", mode = "function"))
+    testthat::skip("prospective_invasion_check() unavailable")
+  fd <- data.frame(health_zone = paste0("Z", 1:20), p_invasion = seq(0.2, 0.01, length.out = 20))
+  fd$p_recal <- 1 - (1 - fd$p_invasion)^0.6
+  pc <- prospective_invasion_check(fd, c("Z2", "Z18"), top_k = 15L)
+  expect_identical(names(pc$per_zone),
+                   c("health_zone", "pre_invasion_rank", "p_invasion_raw", "p_recal", "in_topk"))
+  expect_equal(pc$per_zone$p_recal, fd$p_recal[c(2, 18)])
+  expect_identical(pc$summary$n_in_topk, 1L)
+  # Without p_recal there is no recalibrated column, and the ranks are the same.
+  pr <- prospective_invasion_check(fd[, c("health_zone", "p_invasion")], c("Z2", "Z18"), 15L)
+  expect_false("p_recal" %in% names(pr$per_zone))
+  expect_identical(pr$per_zone$pre_invasion_rank, pc$per_zone$pre_invasion_rank)
+  # A rank-only input with no hit returns an empty table instead of erroring.
+  expect_identical(nrow(prospective_invasion_check(data.frame(health_zone = "Z1", rank_med = 1),
+                                                   "Z9")$per_zone), 0L)
 })

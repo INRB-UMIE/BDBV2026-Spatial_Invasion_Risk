@@ -3,8 +3,8 @@
 # BDBV 2026 DRC · 3-month spatial invasion cascade
 #
 # ONE coherent figure answering "if a major city is invaded, where do we look
-# next?" — combining the eastern-epicentre frontier (Figure4_cascade anchor) with
-# the urban conditional scenarios (Figure_urban_*), across all five hub cities.
+# next?", built from the urban conditional scenarios (38_urban_scenarios.R) across the
+# hub cities those scenarios seed.
 #
 #   Panel A  HUB FLOW MAP — each hub city's mobility to/from ANYWHERE in the DRC (the
 #            same hubs as panels B & C), from the Flowminder directed origin->destination
@@ -12,29 +12,32 @@
 #            coloured by DIRECTION (outflow vs inflow), width = relocations. "Where does each
 #            hub pull from and push to across the country?"
 #   Panel B  WHICH domino matters — cities ranked by expected additional health
-#            zones invaded within 13 weeks if that city falls (seeded week 1).
+#            zones invaded by the headline horizon if that city falls (earliest seed week,
+#            pooled seeded-R arm), with the paired 90% Monte-Carlo interval.
 #   Panel C  WHERE to look next — per-city watch-lists (one facet per city). Each
 #            zone is ranked by the ATTRIBUTABLE increase it receives from the city
 #            (so the list is the city's OWN catchment, not the pre-saturated east),
-#            and drawn as a baseline -> conditional dumbbell so BOTH quantities show:
-#              • dot position  = TOTAL P(invasion | city invaded)   [where to look]
-#              • segment length = ATTRIBUTABLE increase P_cond - P_base [what the
-#                                 city itself adds]
+#            and drawn as a PAIR of interval bars so BOTH quantities show:
+#              • grey, upper    = baseline P(invasion)
+#              • colour, lower  = P(invasion | city invaded)   [where to look]
+#            the horizontal gap between the two points is the attributable increase
+#            P_cond - P_base [what the city itself adds]. No segment joins them.
 #
 # Rationale for showing BOTH (was: attributable-only): attributable Δ answers the
-# atttribution question ("does this city matter?") but is pale wherever baseline
+# attribution question ("does this city matter?") but is pale wherever baseline
 # is already high; the operational "where do I send teams" question needs the TOTAL
-# conditional risk. The dumbbell carries both in a single mark.
+# conditional risk. The pair carries both.
 #
 # Standalone & regenerable: reads only saved CSVs + the Flowminder OD matrix (no
-# re-simulation), mirroring 37_cascade_figure4.R. Works in both spatiotemporal/ and
-# spatiotemporal_conditional/.
+# re-simulation), mirroring 37_cascade_figure4.R, and draws them only when they are the
+# latest cascade run's for this analysis date (cascade_stamp_check(), 35_cascade_viz.R).
 #
 # Run:  Rscript spatiotemporal/40_cascade_next_dominoes.R
 # Out:  outputs/key_outputs/manuscript_figures/Figure4.{pdf,png}
 #       outputs/key_outputs/Figure_next_dominoes_watchlist.csv
 # Panel titles/subtitles and the embedded caption are intentionally OMITTED — figure
 # identity is carried by the A/B/C tags and axis titles; the caption lives in the manuscript.
+# The exceptions are provenance stamps: an UNCALIBRATED cascade run, and an MI-pooled pass.
 # =============================================================================
 suppressPackageStartupMessages({
   library(dplyr); library(readr); library(ggplot2); library(patchwork)
@@ -43,25 +46,19 @@ suppressPackageStartupMessages({
 ST_DIR <- Sys.getenv("CASCADE_ST_DIR", unset = file.path(here::here(), "spatiotemporal"))
 source(file.path(ST_DIR, "00_config.R"))
 
-# ---- style constants (shared with 37_cascade_figure4.R) --------------------
-INK <- "grey15"; MUTED <- "grey38"; GRID <- "grey92"
-OKABE <- c("#0072B2","#D55E00","#009E73","#CC79A7","#E69F00","#56B4E9","#F0E442","#000000")
-# Province identity spanning the eastern epicentre AND the western/southern urban
-# catchments (Okabe-Ito, CVD-safe). Merged from 37 (east) + 38 (urban).
-PROV_COL <- c(
-  "Ituri"="#0072B2","Nord-Kivu"="#D55E00","Haut-Uele"="#009E73","Sud-Kivu"="#CC79A7",
-  "Kinshasa"="#E69F00","Haut-Katanga"="#56B4E9","Kasaï-Oriental"="#CC79A7",
-  "Kasaï-Central"="#009E73","Kasaï"="#D55E00","Kwilu"="#0072B2",
-  "Kwango"="#F0E442","Lomami"="#000000","Mai-Ndombe"="#7A7A7A")
-# Spare palette for provinces WITHOUT an identity colour (e.g. peripheral zones a hub's
-# catchment reaches — Tshopo, Maniema). PROV_COL already consumes every OKABE hue, so
-# setdiff(OKABE, PROV_COL) is empty; without a real fallback such provinces map to NA and
-# their Panel C dots are silently dropped. These Paul-Tol muted hues (CVD-safe) are disjoint
-# from PROV_COL so every province gets a distinct, visible colour.
-SPARE_COL <- c("#882255","#332288","#661100","#999933","#44AA99","#AA4499","#DDCC77","#117733")
-PROV_INT <- get0("PROVINCES_OF_INTEREST", ifnotfound = c("Ituri","Nord-Kivu","Haut-Uele"))
-base_family <- "sans"
-HORIZON <- max(get0("CASCADE_REPORT_HORIZONS", ifnotfound = c(4L, 8L, 13L)))
+# House style: palette, prov_palette(), themes and save_dual() all come from
+# figure_style.R, the single definition for the whole suite. This file used to carry its
+# own PROV_COL, which both disagreed with the main-text figures (Sud-Kivu) and reused four
+# hues twice over (Sud-Kivu/Kasaï-Oriental, Haut-Uele/Kasaï-Central, Nord-Kivu/Kasaï,
+# Ituri/Kwilu). The western/southern urban catchments this file reaches take SPARE_COL hues
+# from prov_palette(), which are disjoint from the identity hues but number only
+# length(SPARE_COL): the palette is therefore built over the provinces Panel C actually draws
+# (build_watchlists()), and a panel needing more spare hues than exist is refused rather than
+# drawn with two provinces in one colour.
+source(file.path(ST_DIR, "figure_style.R"))
+# The provenance helpers (cascade_stamp_check(), cascade_calibration_note()) live beside the
+# reach-table writer that stamps what they check; sourcing 35 only defines functions.
+source(file.path(ST_DIR, "35_cascade_viz.R"))
 TOP_N   <- 5L                                    # max zones per city watch-list (Panel C)
 
 # ---- display labels: city vs health zone of the same name -------------------
@@ -100,7 +97,15 @@ read_urban_hubs <- function(tbl_dir) {
     return(URBAN_HUBS_FALLBACK)
   }
   s <- readr::read_csv(f, show_col_types = FALSE)
-  flag <- if ("seeded" %in% names(s)) "seeded" else "selected"
+  # `seeded` = the zones that survived resolve_urban_hubs()' spine check, i.e. the zones the
+  # cascade actually force-seeded; `selected` = the rule's picks before that check. A table
+  # without `seeded` is from a writer that did not see the resolved hubs: say so.
+  flag <- if ("seeded" %in% names(s)) "seeded" else {
+    warning("[dominoes] ", basename(f), " has no `seeded` column; Panel A uses the rule's ",
+            "`selected` zones, which can include zones the cascade did not seed. Re-run ",
+            "run_cascade.R.", call. = FALSE)
+    "selected"
+  }
   s <- s[which(s[[flag]]), ]
   out <- split(s$Nom, s$city)
   out[order(match(names(out), names(URBAN_HUBS_FALLBACK)))]
@@ -142,70 +147,61 @@ city_watchlist <- function(df, top_n = TOP_N) {
     dplyr::slice_max(order_by = delta, n = top_n, with_ties = FALSE)
 }
 
-# assign a stable colour to every province (identity where known, spare Tol hue else)
-prov_palette <- function(provs) {
-  provs <- unique(as.character(provs[!is.na(provs)]))
-  provs <- c(intersect(PROV_INT, provs), sort(setdiff(provs, PROV_INT)))
-  # Fallback pool disjoint from the identity colours; recycled if ever exhausted.
-  spare <- setdiff(SPARE_COL, unname(PROV_COL)); si <- 1L
-  cols <- setNames(character(length(provs)), provs)
-  for (p in provs) {
-    if (p %in% names(PROV_COL)) cols[p] <- unname(PROV_COL[p])
-    else { cols[p] <- spare[((si - 1L) %% length(spare)) + 1L]; si <- si + 1L }
-  }
-  stopifnot(!anyNA(cols), all(nzchar(cols)))   # every province must get a visible colour
-  cols
-}
-
-# House themes (verbatim from 37_cascade_figure4.R / make_publication_figures.R):
-# embedded titles/subtitles/captions are BLANKED — figure identity is carried by the
-# A/B/C tags and axis titles; the caption lives in the manuscript, not in the figure.
-theme_pub <- function(base = 8.6) {
-  theme_minimal(base_size = base, base_family = base_family) %+replace% theme(
-    plot.title = element_blank(), plot.subtitle = element_blank(), plot.caption = element_blank(),
-    axis.title = element_text(size = base - 0.4, colour = MUTED),
-    axis.title.x = element_text(margin = margin(t = 4)),
-    axis.title.y = element_text(margin = margin(r = 4), angle = 90),
-    axis.text = element_text(size = base - 1.2, colour = MUTED),
-    panel.grid.minor = element_blank(),
-    panel.grid.major = element_line(colour = GRID, linewidth = 0.3),
-    strip.text = element_text(size = base - 0.6, colour = INK, face = "bold"),
-    legend.position = "top", legend.justification = "left",
-    legend.title = element_text(size = base - 1.2, colour = MUTED),
-    legend.text = element_text(size = base - 1.4, colour = INK),
-    legend.key.height = unit(9, "pt"), legend.key.width = unit(15, "pt"),
-    plot.tag = element_text(size = base + 4.5, face = "bold", colour = INK),
-    plot.margin = margin(6, 8, 6, 6))
-}
-theme_map <- function(base = 8.6) {
-  theme_void(base_size = base, base_family = base_family) %+replace% theme(
-    plot.title = element_blank(), plot.subtitle = element_blank(), plot.caption = element_blank(),
-    legend.position = "right", legend.justification = "centre",
-    legend.title = element_text(size = base - 1.4, colour = MUTED),
-    legend.text = element_text(size = base - 1.8, colour = INK),
-    legend.key.height = unit(12, "pt"), legend.key.width = unit(14, "pt"),
-    plot.tag = element_text(size = base + 4.5, face = "bold", colour = INK),
-    plot.margin = margin(2, 2, 2, 2))
-}
-save_dual <- function(p, name, w, h, dir) {
-  # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
-  # is not on the published allow-list. get0() so the helper still works standalone.
-  .fk <- get0("figure_is_kept", ifnotfound = NULL)
-  # Gate on the FULL destination path, not the bare stem: FIGURE_DROP entries are
-  # "<directory>/<stem>" and the raw/ exclusion inspects path components, neither of
-  # which can match a basename.
-  if (is.function(.fk) && !.fk(file.path(dir, name))) return(invisible(p))
-  if (!dir.exists(dir)) dir.create(dir, recursive = TRUE, showWarnings = FALSE)
-  ggsave(file.path(dir, paste0(name, ".pdf")), p, width = w, height = h, device = "pdf", bg = "white")
-  ggsave(file.path(dir, paste0(name, ".png")), p, width = w, height = h, dpi = 600, bg = "white")
-  message(sprintf("  saved %-30s  %.1f x %.1f in", name, w, h)); invisible(p)
-}
-
 # ---- paths / inputs --------------------------------------------------------
+# ---- input root / figure subdirectory: the onset multiple-imputation pass ----
+# Mirrors make_manuscript_figures.R exactly, and for the same reason. 48_onset_mi_pool.R
+# writes MI-POOLED cascade tables into a MIRROR of outputs/ (same relative paths, same
+# schemas), so this script draws the pooled Figure 4 by moving its input root and nothing
+# else.
+#
+#   MANU_IN_ROOT   read cascade/key_outputs tables from here instead of OUT_DIR
+#   MANU_FIG_SUB   write Figure4 to key_outputs/manuscript_figures/<sub>
+#
+# THE GUARD. Figure4's target is the canonical manuscript_figures directory, and this script
+# additionally DELETES the existing Figure4.{pdf,png} when a panel fails. Pointed at pooled
+# inputs without a figure subdirectory it would therefore overwrite — or on a panel failure,
+# silently REMOVE — the published single-draw Figure 4. Refuse rather than default.
+.MI_IN  <- trimws(Sys.getenv("MANU_IN_ROOT", ""))
+.MI_SUB <- trimws(Sys.getenv("MANU_FIG_SUB", ""))
+if (nzchar(.MI_IN) && !nzchar(.MI_SUB))
+  stop("[dominoes] MANU_IN_ROOT is set (reading non-canonical cascade tables) but ",
+       "MANU_FIG_SUB is not, so this pass would overwrite — or on a panel failure delete — ",
+       "the PUBLISHED Figure4. Set MANU_FIG_SUB (e.g. 'mi') or unset MANU_IN_ROOT.",
+       call. = FALSE)
+.IN_ROOT <- if (nzchar(.MI_IN)) {
+  if (!dir.exists(.MI_IN)) stop("[dominoes] MANU_IN_ROOT does not exist: ", .MI_IN, call. = FALSE)
+  normalizePath(.MI_IN, mustWork = TRUE)
+} else OUT_DIR
+MI_MODE <- nzchar(.MI_IN)
+
 FIG_DIR   <- file.path(OUT_DIR, "key_outputs", "figures")
+# Figures always land in the CANONICAL tree, under MANU_FIG_SUB when one is given — the
+# input mirror holds tables, not deliverables.
 MANU_DIR  <- file.path(OUT_DIR, "key_outputs", "manuscript_figures")   # main-text Figure 4 target
-KEY_DIR   <- file.path(OUT_DIR, "key_outputs")
-TBL_DIR   <- file.path(OUT_DIR, "cascade", "tables")
+if (nzchar(.MI_SUB)) MANU_DIR <- file.path(MANU_DIR, .MI_SUB)
+dir.create(MANU_DIR, recursive = TRUE, showWarnings = FALSE)
+# The watch-list CSV is a PRODUCT of these tables, so it follows the INPUT root: writing an
+# MI-pooled watch-list over the canonical one would leave a pooled table beside single-draw
+# figures with nothing saying which run produced it.
+KEY_DIR   <- file.path(.IN_ROOT, "key_outputs")
+TBL_DIR   <- file.path(.IN_ROOT, "cascade", "tables")
+MI_STAMP_TXT <- NULL
+if (MI_MODE) {
+  message(sprintf("[dominoes] MI MODE — tables %s -> figure %s", TBL_DIR, MANU_DIR))
+  MI_STAMP_TXT <- tryCatch({
+    ri <- jsonlite::fromJSON(file.path(KEY_DIR, "run_info.json"))
+    if (is.null(ri$onset_mi)) stop("run_info.json carries no `onset_mi` block")
+    sprintf(paste0("Onset multiple imputation: M = %d completions (seeds %d-%d, stratum '%s'); ",
+                   "cascade intervals pooled by Rubin's rules over imputations. NOT a ",
+                   "single-draw interval."),
+            as.integer(ri$onset_mi$n_imputations), as.integer(ri$onset_mi$seed_min),
+            as.integer(ri$onset_mi$seed_max), as.character(ri$onset_mi$stratum))
+  }, error = function(e)
+    stop("[dominoes] MI mode but the pooled run_info.json does not describe the imputation ",
+         "set (", conditionMessage(e), "). Refusing to stamp a figure with provenance it ",
+         "cannot verify — re-run 48_onset_mi_pool.R.", call. = FALSE))
+  message("[dominoes] MI stamp: ", MI_STAMP_TXT)
+}
 URBAN_HUBS <- read_urban_hubs(TBL_DIR)     # the zones the cascade actually seeded
 reach_csv <- file.path(TBL_DIR, "cascade_reach_scores_all_zones.csv")
 summ_csv  <- file.path(TBL_DIR, "urban_scenario_summary.csv")
@@ -213,6 +209,13 @@ stopifnot(file.exists(reach_csv), file.exists(summ_csv))
 
 rs   <- read_csv(reach_csv, show_col_types = FALSE)
 summ <- read_csv(summ_csv,  show_col_types = FALSE)
+# THE HEADLINE HORIZON, READ FROM THE TABLE. CASCADE_REPORT_HORIZONS lives in
+# 30_projection_config.R, which this script does not source, so a get0() of it always took a
+# typed literal. The urban impact tables are measured at max(CASCADE_REPORT_HORIZONS)
+# (38_urban_scenarios.R::urban_impact_metrics()), the deepest horizon of the reach table the
+# same run writes (cascade_reach_table()'s default horizons) — as 49_onset_mi_figures.R reads it.
+HORIZON <- suppressWarnings(max(as.integer(rs$horizon), na.rm = TRUE))
+if (!is.finite(HORIZON)) stop("[dominoes] the reach table carries no horizon.", call. = FALSE)
 
 # per-city impact CSVs (p_base, p_cond, delta, rr, province) — one row per zone
 city_files <- list.files(TBL_DIR, pattern = "^urban_impact_.*\\.csv$", full.names = TRUE)
@@ -230,10 +233,6 @@ sumw   <- summ |>
   { \(d) if ("seed_r" %in% names(d)) filter(d, is.na(seed_r)) else d }() |>
   filter(seed_week == min_wk) |> arrange(desc(expected_added))
 CITY_ORDER <- sumw$city
-
-# shared province palette across every panel
-all_provs <- unique(c(imp$province, rs$province[rs$horizon == HORIZON]))
-PCOL <- prov_palette(all_provs)
 
 # =============================================================================
 # Panel A — HUB FLOW MAP: each city's mobility to/from ANYWHERE in the DRC
@@ -366,13 +365,32 @@ build_hubflowmap <- function() {
 # =============================================================================
 # Panel B — WHICH domino: cities ranked by expected additional zones
 # =============================================================================
+#' "+n newly >20%" for Panel B. A COUNT on a single-draw run, but in MI mode 48_onset_mi_pool.R
+#' pools it as the MEAN over completions, which is fractional — and sprintf("%d") of a
+#' non-integer is an error. ggplot evaluates the label only when the plot is RENDERED, so that
+#' error used to escape .panel() and abort save_dual() part-way, leaving a truncated Figure4.pdf.
+#' Whole numbers print as integers, anything else to one decimal; NA prints nothing.
+newly_above_label <- function(x) {
+  x <- as.numeric(x)
+  whole <- is.finite(x) & abs(x - round(x)) < 1e-9
+  out <- ifelse(whole, sprintf("+%d", as.integer(round(ifelse(whole, x, 0)))),
+                sprintf("+%.1f", x))
+  out <- paste0(out, " newly >20%")
+  out[!is.finite(x)] <- ""
+  out
+}
+
 build_cityrank <- function() {
   d <- sumw |> mutate(city = factor(city, levels = rev(CITY_ORDER)))
+  # The count label starts past the END OF THE INTERVAL, not of the bar: placed at the bar's end it
+  # was drawn over the whisker.
+  d$lab_x <- if ("expected_added_hi" %in% names(d))
+    pmax(d$expected_added, d$expected_added_hi, na.rm = TRUE) else d$expected_added
   ggplot(d, aes(expected_added, city)) +
     # Single NEUTRAL fill (magnitude is carried by bar length alone). Deliberately non-semantic:
-    # a sequential ramp here would read as a third scale and clash with Panel A's viridis
-    # probability ramp and Panel C's province hues; grey keeps the bars unambiguous. Grey also
-    # avoids the province palette (the old #0072B2 = Ituri), so no false province cue.
+    # a coloured fill here would read as a third scale and clash with Panel A's red/blue
+    # flow-direction palette and Panel C's province hues; grey keeps the bars unambiguous. Grey
+    # also avoids the province palette (the old #0072B2 = Ituri), so no false province cue.
     geom_col(fill = "grey45", width = 0.66) +
     # The paired 90% Monte-Carlo interval. Shown because several of these bars are shorter
     # than the noise the unpaired version of this analysis carried, and a bar whose interval
@@ -380,7 +398,7 @@ build_cityrank <- function() {
     {if ("expected_added_lo" %in% names(d))
        geom_linerange(aes(xmin = expected_added_lo, xmax = expected_added_hi),
                       colour = INK, linewidth = 0.45)} +
-    geom_text(aes(label = sprintf("+%d newly >20%%", newly_above_20)),
+    geom_text(aes(x = lab_x, label = newly_above_label(newly_above_20)),
               hjust = -0.08, size = 2.7, colour = MUTED) +
     scale_x_continuous(expand = expansion(mult = c(0.03, 0.34))) +
     scale_y_discrete(labels = city_label) +
@@ -392,7 +410,7 @@ build_cityrank <- function() {
 
 # =============================================================================
 # Panel C — WHERE to look next: per-city watch-lists. For each zone, a PAIR of
-# horizontal error bars (posterior mean + 90% CrI): baseline P(invasion) in grey
+# horizontal error bars (posterior mean + 90% CrI at fixed delta): baseline P(invasion) in grey
 # (upper) and, below it, the conditional-on-city-invaded probability in the zone's
 # province colour. Mirrors the two-horizon forest of the old Figure 3 panel C
 # (make_publication_figures.R), but the pair here is baseline vs conditional.
@@ -403,7 +421,19 @@ build_watchlists <- function() {
   d <- imp |>
     group_by(city) |>
     group_modify(~ city_watchlist(.x)) |>
-    ungroup() |>
+    ungroup()
+  # THE PROVINCES THIS PANEL DRAWS, not every province in the reach table. Built over all ~26,
+  # prov_palette() had only length(SPARE_COL) spare hues for the ~20 provinces without an
+  # identity colour and recycled them, putting two of the panel's provinces (Kwilu and
+  # Haut-Katanga) in one colour. Over the panel's own provinces the spare pool suffices unless
+  # more provinces need a spare hue than it holds — refused, since a shared hue is a wrong key.
+  PCOL <- prov_palette(d$province)
+  if (anyDuplicated(unname(PCOL)))
+    stop(sprintf("[dominoes] Panel C draws %d provinces needing a spare hue but SPARE_COL has %d; two provinces would share a colour (%s).",
+                 sum(!names(PCOL) %in% names(PROV_COL)), length(SPARE_COL),
+                 paste(names(PCOL)[duplicated(unname(PCOL)) | duplicated(unname(PCOL), fromLast = TRUE)],
+                       collapse = ", ")), call. = FALSE)
+  d <- d |>
     mutate(city = factor(city, levels = CITY_ORDER),
            province = factor(province, levels = names(PCOL)),
            row = paste(city, health_zone, sep = "___"))
@@ -416,15 +446,35 @@ build_watchlists <- function() {
             any(is.finite(d$p_cond_lo))
   NUDGE <- 0.22
   up <- position_nudge(y = NUDGE); dn <- position_nudge(y = -NUDGE)
+  # A MONTE-CARLO-FLOOR interval (p_*_ci_at_mc_floor, cascade_reach_table()) is p +- 1/(2D): its
+  # width is the resolution of D parameter draws by construction, not an estimated credible
+  # interval, so it is not drawn as one (its point stays). The flags are absent from the
+  # MI-pooled tables, whose Rubin intervals are all drawn.
+  .fl <- function(col) if (col %in% names(d)) as.logical(d[[col]]) %in% TRUE else rep(FALSE, nrow(d))
+  fl_base <- .fl("p_base_ci_at_mc_floor"); fl_cond <- .fl("p_cond_ci_at_mc_floor")
+  # "AT FIXED delta": the urban runs are simulated at the point delta (simulate_cascade()'s
+  # delta_sd_log = 0, as run_cascade.R calls them), so these intervals carry posterior
+  # parameter uncertainty but NOT the calibration uncertainty the headline reach intervals of
+  # Figure4_cascade include. Written "delta" in ASCII: the base pdf device cannot encode the
+  # Greek letter.
   xlab <- paste0(sprintf("P(invasion by %d wk): baseline (grey, upper) vs conditional on city invaded (colour, lower)", HORIZON),
-                 if (has_ci) "; point = mean, bar = 90% CrI" else "")
+                 if (has_ci) "; point = mean, bar = 90% CrI at fixed delta" else "",
+                 if (has_ci && any(fl_base | fl_cond))
+                   " (no bar: below Monte-Carlo resolution)" else "")
 
   p <- ggplot(d)
   if (has_ci)
     p <- p +
-      geom_linerange(aes(y = row, xmin = p_base_lo, xmax = p_base_hi),
+      # EVERY ROW, with a floored interval blanked to NA, NOT a row subset: the first layer trains
+      # each facet's discrete y axis, so a subset placed its rows first and appended the rest,
+      # scrambling the watch-list order.
+      geom_linerange(data = dplyr::mutate(d, p_base_lo = ifelse(fl_base, NA_real_, p_base_lo),
+                                          p_base_hi = ifelse(fl_base, NA_real_, p_base_hi)),
+                     aes(y = row, xmin = p_base_lo, xmax = p_base_hi),
                      position = up, orientation = "y", colour = "grey62", linewidth = 0.7, na.rm = TRUE) +
-      geom_linerange(aes(y = row, xmin = p_cond_lo, xmax = p_cond_hi, colour = province),
+      geom_linerange(data = dplyr::mutate(d, p_cond_lo = ifelse(fl_cond, NA_real_, p_cond_lo),
+                                          p_cond_hi = ifelse(fl_cond, NA_real_, p_cond_hi)),
+                     aes(y = row, xmin = p_cond_lo, xmax = p_cond_hi, colour = province),
                      position = dn, orientation = "y", linewidth = 0.7, na.rm = TRUE)
   p +
     geom_point(aes(x = p_base, y = row), position = up, colour = "grey45", size = 1.7) +
@@ -454,13 +504,53 @@ if (!is_script_run("40_cascade_next_dominoes.R") && !identical(Sys.getenv("DOMIN
 } else {
 
 message("== Figure: the next dominoes ==")
+# ---- PROVENANCE: only the LATEST, COMPLETED (or this very) cascade run for THIS date ----------
+# This script used to draw whatever tables were on disk. A cascade run whose calibration fails
+# stops BEFORE it rewrites the reach table and resets the urban tables, and run_all.R's stage C
+# runs this script anyway, so the manuscript Figure 4 was redrawn from the previous run's tables
+# and exited 0. The reach table carries the id of the run that wrote it
+# (cascade_write_reach_csv()); it is drawn only when cascade_run_stamp.json says that run is the
+# latest for this analysis date and completed — or is the run_cascade.R process that launched
+# this script (status "running", its id passed in CASCADE_RUN_ID). The urban tables carry no id
+# of their own, but run_cascade.R deletes them unconditionally AFTER writing the reach table, so
+# once the reach table is this run's they are this run's too, or absent (and refused above).
+# In MI mode the pooled mirror is vouched for by its run_info.json onset_mi block instead (the
+# pooled tables carry no single run id).
+CASC_RUN_ID <- NA_character_
+CAL_NOTE <- NULL
+if (!MI_MODE) {
+  .prov <- cascade_stamp_check(rs$cascade_run_id, file.path(.IN_ROOT, "cascade", "diagnostics"))
+  if (!isTRUE(.prov$ok))
+    stop("[dominoes] refusing to draw Figure 4: ", .prov$why, ". Re-run run_cascade.R.",
+         call. = FALSE)
+  CASC_RUN_ID <- .prov$stamp$cascade_run_id
+  # NULL when the run was calibrated; otherwise the note the figure carries (the watch-list
+  # carries the `calibrated` flag itself).
+  CAL_NOTE <- cascade_calibration_note(rs$calibrated, rs$calibration_status)
+  if (!is.null(CAL_NOTE)) message("[dominoes] ", CAL_NOTE)
+} else if ("calibrated" %in% names(rs)) {
+  # A pooled table that records its arms' calibration: an uncalibrated pool is said in the MI
+  # stamp, which save_dual() sets as the caption (a second caption would replace it).
+  .cn <- cascade_calibration_note(rs$calibrated, rs$calibration_status)
+  if (!is.null(.cn)) { MI_STAMP_TXT <- paste(MI_STAMP_TXT, .cn); message("[dominoes] ", .cn) }
+}
+
 # A failed panel must NOT be replaced by plot_spacer(). manuscript_figures/Figure4 is a
 # published deliverable and plot_annotation(tag_levels = "A") tags panels positionally, so a
 # spacer ships as an EMPTY box bearing a real panel letter — a blank "B" in the manuscript,
 # with only a message in the log to say why. Record each failure instead and refuse to write
 # the figure unless all three panels built.
 .panel_fail <- character(0)
-.panel <- function(expr, nm) tryCatch(expr, error = function(e) {
+# BUILT, not just constructed: ggplot evaluates aesthetics (a geom_text label, say) only when
+# the plot is built, so an error there used to pass this tryCatch untouched and surface inside
+# save_dual() instead — aborting with a half-written PDF and skipping the failure handling
+# below. ggplot_build() runs every layer's computation (no graphics device needed), so a
+# panel that cannot be drawn fails HERE, where it is recorded.
+.panel <- function(expr, nm) tryCatch({
+  p <- expr
+  invisible(ggplot2::ggplot_build(p))
+  p
+}, error = function(e) {
   message("!! ", nm, ": ", conditionMessage(e))
   .panel_fail <<- c(.panel_fail, sprintf("%s (%s)", nm, conditionMessage(e)))
   patchwork::plot_spacer()
@@ -473,23 +563,34 @@ top <- (patchwork::wrap_elements(full = pA) | patchwork::wrap_elements(full = pB
   patchwork::plot_layout(widths = c(0.52, 0.48))
 # No embedded caption — the figure carries only the A/B/C tags. The caption is supplied
 # separately in the manuscript (see the accompanying text).
+# The one exception is an UNCALIBRATED run (CAL_NOTE), whose figure must say so on its face.
+# In MI mode CAL_NOTE is NULL and save_dual() adds the MI stamp as the caption instead.
 fig <- (top / patchwork::wrap_elements(full = pC)) +
   patchwork::plot_layout(heights = c(0.46, 0.54)) +
   patchwork::plot_annotation(
-    tag_levels = "A",
+    tag_levels = "A", caption = CAL_NOTE,
     theme = ggplot2::theme(
-      plot.tag = element_text(size = 13, face = "bold", colour = INK)))
+      plot.tag = element_text(size = 13, face = "bold", colour = INK),
+      plot.caption = element_text(size = 8, colour = MUTED, hjust = 0)))
 
+# Remove any previous Figure4 so a stale copy cannot stand in for this run's missing one.
+.drop_figure4 <- function() for (ext in c("pdf", "png")) {
+  .old <- file.path(MANU_DIR, paste0("Figure4.", ext))
+  if (file.exists(.old)) file.remove(.old)
+}
 if (length(.panel_fail)) {
-  # Remove any previous Figure4 so a stale copy cannot stand in for this run's missing one.
-  for (ext in c("pdf", "png")) {
-    .old <- file.path(MANU_DIR, paste0("Figure4.", ext))
-    if (file.exists(.old)) file.remove(.old)
-  }
+  .drop_figure4()
   message(sprintf("!! [dominoes] %d of 3 panels failed; manuscript Figure4 NOT written: %s",
                   length(.panel_fail), paste(.panel_fail, collapse = "; ")))
 } else {
-  save_dual(fig, "Figure4", 13.5, 9.6, MANU_DIR)
+  # A failure while WRITING (the assembled patchwork, or the device) is recorded like a panel
+  # failure, and whatever part of the PDF/PNG it left behind is removed, rather than escaping
+  # with a truncated Figure4 on disk and the watch-list below never written.
+  tryCatch(save_dual(fig, "Figure4", 13.5, 9.6, MANU_DIR), error = function(e) {
+    .drop_figure4()
+    message("!! [dominoes] writing Figure4 failed: ", conditionMessage(e))
+    .panel_fail <<- c(.panel_fail, sprintf("render (%s)", conditionMessage(e)))
+  })
 }
 
 # ---- watch-list CSV underlying Panel C -------------------------------------
@@ -500,27 +601,43 @@ watch <- imp |>
   mutate(rank_in_city = row_number()) |>
   ungroup()
 .has_ci_csv <- all(c("p_base_lo", "p_base_hi", "p_cond_lo", "p_cond_hi") %in% names(watch))
+# SIGNIFICANT DIGITS, not 4 decimal places: the defect 35's cascade_write_reach_csv() already
+# fixed. round(x, 4) moves a probability near 2.5e-4 by up to 20% and stops relative_risk
+# equalling p_conditional / p_baseline.
+.sg <- function(x) signif(x, 6)
 watch <- watch |>
   transmute(city = factor(city, levels = CITY_ORDER), rank_in_city, health_zone, province,
-            # posterior means + 90% credible intervals mirror the Panel C paired error bars
-            p_baseline = round(p_base, 4),
-            p_baseline_lo = if (.has_ci_csv) round(p_base_lo, 4) else NA_real_,
-            p_baseline_hi = if (.has_ci_csv) round(p_base_hi, 4) else NA_real_,
-            p_conditional = round(p_cond, 4),
-            p_conditional_lo = if (.has_ci_csv) round(p_cond_lo, 4) else NA_real_,
-            p_conditional_hi = if (.has_ci_csv) round(p_cond_hi, 4) else NA_real_,
-            attributable_increase = round(delta, 4), relative_risk = round(rr, 3),
-            horizon = HORIZON, seed_week) |>
+            # posterior means + 90% credible intervals (at fixed delta) mirror the Panel C bars
+            p_baseline = .sg(p_base),
+            p_baseline_lo = if (.has_ci_csv) .sg(p_base_lo) else NA_real_,
+            p_baseline_hi = if (.has_ci_csv) .sg(p_base_hi) else NA_real_,
+            p_conditional = .sg(p_cond),
+            p_conditional_lo = if (.has_ci_csv) .sg(p_cond_lo) else NA_real_,
+            p_conditional_hi = if (.has_ci_csv) .sg(p_cond_hi) else NA_real_,
+            # TRUE where that interval is the Monte-Carlo resolution floor (width at most 1/D:
+            # exactly 1/D unless clipped at 0 or 1), not an estimated credible interval
+            # (cascade_reach_table()); NA on tables predating the flag.
+            p_baseline_ci_at_mc_floor = if ("p_base_ci_at_mc_floor" %in% names(watch))
+                                          as.logical(p_base_ci_at_mc_floor) else NA,
+            p_conditional_ci_at_mc_floor = if ("p_cond_ci_at_mc_floor" %in% names(watch))
+                                             as.logical(p_cond_ci_at_mc_floor) else NA,
+            attributable_increase = .sg(delta), relative_risk = .sg(rr),
+            horizon = HORIZON, seed_week,
+            # provenance: the run id is NA in MI mode (the pooled tables carry no single run id),
+            # and `calibrated` is NA wherever the reach table does not record it
+            cascade_run_id = CASC_RUN_ID,
+            calibrated = { .c <- unique(as.logical(rs$calibrated)); if (length(.c) == 1L) .c else NA }) |>
   arrange(city, rank_in_city)
 if (!dir.exists(KEY_DIR)) dir.create(KEY_DIR, recursive = TRUE, showWarnings = FALSE)
 write_csv(watch, file.path(KEY_DIR, "Figure_next_dominoes_watchlist.csv"))
 # The watch-list CSV is an independent deliverable and is written either way; only now, with
-# every other product safely on disk, does a panel failure become a hard error so the caller
-# (run_cascade.R's tryCatch, or run_one()'s exit status) records it instead of the run
+# every other product safely on disk, does a panel (or write) failure become a hard error so
+# the caller (run_cascade.R's exit-status check, or run_one()'s) records it instead of the run
 # reporting success with a figure missing.
 if (length(.panel_fail))
-  stop(sprintf("[dominoes] %d of 3 panels failed, so manuscript Figure4 was not written (a spacer would have shipped as a blank tagged panel): %s",
-               length(.panel_fail), paste(.panel_fail, collapse = "; ")), call. = FALSE)
+  stop(sprintf(paste0("[dominoes] manuscript Figure4 was not written (a failed panel is never ",
+                      "replaced by a spacer, which would ship as a blank tagged panel): %s"),
+               paste(.panel_fail, collapse = "; ")), call. = FALSE)
 message("[done] Figure4 (next dominoes) -> ", MANU_DIR)
 
 }   # end of the script-run guard

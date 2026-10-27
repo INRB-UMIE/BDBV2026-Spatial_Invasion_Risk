@@ -2,9 +2,11 @@
 # 05_baseline_models.R - Structural Baselines (B1, B4, B7)
 # BDBV 2026 DRC · Spatiotemporal Invasion Forecast Suite
 #
-#   Models: B1 inverse-distance weighted average, B4 gravity-decay invasion hazard,
+#   Models: B1 inverse-distance weighted average, B4 source-mass x distance-decay import
+#           pressure (method string "Gravity-B4", but NOT a gravity model; see its docstring),
 #           B7 nearest-affected / adjacency spatial-spread null.
-# All return a tibble: health_zone, horizon, mu_forecast, p_invasion, method
+# All return a tibble: health_zone, horizon, mu_forecast, p_invasion, method, prob_calibrated
+# (FALSE for the rank-only B1 and B7, TRUE for B4, which fits a scale).
 # =============================================================================
 
 source(file.path(here::here(), "spatiotemporal", "00_config.R"))
@@ -50,7 +52,7 @@ zone_week_to_wide <- function(zone_week, zones_all) {
 #' @param horizons integer vector of forecast horizons in weeks (1, 2)
 #' @param zones_all character vector of all zone names
 #' @param alpha   power-law exponent (default 1.0)
-#' @return tibble: health_zone, horizon, mu_forecast, p_invasion, method
+#' @return tibble: health_zone, horizon, mu_forecast, p_invasion, method, prob_calibrated (FALSE)
 forecast_B1 <- function(Y_wide, osrm_mat, t_idx, horizons, zones_all,
                         alpha = 1.0) {
   stopifnot(is.matrix(Y_wide), is.matrix(osrm_mat))
@@ -69,7 +71,9 @@ forecast_B1 <- function(Y_wide, osrm_mat, t_idx, horizons, zones_all,
   # It used to be `mu * h` — h copies of the h-th STEP. That is only the cumulative sum when
   # mu is constant across the window, which is true of B4 (whose source incidence is held
   # fixed) but NOT of B1: B1 deliberately feeds the previous step's intensity forward
-  # (Y_curr <- mu_prev) to model growth, so every step differs. At h = 2 the baseline
+  # (Y_curr <- mu_prev), so every step differs. That propagation DIFFUSES the neighbour
+  # signal one more hop per week; it cannot model growth, because each step is a
+  # row-normalised weighted MEAN of the previous one (max(mu) <= max(Y)). At h = 2 the baseline
   # reported 2*mu_2 instead of mu_1 + mu_2. Reconstructed from the saved LFO, that
   # UNDERSTATED the baseline's own ranking (AUC-PR 0.080 -> 0.124, skill 6.51 -> 10.13,
   # AUC-ROC 0.902 -> 0.931) while OVERSTATING its hazard (median ratio 1.19) — so the
@@ -116,9 +120,9 @@ forecast_B1 <- function(Y_wide, osrm_mat, t_idx, horizons, zones_all,
       # DECLARED RANK-ONLY. mu is a row-normalised weighted MEAN OF NEIGHBOUR CASE COUNTS
       # fed through 1 - exp(-mu) as though a case count were a weekly invasion rate. Unlike
       # B4, nothing here is fitted — there is no scale constant at all — so the probability
-      # level is arbitrary and drifts upward simply as the epidemic grows (mean p rose
-      # 0.22 -> 0.43 across folds). The published calibration_in_large of ~45 and
-      # brier_skill of -17 measure that missing constant, not the baseline's information.
+      # level is arbitrary and moves with the size of the epidemic's case counts, not with
+      # any invasion rate. Calibration-dependent scores computed on it would measure that
+      # missing constant, not the baseline's information, which is why they are reported NA.
       # The ORDERING is meaningful and is what this comparator exists to provide.
       prob_calibrated = FALSE
     )
@@ -153,6 +157,29 @@ forecast_B1 <- function(Y_wide, osrm_mat, t_idx, horizons, zones_all,
 #' results, the evaluation CSVs and the model-selection artifacts, and changing it would
 #' silently orphan them. What changed is every label a reader sees, and this docstring.
 #'
+#' TRAINING / FORECAST INFORMATION MISMATCH (kept deliberately; see the end of this note).
+#' `scaling_const` and the forecast both read ONE count matrix, `Y_wide`: in the
+#' back-test that is the fold's counts AS KNOWN AT ITS ORIGIN, nowcast-corrected
+#' (run_invasion_lfo(), 16_invasion_eval.R), with column `t_idx` the origin week.
+#'   * The fit uses every at-risk transition tau -> tau+1, tau = 1..t_idx-1: lambda from
+#'     column tau, outcome = any case in column tau+1. Those weeks had had one or more further
+#'     weeks of reporting by the origin, so they are more complete and carry a smaller nowcast
+#'     multiplier (the oldest, essentially none).
+#'   * The forecast takes lambda from column t_idx, the origin week itself: the least complete
+#'     week, carried to its expected final count by the nowcast's LARGEST multiplier.
+#' With an unbiased nowcast the two lambdas are on the same expected scale; any error in the
+#' origin-week correction is not, and because lambda is linear in Y it passes roughly
+#' one-for-one into B4's weekly hazard (an origin week over-corrected by a factor c multiplies
+#' mu by about c). The Bayesian models avoid this by building each training transition's
+#' import force from the counts known at the end of THAT week (rolling as-of predictors,
+#' ROLLING_PREDICTORS in 00_config.R; build_invasion_design(), 20_forecast_detail.R). B4 does
+#' not, by design: it is a frozen structural comparator, and the rolling reconstruction is
+#' not a neutral correction of it -- it needs the line list and the as-of truncation inside
+#' the baseline and a load-bearing floor on the earliest transitions (ROLLING_PREDICTOR_FLOOR),
+#' which would change the comparator the manuscript describes. Consequence: B4's
+#' calibration-dependent scores (log score, Brier, calibration-in-the-large) include this
+#' mismatch; its RANKING does not (a scalar cannot reorder zones).
+#'
 #' @param scaling_const multiplicative scaling; if NULL, estimated from training
 forecast_B4 <- function(Y_wide, pop_vec, osrm_mat, t_idx, horizons, zones_all,
                         beta = 0.5, gamma_d = 1.0, scaling_const = NULL) {
@@ -165,17 +192,18 @@ forecast_B4 <- function(Y_wide, pop_vec, osrm_mat, t_idx, horizons, zones_all,
 
   # Estimate scaling constant from historical training data if possible
   if (is.null(scaling_const) && t_idx >= 2) {
-    # Build gravity scores for each past week and regress invasion probability
-    # Using simple calibration: scale so that P(invasion) at mean lambda ≈ empirical rate
+    # Import pressure lambda for every at-risk (zone, week) transition tau -> tau + 1 of the
+    # training record, then the scale k by MAXIMUM LIKELIHOOD over p = 1 - exp(-k * lambda)
+    # on a log grid (below). See the docstring for which counts lambda is built from.
     lambdas <- numeric(0)
     invasions <- logical(0)
     for (tau in seq_len(t_idx - 1)) {
       Y_tau <- Y_wide[ord, tau]
       already_active <- rowSums(Y_wide[ord, seq_len(tau), drop = FALSE] > 0) > 0
       for (i in seq_along(ord)) {
-        # Calibrate on the AT-RISK set only (matching the workhorse and the invasion
-        # task). Including already-active zones as forced-negatives keeps their large
-        # gravity score with invaded = FALSE, dragging the MLE scaling constant down
+        # Calibrate on the AT-RISK set only (matching the Bayesian invasion design and the
+        # invasion task). Including already-active zones as forced-negatives keeps their large
+        # import-pressure score with invaded = FALSE, dragging the MLE scaling constant down
         # and biasing B4's invasion probability low.
         if (already_active[i]) next
         d_ij <- D[i, ]; d_ij[is.na(d_ij)] <- Inf
@@ -209,10 +237,10 @@ forecast_B4 <- function(Y_wide, pop_vec, osrm_mat, t_idx, horizons, zones_all,
   }
 
   results <- vector("list", length(horizons))
-  # Source incidence is held at the current observed week for EVERY horizon; the per-week gravity
+  # Source incidence is held at the current observed week for EVERY horizon; the per-week
   # hazard (computed once, since Y_curr is constant) is accumulated over the window below. The
-  # count-scale sibling baselines (B1/B2/B3) feed a ROW-NORMALISED projection forward to model
-  # growth, but B4's raw (unnormalised) gravity kernel cannot: the previous code fed the SCALED
+  # count-scale sibling baseline (B1) feeds a ROW-NORMALISED projection forward week by week,
+  # but B4's raw (unnormalised) kernel cannot: the previous code fed the SCALED
   # hazard mu = lambda*scaling_const back in as "incidence", so week-2's force was ~scaling_const^2
   # (≈0) and the 2-week forecast collapsed to the 1-week value. A constant weekly hazard is the
   # scale-consistent baseline behaviour and keeps p(2wk) > p(1wk) as required.
@@ -222,7 +250,7 @@ forecast_B4 <- function(Y_wide, pop_vec, osrm_mat, t_idx, horizons, zones_all,
     d_ij <- D[i, ]; d_ij[is.na(d_ij)] <- Inf
     lambda[i] <- sum(N^beta * (d_ij + 1)^(-gamma_d) * Y_curr, na.rm = TRUE)
   }
-  mu_week <- pmax(lambda * scaling_const, 0)   # per-week gravity invasion hazard
+  mu_week <- pmax(lambda * scaling_const, 0)   # per-week invasion hazard
 
   for (h_idx in seq_along(horizons)) {
     h <- horizons[h_idx]
@@ -277,7 +305,7 @@ forecast_B4 <- function(Y_wide, pop_vec, osrm_mat, t_idx, horizons, zones_all,
 #' @param zones_all canonical zone order.
 #' @param method   "distance" (default) or "adjacency".
 #' @param adj      optional 0/1 contiguity matrix (zones × zones) for "adjacency".
-#' @return tibble: health_zone, horizon, mu_forecast, p_invasion, method.
+#' @return tibble: health_zone, horizon, mu_forecast, p_invasion, method, prob_calibrated (FALSE).
 forecast_B7_adjacency <- function(Y_wide, dist_mat, t_idx, horizons, zones_all,
                                   method = c("distance", "adjacency"), adj = NULL) {
   method <- match.arg(method)

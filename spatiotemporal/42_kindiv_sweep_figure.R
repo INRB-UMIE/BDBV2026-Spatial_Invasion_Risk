@@ -2,160 +2,130 @@
 # 42_kindiv_sweep_figure.R — publication figure for the comprehensive
 # individual-offspring overdispersion (k_indiv) sensitivity sweep.
 #
-# Reads the outputs of 41_kindiv_sweep.R and renders one 3-panel figure in the
-# house publication aesthetic (Okabe-Ito, theme_pub, dual PDF + 600-dpi PNG):
+# Reads the k_indiv sweep (written by run_cascade.R's sensitivity stage, or by
+# 41_kindiv_sweep.R) and renders one 3-panel figure in the house publication
+# aesthetic (Okabe-Ito, theme_pub, dual PDF + 600-dpi PNG):
 #   A) Ranking stability vs k     — Spearman rho, Kendall tau, top-15 Jaccard
 #   B) Magnitude vs k             — mean reach at 4/8/13 wk + mean establishment
 #   C) Per-zone reach vs k        — top-12 at-risk zones, coloured by province
-# The production baseline k = 0.30 is marked with a dashed reference line. (The
-# Lloyd-Smith [0.2, 0.4] plausible-band box was removed by request.) Titles are
-# blank (house style: captions live externally); panels are tagged A/B/C.
+# The sweep's own baseline k (k_base in its sidecar) is marked with a dashed reference
+# line. (The Lloyd-Smith [0.2, 0.4] plausible-band box was removed by request.) Titles
+# are blank (house style: captions live externally); panels are tagged A/B/C.
+# Drawn ONLY from a sweep of the latest cascade run for this analysis date, at this run's
+# kernel, form, scenario, seed and k_base (PROVENANCE below); anything else is skipped.
 #
-# Run:  Rscript spatiotemporal/42_kindiv_sweep_figure.R
+# Run:  Rscript spatiotemporal/42_kindiv_sweep_figure.R   (run_cascade.R source()s it)
 # =============================================================================
 suppressPackageStartupMessages({
   library(dplyr); library(tidyr); library(readr); library(ggplot2)
-  library(patchwork); library(scales); library(forcats); library(jsonlite)
+  library(patchwork); library(scales); library(forcats); library(jsonlite); library(here)
 })
 
-# Prefer pipeline globals when sourced from run_cascade.R; else derive from cwd.
-HERE <- normalizePath(".")
-ST   <- if (basename(HERE) == "spatiotemporal") HERE else file.path(HERE, "spatiotemporal")
-OUTC <- if (exists("OUT_CASCADE")) OUT_CASCADE else file.path(ST, "outputs", "cascade")
+# CONFIGURATION FIRST, THEN THE PATHS. The paths used to be fixed from the working directory
+# BEFORE 00_config.R was sourced, so OUT_DIR — and with it a data-definition sensitivity's own
+# tree (DATA_DEFINITION_TAG) — was ignored, and the provenance check below compared against
+# CASCADE_KERNEL / CASCADE_K_INDIV, which only 30_projection_config.R defines and which a
+# standalone run therefore never had (so those comparisons were silently skipped). When
+# run_cascade.R source()s this file, its configuration is already loaded and is NOT re-sourced:
+# re-sourcing 30 there would reset the driver's globals mid-run.
+ST <- Sys.getenv("CASCADE_ST_DIR",
+                 unset = get0("ST_DIR", ifnotfound = file.path(here::here(), "spatiotemporal")))
+if (!exists("OUT_DIR") || !is.function(get0("figure_is_kept")))
+  source(file.path(ST, "00_config.R"))
+if (!exists("CASCADE_KERNEL") || !exists("CASCADE_FORM") || !exists("OUT_CASCADE"))
+  source(file.path(ST, "30_projection_config.R"))
+# cascade_stamp_check() / cascade_calibration_note() (35 only defines functions).
+if (!exists("cascade_stamp_check", mode = "function"))
+  source(file.path(ST, "35_cascade_viz.R"))
+# House style from figure_style.R, the single definition for the whole suite. This file's
+# own PROV_COL permuted Sud-Kivu, Bas-Uele and Tshopo against the main-text figures'.
+source(file.path(ST, "figure_style.R"))
+
+# OUT_CASCADE and CASCADE_OUT_DIR follow CASCADE_OUT_ROOT (30_projection_config.R), as every
+# other cascade product does, and OUT_DIR the data definition (00_config.R).
+OUTC <- OUT_CASCADE
 DIAG <- file.path(OUTC, "diagnostics")
 FIGD <- file.path(OUTC, "figures")
-KEYD <- if (exists("OUT_DIR")) file.path(OUT_DIR, "key_outputs") else file.path(ST, "outputs", "key_outputs")
-for (d in c(FIGD, KEYD)) if (!dir.exists(d)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
-
-# Load the retained-figure allow-list (FIGURE_KEEP / figure_is_kept, 00_config.R). Without it
-# the gate in save_dual() below resolves figure_is_kept to NULL and silently no-ops, so
-# FIGURE_DROP entries and the raw/ exclusion could never fire in this script even though it
-# writes a retained deliverable (Figure_kindiv_sweep) alongside non-retained working panels.
-# Non-fatal: the script must still run standalone from a checkout with no config on the path.
-if (!is.function(get0("figure_is_kept")))
-  try(suppressWarnings(suppressMessages(source(file.path(ST, "00_config.R")))), silent = TRUE)
-
-# ---- design system (mirrors make_publication_figures.R) ---------------------
-INK <- "grey15"; MUTED <- "grey38"; FAINT <- "grey72"; GRID <- "grey92"
+KEYD <- file.path(get0("CASCADE_OUT_DIR", ifnotfound = OUT_DIR), "key_outputs")
+# Every figure here is written into BOTH the cascade figures/ tree and key_outputs/
+# (save_dual() creates the directories).
+SAVE_DIRS <- c(FIGD, KEYD)
 BAND_FILL <- "#0072B2"                       # Lloyd-Smith plausible band (soft, low alpha)
-OKABE <- c("#0072B2","#D55E00","#009E73","#CC79A7","#E69F00","#56B4E9","#F0E442","#000000")
-PROV_COL <- c("Ituri"="#0072B2","Nord-Kivu"="#D55E00","Haut-Uele"="#009E73",
-              "Sud-Kivu"="#CC79A7","Bas-Uele"="#E69F00","Tshopo"="#56B4E9","Other"="#7A7A7A")
-base_family <- "sans"
-theme_pub <- function(base = 8.6) {
-  theme_minimal(base_size = base, base_family = base_family) %+replace% theme(
-    plot.title = element_blank(), plot.subtitle = element_blank(), plot.caption = element_blank(),
-    axis.title   = element_text(size = base - 0.4, colour = MUTED),
-    axis.title.x = element_text(margin = margin(t = 4)),
-    axis.title.y = element_text(margin = margin(r = 4), angle = 90),
-    axis.text    = element_text(size = base - 1.2, colour = MUTED),
-    panel.grid.minor = element_blank(),
-    panel.grid.major = element_line(colour = GRID, linewidth = 0.3),
-    legend.position = "top", legend.justification = "left",
-    legend.title = element_text(size = base - 1.2, colour = MUTED),
-    legend.text  = element_text(size = base - 1.4, colour = INK),
-    legend.key.height = unit(9, "pt"), legend.key.width = unit(15, "pt"),
-    plot.tag = element_text(size = base + 4.5, face = "bold", colour = INK),
-    plot.margin = margin(6, 8, 6, 6))
-}
-save_dual <- function(p, name, w, h, dirs = c(FIGD, KEYD)) {
-  # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
-  # is not on the published allow-list. get0() so the helper still works standalone.
-  .fk <- get0("figure_is_kept", ifnotfound = NULL)
-  # Gate on each destination path (these helpers write into several directories), so
-  # FIGURE_DROP's "<dir>/<stem>" entries and the raw/ rule can actually match.
-  if (is.function(.fk) && !any(vapply(dirs, function(.d) .fk(file.path(.d, name)),
-                                      logical(1)))) return(invisible(p))
-  for (d in dirs) {
-    ggsave(file.path(d, paste0(name, ".pdf")), p, width = w, height = h, device = "pdf", bg = "white")
-    ggsave(file.path(d, paste0(name, ".png")), p, width = w, height = h, dpi = 600, bg = "white")
-  }
-  message(sprintf("  saved %-30s  %.1f x %.1f in", name, w, h))
-}
 # plausible-band [0.2, 0.4] box removed (user request); no-op layer (NULL is ignored
 # when added to a ggplot), so the panel call sites below are left unchanged.
 band_layer <- function(lo = 0.20, hi = 0.40) NULL
-kbase_layer <- function(kb = 0.30)
+kbase_layer <- function(kb)
   geom_vline(xintercept = kb, colour = FAINT, linetype = "22", linewidth = 0.35)
 LOGX <- scale_x_log10(breaks = c(0.05,0.1,0.2,0.3,0.5,1,2,4),
                       labels = c("0.05","0.1","0.2","0.3","0.5","1","2","4"))
 
+# A skip is an ordinary state here, not an error: the sweep is optional and expensive.
+# NEVER quit() when sourced: run_cascade.R SOURCES this file, and quit() from a sourced script
+# terminates the whole calling process — a missing optional input used to kill the entire
+# cascade run WITH STATUS 0, silently skipping everything after it. Sourced, raise a condition
+# the caller's tryCatch already handles as a skip; run as its own Rscript, exit 0, which is the
+# correct status for "nothing to draw".
+.skip42 <- function(msg) {
+  message("[42_kindiv_sweep_figure] Skipping - ", msg)
+  if (!is_script_run("42_kindiv_sweep_figure.R"))
+    stop("[42_kindiv_sweep_figure] ", msg, "; figure skipped.", call. = FALSE)
+  quit(save = "no", status = 0L)
+}
+
 # ---- data -------------------------------------------------------------------
-# This figure consumes 41_kindiv_sweep.R's outputs. That sweep is expensive and is NOT
-# run on every pipeline pass, so a missing input is an ordinary state, not an error:
-# exit cleanly with an explanatory message instead of an unhandled read_csv() failure.
-# (Required now that run_all.R schedules this script — an unguarded stop() here would
-# show up as a pipeline-stage failure whenever the sweep had simply not been run.)
+# A missing input is an ordinary state (the sweep is not run on every pass), so it skips
+# cleanly instead of failing on read_csv() — required since run_all.R schedules this script.
 .sweep_csv  <- file.path(DIAG, "cascade_kindiv_sweep.csv")
 .byzone_csv <- file.path(DIAG, "cascade_kindiv_sweep_byzone.csv")
-.missing <- c(.sweep_csv, .byzone_csv)[!file.exists(c(.sweep_csv, .byzone_csv))]
-if (length(.missing)) {
-  message("[42_kindiv_sweep_figure] Skipping — 41_kindiv_sweep.R has not been run ",
-          "(missing: ", paste(basename(.missing), collapse = ", "), "). ",
-          "Run `Rscript spatiotemporal/41_kindiv_sweep.R` first, or set ",
-          "RUN_KINDIV_SWEEP=1 in run_all.R's downstream block.")
-  # NEVER quit() unconditionally here. run_cascade.R SOURCES this file, and quit() from a
-  # sourced script terminates the whole calling process — so a missing optional input used to
-  # kill the entire cascade run WITH STATUS 0, silently skipping the evaluation figure,
-  # Figure 4 and everything after it, while reporting success. sys.nframe() is 0 only when
-  # R is executing this file directly (Rscript 42_....R); any source() puts frames on the
-  # stack. Sourced: raise a condition the caller's tryCatch already handles as a skip.
-  # Standalone and non-interactive: exit 0, which is the correct status for "nothing to do".
-  if (sys.nframe() > 0L)
-    stop("[42_kindiv_sweep_figure] required sweep inputs missing; figure skipped.", call. = FALSE)
-  if (!interactive()) quit(save = "no", status = 0L)
-}
+.meta_json  <- file.path(DIAG, "cascade_kindiv_sweep_meta.json")
+.missing <- c(.sweep_csv, .byzone_csv, .meta_json)[!file.exists(c(.sweep_csv, .byzone_csv, .meta_json))]
+if (length(.missing))
+  .skip42(paste0("no k_indiv sweep on disk (missing: ", paste(basename(.missing), collapse = ", "),
+                 "). It is written by run_cascade.R's sensitivity stage or by ",
+                 "`Rscript spatiotemporal/41_kindiv_sweep.R` (RUN_KINDIV_SWEEP=1 in run_all.R)"))
+meta <- tryCatch(fromJSON(.meta_json), error = function(e) NULL)
+if (is.null(meta)) .skip42(paste0(basename(.meta_json), " is unreadable, so the sweep's provenance cannot be checked"))
+
+.m1 <- function(x) if (is.null(x) || length(x) != 1L || is.na(x)) NA_character_ else as.character(x)
+# PROVENANCE. RUN_KINDIV_SWEEP defaults FALSE while RUN_CASCADE_FIGURES defaults TRUE, so this
+# script runs every time and 41_kindiv_sweep.R usually does not. It used to skip only when the
+# CSVs were ABSENT — never when they were merely OLD — and its "provenance OK" compared nothing
+# that could fail standalone, so Figure_kindiv_sweep (a retained deliverable) was re-rendered
+# under a current mtime from whatever sweep was on disk: one left by a cascade run that later
+# failed at calibration (whose sweep reset never ran), or one of a model the suite no longer
+# features (CASCADE_KERNEL / CASCADE_FORM follow model_selection.json). Now the sweep is drawn
+# only when (1) its sidecar's cascade_run_id is the LATEST cascade run's for this analysis date
+# and that run completed, or is the run_cascade.R process drawing it (cascade_stamp_check());
+# (2) the sidecar's analysis date is this one; and (3) it was run at this configuration's
+# kernel, hazard form, primary scenario, seed and baseline k. Otherwise it is skipped.
+.prov <- cascade_stamp_check(.m1(meta$cascade_run_id), DIAG)
+.mis <- character(0)
+if (!isTRUE(.prov$ok)) .mis <- c(.mis, .prov$why)
+.want_date <- format(as.Date(ANALYSIS_DATE))
+if (!identical(.m1(meta$analysis_date), .want_date))
+  .mis <- c(.mis, sprintf("analysis date (sweep %s vs this run %s)", .m1(meta$analysis_date), .want_date))
+.cmp <- list(kernel = CASCADE_KERNEL, form = CASCADE_FORM, scenario = CASCADE_SCENARIO_PRIMARY)
+for (.nm in names(.cmp))
+  if (!identical(.m1(meta[[.nm]]), as.character(.cmp[[.nm]])))
+    .mis <- c(.mis, sprintf("%s (sweep %s vs this run %s)", .nm, .m1(meta[[.nm]]), .cmp[[.nm]]))
+if (!identical(suppressWarnings(as.integer(.m1(meta$seed))), as.integer(CASCADE_SEED)))
+  .mis <- c(.mis, sprintf("seed (sweep %s vs this run %s)", .m1(meta$seed), CASCADE_SEED))
+KB <- suppressWarnings(as.numeric(.m1(meta$k_base)))
+if (!is.finite(KB) || abs(KB - CASCADE_K_INDIV) > 1e-9)
+  .mis <- c(.mis, sprintf("baseline k (sweep %s vs this run CASCADE_K_INDIV = %s)",
+                          .m1(meta$k_base), format(CASCADE_K_INDIV)))
+if (length(.mis))
+  .skip42(sprintf(paste0("the k_indiv sweep on disk is not this run's - %s. Re-run the cascade ",
+                         "(its sensitivity stage writes the sweep) or 41_kindiv_sweep.R."),
+                  paste(.mis, collapse = "; ")))
+message(sprintf("[42_kindiv_sweep_figure] sweep provenance OK (run %s, kernel %s, form %s, scenario %s, seed %s, k_base %s).",
+                .m1(meta$cascade_run_id), .m1(meta$kernel), .m1(meta$form), .m1(meta$scenario),
+                .m1(meta$seed), format(KB)))
+# NULL when the sweep's run was calibrated; otherwise the caption the figure carries (Panels B
+# and C are absolute probabilities).
+CAL_NOTE <- cascade_calibration_note(meta$calibrated)
 sweep  <- read_csv(.sweep_csv,  show_col_types = FALSE)
 byzone <- read_csv(.byzone_csv, show_col_types = FALSE)
-meta   <- tryCatch(fromJSON(file.path(DIAG, "cascade_kindiv_sweep_meta.json")), error = function(e) NULL)
-# k_base: prefer the value the SWEEP recorded (meta), then the live config constant, and only
-# then a literal. The literal 0.30 mirrored CASCADE_K_INDIV, so the figure's baseline marker
-# could silently disagree with the model if that constant ever changed — in a retained
-# key_outputs deliverable, with nothing to reveal the mismatch.
-KB <- if (!is.null(meta) && !is.null(meta$k_base) && is.finite(suppressWarnings(as.numeric(meta$k_base))))
-  as.numeric(meta$k_base) else as.numeric(get0("CASCADE_K_INDIV", ifnotfound = 0.30))
-if (!is.null(meta) && !is.null(meta$k_base) &&
-    is.finite(suppressWarnings(as.numeric(meta$k_base))) &&
-    exists("CASCADE_K_INDIV") &&
-    abs(as.numeric(meta$k_base) - CASCADE_K_INDIV) > 1e-9)
-  warning(sprintf(paste0("[42_kindiv_sweep_figure] the sweep was run at k_base = %s but the ",
-                         "pipeline now uses CASCADE_K_INDIV = %s; the baseline marker on this ",
-                         "figure is the SWEEP's value. Re-run 41_kindiv_sweep.R to realign."),
-                  format(as.numeric(meta$k_base)), format(CASCADE_K_INDIV)), call. = FALSE)
-
-.m1 <- function(x) if (is.null(x) || length(x) != 1L || is.na(x)) "?" else as.character(x)
-# PROVENANCE CHECK. RUN_KINDIV_SWEEP defaults FALSE while RUN_CASCADE_FIGURES defaults TRUE,
-# so this script runs every time and 41_kindiv_sweep.R usually does not. It previously skipped
-# only when the CSVs were ABSENT — never when they were merely OLD — so Figure_kindiv_sweep (a
-# retained deliverable) was re-stamped with a current mtime from whatever sweep happened to be
-# on disk. That matters because CASCADE_KERNEL is derived from model_selection.json and can
-# change between runs: the figure would then describe a sweep of a DIFFERENT model from the one
-# the rest of the suite features. The sidecar records the sweep's own kernel/scenario/seed, so
-# the mismatch is checkable. Warn loudly rather than refuse: the sweep is expensive and a stale
-# one is still informative, but it must never be published as if it were this run's.
-if (!is.null(meta)) {
-  .now_kernel   <- get0("CASCADE_KERNEL",   ifnotfound = NA_character_)
-  .now_scenario <- tryCatch(get0("CASCADE_SCENARIOS", ifnotfound = NULL)[[1]]$label,
-                            error = function(e) NA_character_)
-  .mis <- character(0)
-  if (!is.na(.now_kernel) && !is.null(meta$kernel) &&
-      !identical(as.character(meta$kernel), as.character(.now_kernel)))
-    .mis <- c(.mis, sprintf("kernel (sweep %s vs this run %s)", meta$kernel, .now_kernel))
-  if (!is.null(meta$seed) && !identical(as.integer(meta$seed),
-                                        as.integer(get0("RANDOM_SEED", ifnotfound = meta$seed))))
-    .mis <- c(.mis, sprintf("seed (sweep %s vs this run %s)", meta$seed,
-                            get0("RANDOM_SEED", ifnotfound = NA)))
-  if (length(.mis))
-    warning(sprintf(paste0("[42_kindiv_sweep_figure] the k_indiv sweep on disk was produced under a ",
-                           "DIFFERENT configuration - %s. Figure_kindiv_sweep therefore describes that ",
-                           "sweep, not this run. Re-run 41_kindiv_sweep.R (RUN_KINDIV_SWEEP=1) to refresh it."),
-                   paste(.mis, collapse = "; ")), call. = FALSE, immediate. = TRUE)
-  else
-    # Explicit guard rather than %||%: this script can run standalone, and base R only gained
-    # %||% in 4.4, so relying on it here would make the provenance line an error on 4.3.
-    message(sprintf("[42_kindiv_sweep_figure] sweep provenance OK (kernel %s, scenario %s, seed %s).",
-                    .m1(meta$kernel), .m1(meta$scenario), .m1(meta$seed)))
-}
 
 # ---- Panel A: ranking stability --------------------------------------------
 STAB_COL <- c("Spearman rank corr." = OKABE[1], "Kendall tau" = OKABE[2], "Top-15 Jaccard" = OKABE[3])
@@ -170,7 +140,7 @@ pA <- ggplot(pa_df, aes(k_indiv, value, colour = metric)) +
   scale_colour_manual(values = STAB_COL, name = NULL) +
   LOGX + coord_cartesian(ylim = c(min(0.7, min(pa_df$value, na.rm = TRUE) - 0.02), 1.005)) +
   labs(x = expression("individual-offspring overdispersion  " * italic(k)),
-       y = "agreement with k = 0.30 ranking") +
+       y = sprintf("agreement with k = %s ranking", format(KB, nsmall = 2))) +
   theme_pub()
 
 # ---- Panel B: magnitude (reach at horizons + establishment) ----------------
@@ -209,14 +179,14 @@ pC <- ggplot(pc_df, aes(k_indiv, p_invasion, group = health_zone, colour = provi
   theme_pub()
 
 # ---- compose ----------------------------------------------------------------
+# An uncalibrated sweep is labelled on the figure (CAL_NOTE; no caption otherwise). theme_pub()
+# blanks plot.caption, so the annotation sets it explicitly.
 fig <- (pA | pB) / pC +
-  plot_annotation(tag_levels = "A") &
+  plot_annotation(tag_levels = "A",
+                  # wrapped: one line runs off a 7.2-inch figure
+                  caption = if (is.null(CAL_NOTE)) NULL else paste(strwrap(CAL_NOTE, 130), collapse = "\n"),
+                  theme = theme(plot.caption = element_text(size = 7, colour = MUTED, hjust = 0))) &
   theme(plot.tag = element_text(size = 13, face = "bold", colour = INK))
 save_dual(fig, "Figure_kindiv_sweep", w = 7.2, h = 6.4)
-
-# a compact 2-panel variant (A,B side-by-side) for slide/embed use
-fig2 <- (pA | pB) + plot_annotation(tag_levels = "A") &
-  theme(plot.tag = element_text(size = 13, face = "bold", colour = INK))
-save_dual(fig2, "Figure_kindiv_sweep_compact", w = 7.2, h = 3.2)
 
 message("[42_kindiv_sweep_figure] done.")

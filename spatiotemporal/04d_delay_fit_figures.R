@@ -4,14 +4,16 @@
 #
 # WHY THIS FILE EXISTS
 # --------------------
-# run_all.R step 1a fits the DHIS2 reporting delays (interval-censored MLE, and —
-# when RUN_EPIDIST is on — the Bayesian EpiDist naive + marginal models) and writes
+# run_all.R step 1a fits the onset->sample delay (pooled and per case classification;
+# interval-censored MLE and, when RUN_EPIDIST is on, the Bayesian EpiDist naive + marginal
+# models; this file fits the other three delays itself) and writes
 # the selected parameters to CSV. Nothing in the pipeline ever LOOKED at those fits:
-# the naive-vs-censored QA figure lives inside 04c's Rscript-gated MAIN block, which
-# run_all.R never triggers because it source()s the file. The onset->sample delay is
-# routed into the onset imputation (01_data_prep.R), the nowcast rate (04/04b) and the
-# R(t) truncation, so a silently bad fit propagates into every downstream number with
-# no visual check. This module renders that check on EVERY run.
+# the censored-MLE QA figure lives inside 04c's Rscript-gated MAIN block, which
+# run_all.R never triggers because it source()s the file. The onset->sample delay is REPORTED
+# (methods text and captions: its confirmed-case stratum) and its pooled fit is the fallback of
+# the nowcast and R(t) truncation; it no longer drives the onset imputation (donor intervals,
+# 01_data_prep.R) or the nowcast and R(t), which use the fitted truncation of their regime. A
+# bad fit would still be reported, so this module renders the visual check on EVERY run.
 #
 # WHAT IT DRAWS (all on the SAME windowed records the fits used)
 #   A. dhis2_delay_epidist_fits_<date>       2x2: empirical histogram + fitted densities
@@ -19,12 +21,14 @@
 #                                            band, interval-censored MLE) per delay.
 #   B. dhis2_delay_fit_cdf_<date>            2x2: empirical CDF vs fitted CDFs — the
 #                                            sharper goodness-of-fit view (no binwidth
-#                                            artefacts), with the max |ECDF-CDF| gap.
+#                                            artefacts), with the max |ECDF-CDF| gap over
+#                                            whole days.
 #   C. dhis2_delay_mean_estimators_<date>    forest: mean delay by estimator with 95%
 #                                            CrI, empirical mean, and the lab-reference
 #                                            delay the pipeline used to assume.
-#   D. dhis2_onset_sample_fit_<date>         single large panel for the ONE delay that
-#                                            drives the pipeline (density + CDF inset).
+#   D. dhis2_onset_sample_fit_<date>         onset->sample alone, density and CDF side by
+#                                            side (pooled over case classifications; the
+#                                            reported confirmed-case delay is panel E).
 #   E. dhis2_onset_sample_by_class_<date>    onset->sample PER CASE CLASSIFICATION: fitted
 #                                            completeness curves for confirmed /
 #                                            test-negative / suspected, plus a mean-with-CrI
@@ -32,8 +36,9 @@
 #                                            published parameters via the pipeline's own
 #                                            loader -- this panel fits nothing.
 #   +  dhis2_delay_fit_summary.csv           one row per delay x estimator: parameters,
-#                                            mean/sd, CrI, fit statistic, and a `plotted`
-#                                            flag. Includes the EpiDist families that were
+#                                            mean/sd, CrI, fit statistic, EpiDist
+#                                            convergence diagnostics (from `epidist_tbl`),
+#                                            and a `plotted` flag. Includes the EpiDist families that were
 #                                            NOT plotted, so a diverged runner-up stays on
 #                                            the record instead of vanishing behind the
 #                                            gamma-preferred pick.
@@ -245,20 +250,26 @@ if (!exists("build_dhis2_delay_populations", mode = "function"))
 # interval censoring and right truncation the KS null distribution does not apply, and for
 # the truncation-corrected marginal a LARGE gap is expected by construction.
 #
-# CENSORING-ALIGNED. Delays are recorded as whole days, and every fit here treats an integer
-# d as the interval [max(0, d-0.5), d+0.5] (.make_cens_df in 04c). So P(recorded <= d) is
-# F(d + 0.5), NOT F(d), and the comparison must be made at the interval's upper bound.
-# Comparing against F(d) instead is dominated by the zero atom — 14% of onset->sample delays
-# are same-day, and every continuous fit has F(0) = 0 — which returned an identical 0.142 for
-# fits whose means differ by 1.4 days, i.e. a statistic that could not tell them apart.
+# CENSORING-ALIGNED. Delays are recorded as whole days. The interval-censored MLE treats an
+# integer d as [max(0, d-0.5), d+0.5] (.make_cens_df in 04c), so its P(recorded <= d) is
+# exactly F(d + 0.5); EpiDist's double interval censoring (primary and secondary each in
+# [day, day + 1)) gives P(recorded <= d) = the average of F over [d, d + 1], of which F(d + 0.5)
+# is the midpoint approximation. So the comparison is made at d + 0.5, NOT at d: against F(d)
+# it is dominated by the same-day atom (every continuous fit has F(0) = 0) and cannot tell
+# fits with clearly different means apart.
+#
+# BOTH SIDES ARE STEP FUNCTIONS OF THE WHOLE DAY d, so the gap is max over d = 0..max(x) of
+# |P_emp(recorded <= d) - F(d + 0.5)| -- every whole day, including days with no record (the
+# empirical CDF is flat there while F still rises). There is no left-limit term: comparing
+# P_emp(recorded <= d - 1) with F(d + 0.5) measures the size of day d's step, not misfit.
 .dfg_ecdf_gap <- function(x, family, p) {
   x <- x[is.finite(x) & x >= 0]
   if (!length(x) || is.null(p)) return(NA_real_)
-  u  <- sort(unique(x))
+  u  <- seq.int(0L, as.integer(ceiling(max(x))))
   Fn <- stats::ecdf(x)(u)                  # P(recorded <= d)
   Ff <- .dfg_cdf(family, p, u + 0.5)       # model's P(recorded <= d)
   if (all(is.na(Ff))) return(NA_real_)
-  max(pmax(abs(Fn - Ff), abs(c(0, utils::head(Fn, -1)) - Ff)), na.rm = TRUE)
+  max(abs(Fn - Ff), na.rm = TRUE)
 }
 
 # ---- Assemble the drawable estimator set for one delay -----------------------
@@ -269,7 +280,7 @@ if (!exists("build_dhis2_delay_populations", mode = "function"))
   curves <- list()
   dr <- Filter(function(d) identical(d$delay, delay_name), draws_all)
   # EpiDist: prefer the gamma parameterisation (same rule as 04c's §1.2 pick, so the drawn
-  # curve is the one that actually reached the imputation), else whatever converged.
+  # curve is the fit 04c writes to the params file), else whichever family was fitted.
   for (mt in c("marginal", "naive")) {
     cand <- Filter(function(d) identical(d$model_type, mt), dr)
     if (!length(cand)) next
@@ -285,7 +296,7 @@ if (!exists("build_dhis2_delay_populations", mode = "function"))
       mean = m, sd = s,
       mean_lo = unname(stats::quantile(pick$mean, 0.025, na.rm = TRUE)),
       mean_hi = unname(stats::quantile(pick$mean, 0.975, na.rm = TRUE)),
-      n = pick$n, frac_complete = pick$frac_complete,
+      n = pick$n, frac_fully_observable = pick$frac_fully_observable,
       draws = if (mt == "marginal") pick else NULL)   # band on the headline curve only
   }
   # Interval-censored MLE, AIC-best family.
@@ -298,7 +309,7 @@ if (!exists("build_dhis2_delay_populations", mode = "function"))
         label = "Interval-censored MLE", estimator = "interval_censored_mle",
         family = fam, params = p, mean = unname(ms["mean"]), sd = unname(ms["sd"]),
         mean_lo = NA_real_, mean_hi = NA_real_, n = NA_integer_,
-        frac_complete = NA_real_, draws = NULL,
+        frac_fully_observable = NA_real_, draws = NULL,
         aic = cens_fits[[fam]]$aic)
     }
   }
@@ -337,11 +348,12 @@ if (!exists("build_dhis2_delay_populations", mode = "function"))
   xg <- seq(0.01, xmax, length.out = 400)
 
   p <- ggplot2::ggplot(data.frame(delay = x), ggplot2::aes(x = .data$delay)) +
-    # boundary = -0.5, NOT 0. Every fit in this pipeline treats an integer delay d as the
-    # interval [max(0, d-0.5), d+0.5] (.make_cens_df, 04c), and this file relies on that
-    # convention everywhere else (.dfg_ecdf_gap evaluates at u + 0.5; the CDF panel steps at
+    # boundary = -0.5, NOT 0. The interval-censored MLE treats an integer delay d as the
+    # interval [max(0, d-0.5), d+0.5] (.make_cens_df, 04c), and d + 0.5 is also the midpoint
+    # of EpiDist's double-censored [d, d+1] average (see .dfg_ecdf_gap), so this file centres a
+    # recorded day d on d everywhere (.dfg_ecdf_gap evaluates at d + 0.5; the CDF panel steps at
     # x + 0.5). boundary = 0 gave bins [0,1), [1,2), ... which (a) pooled the d = 0 same-day
-    # atom — ~14% of records, and quoted separately in this panel's own subtitle — into the
+    # atom — quoted separately in this panel's own subtitle — into the
     # 1-day bar, and (b) shifted every bar half a day right of the fitted curve, visually
     # cancelling roughly half of the naive-vs-marginal truncation gap this panel exists to
     # show. 04c_dhis2_delay_windows.R plots the same data with aligned bins; the two QA
@@ -379,9 +391,10 @@ if (!exists("build_dhis2_delay_populations", mode = "function"))
                       linetype = ggplot2::guide_legend(ncol = 1))
   }
 
-  # Y-CAP. A gamma/lognormal with shape < 1 — which every same-day-heavy delay here fits —
-  # has an unbounded density at 0. Left to autoscale, that vertical asymptote sets the axis
-  # and flattens the histogram and all three curves into the bottom fifth of the panel.
+  # Y-CAP. A gamma with shape < 1 has an unbounded density at 0, and a gamma with shape near 1
+  # or a lognormal with a large sdlog peaks sharply near 0 — the shapes these same-day-heavy
+  # delays fit. Left to autoscale, that spike sets the axis and flattens the histogram and all
+  # three curves into the bottom fifth of the panel.
   # Cap at 1.3x the tallest visible bar and CLIP (coord_cartesian, not ylim/scale limits, so
   # no data is dropped and no "removed rows" warning is emitted); note it when a curve is cut.
   # Same [d-0.5, d+0.5) bins as the geom_histogram above, so the y-axis cap is computed from
@@ -403,7 +416,7 @@ if (!exists("build_dhis2_delay_populations", mode = "function"))
   if (length(nv) && is.finite(nv[[1]]$n) && nv[[1]]$n < length(x))
     sub <- paste0(sub, sprintf("\nThe naive curve is fitted on the %d non-zero delays only (lognormal/gamma cannot take exact zeros).",
                                as.integer(nv[[1]]$n)))
-  if (clipped) sub <- paste0(sub, "\nDensity axis clipped: the fitted densities are unbounded at delay 0.")
+  if (clipped) sub <- paste0(sub, "\nDensity axis clipped: a fitted density rises above the tallest bar near delay 0.")
   # xlim starts at -0.5, not 0: the zero bin spans [-0.5, 0.5), so clipping the panel at 0
   # rendered the same-day bar at HALF WIDTH — in the very panel the bin alignment was fixed for.
   p + ggplot2::coord_cartesian(xlim = c(-0.5, xmax),
@@ -454,8 +467,8 @@ if (!exists("build_dhis2_delay_populations", mode = "function"))
   }
   p + ggplot2::coord_cartesian(xlim = c(0, xmax), ylim = c(0, 1), expand = FALSE) +
     ggplot2::labs(title = .dfg_pretty(title),
-                  subtitle = .dfg_txt(paste0("Black step = empirical CDF of the (right-truncated) observations, plotted at the d + ½ d censoring bound.\n",
-                                             "Bracketed value = max |empirical - fitted| at that bound; descriptive only, not a KS test.")),
+                  subtitle = .dfg_txt(paste0("Black step = empirical CDF of the (right-truncated) observations, plotted at the d + ½ day censoring bound.\n",
+                                             "Gap (in the legend) = max over whole days of |empirical - fitted| at that bound; descriptive only, not a KS test.")),
                   x = "Delay (days)", y = "Cumulative probability") +
     .dfg_theme() +
     (if (show_legend) ggplot2::theme() else ggplot2::theme(legend.position = "none"))
@@ -482,14 +495,21 @@ if (!exists("build_dhis2_delay_populations", mode = "function"))
     ggplot2::geom_point(position = ggplot2::position_dodge(width = 0.62),
                         size = 2.1, na.rm = TRUE) +
     ggplot2::scale_colour_manual(values = .DFG_COL[levels(d$key)], drop = FALSE)
-  if (!is.null(lab_ref_mean) && is.finite(lab_ref_mean))
-    p <- p + ggplot2::geom_vline(xintercept = lab_ref_mean, linetype = "dotted",
-                                 colour = .DFG_COL[["Lab-linelist reference"]], linewidth = 0.6)
+  # The lab-linelist reference is an ONSET->SAMPLE delay, so it is marked on that row only (a
+  # full-height vline would compare it with the notification and lab delays too).
+  .os_row <- match("onset_sample", d$delay)
+  .has_ref <- !is.null(lab_ref_mean) && is.finite(lab_ref_mean) && !is.na(.os_row)
+  if (.has_ref) {
+    .y <- match(as.character(d$delay_lab[.os_row]), levels(d$delay_lab))
+    p <- p + ggplot2::annotate("segment", x = lab_ref_mean, xend = lab_ref_mean,
+                               y = .y - 0.42, yend = .y + 0.42, linetype = "dotted",
+                               colour = .DFG_COL[["Lab-linelist reference"]], linewidth = 0.6)
+  }
   p + ggplot2::labs(
         title = "Mean delay by estimator",
         subtitle = .dfg_txt(paste0("Bars = 95% credible interval (EpiDist only; the censored MLE and the empirical mean are point estimates).",
-                                   if (!is.null(lab_ref_mean) && is.finite(lab_ref_mean))
-                                     sprintf("\nDotted line = the %.2f d lab-linelist onset→sample reference the pipeline assumed before the DHIS2 refit.", lab_ref_mean) else "")),
+                                   if (.has_ref)
+                                     sprintf("\nDotted mark on the onset→sample row = the %.2f d lab-linelist onset→sample reference the pipeline assumed before the DHIS2 refit.", lab_ref_mean) else "")),
         x = "Mean delay (days)", y = NULL) +
     .dfg_theme() + ggplot2::theme(panel.grid.major.y = ggplot2::element_blank())
 }
@@ -500,13 +520,17 @@ if (!exists("build_dhis2_delay_populations", mode = "function"))
 
 #' Render the delay-distribution fit diagnostics.
 #'
-#' @param ll raw DHIS2 line list (as read by run_all.R step 1a).
+#' @param ll DHIS2 line list as read by run_all.R step 1a, i.e. after
+#'   apply_earliest_sample_dates() (00_config.R), so the records match the fits'.
 #' @param analysis_date the run's as-of date; passed to build_dhis2_delay_populations()
 #'   so the figure describes EXACTLY the records the fits used.
 #' @param os_fit optional value of estimate_dhis2_onset_sample_delay() — its `cens_fits`
 #'   are reused so the onset->sample MLE is not refitted.
 #' @param epidist_tbl optional EpiDist summary tibble (attr(.osepi, "epidist_table")).
-#'   Only used for reporting; the CURVES come from 04c's posterior-draw registry.
+#'   Used for reporting only: its convergence diagnostics (max_rhat, min_ess_bulk,
+#'   min_ess_tail, n_divergent) are joined to the summary CSV's EpiDist rows by delay x model
+#'   x family, together with those of any fit made here under `epidist_all`. The CURVES come
+#'   from 04c's posterior-draw registry.
 #' @param out_dir directory for the figures (default <OUT_DIAGNOSTICS>/delay_fits).
 #' @param epidist_all fit EpiDist for the other three delays too (slow). Defaults to the
 #'   DELAY_FIG_EPIDIST_ALL env flag / global, else FALSE.
@@ -548,7 +572,9 @@ make_delay_fit_figures <- function(ll,
                       paste(todo, collapse = ", ")))
     for (nm in todo) tryCatch({
       d <- pops$delays[[nm]]
-      fit_epidist_both(tibble::tibble(onset = d$onset, sample = d$sample), nm, pops$obs_date)
+      # The draws go to the registry; the summary table is kept for the convergence columns.
+      epidist_tbl <- dplyr::bind_rows(epidist_tbl,
+        fit_epidist_both(tibble::tibble(onset = d$onset, sample = d$sample), nm, pops$obs_date))
     }, error = function(e)
       message(sprintf("[delay-fig] EpiDist for %s failed (non-fatal): %s", nm, conditionMessage(e))))
   }
@@ -575,7 +601,8 @@ make_delay_fit_figures <- function(ll,
       message(sprintf("[delay-fig] %s: no fitted curve — histogram only", lbl))
 
     extra <- if (identical(nm, "onset_sample"))
-      "Drives the onset imputation (01_data_prep.R), the nowcast rate and the R(t) truncation." else NULL
+      paste0("Pooled over every case classification; the reported delay is the confirmed-case fit (panel E). ",
+             "Not used by the imputation; only a fallback of the nowcast and R(t) truncation.") else NULL
     pd <- .dfg_panel_density(d$delay, curves, lbl, subtitle_extra = extra)
     pc <- .dfg_panel_cdf(d$delay, curves, lbl)
     if (!is.null(pd)) panels_dens[[nm]] <- pd
@@ -629,6 +656,31 @@ make_delay_fit_figures <- function(ll,
     message("[delay-fig] nothing to draw — skipping."); return(invisible(NULL))
   }
   summary_df <- dplyr::bind_rows(summary_rows)
+  # CONVERGENCE of every EpiDist row, from the fit summaries (04c fit_epidist_model()). NA for
+  # the empirical and MLE rows, and for EpiDist rows whose summary was not passed in.
+  .cv_cols <- c("max_rhat", "min_ess_bulk", "min_ess_tail", "n_divergent")
+  .cv <- NULL
+  if (!is.null(epidist_tbl) && nrow(epidist_tbl) &&
+      all(c("delay", "model_type", "family", .cv_cols) %in% names(epidist_tbl))) {
+    .et <- as.data.frame(epidist_tbl, stringsAsFactors = FALSE)
+    .cv <- data.frame(delay = as.character(.et$delay),
+                      estimator = paste0("epidist_", .et$model_type),
+                      family = as.character(.et$family), .et[.cv_cols],
+                      stringsAsFactors = FALSE)
+    .cv <- .cv[!duplicated(.cv[c("delay", "estimator", "family")]), , drop = FALSE]
+  }
+  summary_df <- if (!is.null(.cv) && nrow(.cv))
+    dplyr::left_join(summary_df, .cv, by = c("delay", "estimator", "family"))
+  else dplyr::mutate(summary_df, max_rhat = NA_real_, min_ess_bulk = NA_real_,
+                     min_ess_tail = NA_real_, n_divergent = NA_real_)
+  # The verdict uses 04c's own criteria (.epidist_converged()), so the CSV and the warning
+  # fit_epidist_model() raises cannot disagree.
+  .conv <- get0(".epidist_converged", mode = "function", ifnotfound = NULL)
+  summary_df$converged <- if (is.function(.conv))
+    vapply(seq_len(nrow(summary_df)), function(i)
+      as.logical(.conv(summary_df$max_rhat[i], summary_df$min_ess_bulk[i],
+                       summary_df$min_ess_tail[i], summary_df$n_divergent[i])), logical(1))
+  else NA
 
   # ---- Provenance caption shared by every figure ------------------------------
   # A JSON that PARSES but has no `folder` key yields NULL, and is.na(NULL) is logical(0), so
@@ -639,11 +691,14 @@ make_delay_fit_figures <- function(ll,
     v <- jsonlite::fromJSON(get0("LINELIST_JSON", ifnotfound = ""))$folder
     if (length(v) != 1L) NA_character_ else as.character(v)
   }, error = function(e) NA_character_)
+  # The window bounds each pair's FIRST date: onset for the three onset delays, the sample
+  # date for sample -> lab (build_dhis2_delay_populations()).
   cap <- .dfg_txt(sprintf(
-    "DHIS2 line list %s · onset window %s to %s (truncation buffer %d d) · delays capped at %d d · as-of %s",
-    if (is.na(src)) "(unknown snapshot)" else src, pops$analysis_start, pops$trunc_date,
-    get0("TEST_DAYS", ifnotfound = 5L), get0("MAX_DELAY", ifnotfound = 60L),
-    if (is.null(analysis_date)) "n/a" else format(analysis_date)))
+    "DHIS2 line list %s · as-of %s · delays capped at %d d\nWindow %s to %s on each pair's first date (onset; sample for sample → lab) · truncation buffer %d d",
+    if (is.na(src)) "(unknown snapshot)" else src,
+    if (is.null(analysis_date)) "n/a" else format(analysis_date),
+    get0("MAX_DELAY", ifnotfound = 60L), pops$analysis_start, pops$trunc_date,
+    get0("TEST_DAYS", ifnotfound = 5L)))
   stamp <- format(pops$trunc_date, "%Y%m%d")
 
   # Figure-level title/subtitle suppressed for the same reason (caption stays: it carries the
@@ -689,13 +744,13 @@ make_delay_fit_figures <- function(ll,
               w = 9.5, h = 1.1 + 0.85 * length(unique(summary_df$delay)), verbose = verbose)
 
   # ---- D. onset->sample focus -------------------------------------------------
-  # The one delay that feeds the models gets a full-width panel of its own: it is the
-  # figure that belongs in the supplement, and at 2x2 grid size the credible band and
-  # the naive-vs-marginal separation are too small to judge.
+  # The onset->sample delay (the one written to the delay params file) gets a full-width
+  # panel of its own: at 2x2 grid size the credible band and the naive-vs-marginal separation
+  # are too small to judge. Like panel A it is the POOLED fit; panel E shows the strata.
   if (!is.null(panels_dens$onset_sample) && !is.null(panels_cdf$onset_sample)) {
     focus <- (panels_dens$onset_sample | panels_cdf$onset_sample) +
       patchwork::plot_annotation(
-        title = .dfg_txt("Onset → sample delay — the distribution the pipeline uses"),
+        title = .dfg_txt("Onset → sample delay — pooled over every case classification"),
         subtitle = "Left: fitted densities over the observed delays. Right: fitted vs empirical CDF.",
         caption = cap,
         theme = ggplot2::theme(
@@ -707,17 +762,18 @@ make_delay_fit_figures <- function(ll,
   }
 
   # ---- E. Onset -> sample BY CASE CLASSIFICATION -------------------------------
-  # The onset imputation imputes onsets for CONFIRMED records, so it must draw from the
-  # confirmed delay; the pooled fit is majority test-negative on this line list and runs
-  # short. run_all.R step 1a fits each stratum independently (estimate_onset_sample_strata(),
-  # 04c) and write_onset_sample_long() publishes them as `<quantity>__<stratum>` rows.
-  # Nothing looked at them, so the contrast that motivated the fix was unverifiable by eye.
+  # The REPORTED onset->sample delay is the CONFIRMED-case one (ONSET_IMPUTE_STRATUM,
+  # 00_config.R); test-negatives are the largest group of the pooled fit on this line list
+  # (the composition is in estimate_onset_sample_strata()'s docstring, 04c). run_all.R step
+  # 1a fits each stratum independently (estimate_onset_sample_strata(), 04c) and
+  # write_onset_sample_long() publishes them as `<quantity>__<stratum>` rows. Nothing looked
+  # at them, so the contrast between the strata was unverifiable by eye.
   #
   # THIS PANEL COMPUTES NOTHING. It resolves each stratum through
   # .load_dhis2_delay_params(stratum=) -- the SAME loader effective_onset_sample_delay() uses
-  # -- so the curve drawn for `confirmed` is by construction the distribution the imputation
-  # draws from. Turning the published (mean, sd) into the family's native parameters is the
-  # loader's own method-of-moments step, not a fit performed here.
+  # -- so the curve drawn for `confirmed` is by construction the reported delay. It reads the
+  # params file on disk (DELAY_PARAMS_PATH), never refits. Turning the published (mean, sd)
+  # into the family's native parameters is the loader's own moment step, not a fit.
   tryCatch({
     .ld <- get0(".load_dhis2_delay_params", mode = "function")
     .pp <- get0("DELAY_PARAMS_PATH", ifnotfound = NULL)
@@ -735,11 +791,10 @@ make_delay_fit_figures <- function(ll,
       .pool <- tryCatch(suppressWarnings(.ld(.pp)), error = function(e) NULL)
       if (length(.specs)) {
         .lab <- function(st) unname(.want[st])
-        # CDF, NOT density. Every fitted gamma here has shape < 1 (confirmed: 0.95), so its
-        # density is unbounded at zero: three spikes at the origin, and the separation that
+        # CDF, NOT density. These gamma fits have shape near or below 1, so each density is
+        # near-vertical or unbounded at zero: spikes at the origin, and the separation that
         # matters -- where the mass actually sits -- squeezed flat beneath them. The CDF is
-        # bounded, and "the share of cases sampled within d days" is the reading the nowcast
-        # and the imputation both act on.
+        # bounded, and "the share of cases sampled within d days" is the direct reading.
         .cdf_of <- function(spec, xs) {
           pr <- spec$params
           if (identical(spec$family, "gamma") && all(c("shape", "rate") %in% names(pr)))
@@ -782,7 +837,7 @@ make_delay_fit_figures <- function(ll,
             lo = .pool$mean_lo, hi = .pool$mean_hi, n = .pool$n_fit))
         .fr$stratum <- factor(.fr$stratum, levels = rev(c(.lev, "Pooled (all classes)")))
         # n is printed because these means are not equally informed: the suspected stratum is
-        # two orders of magnitude smaller than the other two and its interval shows it.
+        # tens of times smaller than the other two and its interval shows it.
         .fr$tag <- sprintf("%.2f d  (n = %s)", .fr$mean,
                            formatC(.fr$n, format = "d", big.mark = ","))
 
@@ -800,15 +855,24 @@ make_delay_fit_figures <- function(ll,
         .sub <- if (!is.null(.cf) && !is.null(.pool) && is.finite(.pool$mean))
           sprintf(paste0("Each stratum is fitted independently, with its own interval ",
                          "censoring and truncation correction. Confirmed cases are sampled ",
-                         "%.2f d later than the pooled fit implies (%.2f vs %.2f d), which is ",
-                         "why the onset imputation draws from the confirmed fit."),
-                  .cf$mean - .pool$mean, .cf$mean, .pool$mean)
+                         "%.2f d %s than the pooled fit implies (%.2f vs %.2f d)."),
+                  abs(.cf$mean - .pool$mean), if (.cf$mean >= .pool$mean) "later" else "earlier",
+                  .cf$mean, .pool$mean)
         else "Each stratum is fitted independently, with its own censoring and truncation correction."
         .sub <- paste(strwrap(.sub, width = 116), collapse = "\n")
         figE <- (pE1 | pE2) + patchwork::plot_layout(widths = c(1.25, 1)) +
           patchwork::plot_annotation(
             title = .dfg_txt("Onset → sample delay by case classification"),
-            subtitle = .sub, caption = cap,
+            # Its own caption: each stratum's window ends at ITS latest sample minus the buffer
+            # (estimate_dhis2_onset_sample_epidist() filters the class first), not the pooled one.
+            subtitle = .sub,
+            caption = .dfg_txt(sprintf(paste0(
+              "DHIS2 line list %s · as-of %s · delays capped at %d d\nEach stratum's window runs ",
+              "from %s to its own latest sample minus %d d, on each pair's onset date"),
+              if (is.na(src)) "(unknown snapshot)" else src,
+              if (is.null(analysis_date)) "n/a" else format(analysis_date),
+              get0("MAX_DELAY", ifnotfound = 60L), pops$analysis_start,
+              get0("TEST_DAYS", ifnotfound = 5L))),
             theme = ggplot2::theme(
               plot.title    = ggplot2::element_text(size = 13, face = "bold", colour = .DFG_INK),
               plot.subtitle = ggplot2::element_text(size = 9, colour = .DFG_MUTED),
@@ -838,7 +902,7 @@ make_delay_fit_figures <- function(ll,
   # delay" — and the two producers disagreed: 04c/run_all step 1a wrote
   # dhis2_onset_sample_delay_params.csv with selected_estimator = epidist_marginal,
   # selected_mean = 7.665 d, while this block, running later in the same run, wrote
-  # interval_censored_mle, 6.832 d. A 12% disagreement on the delay that drives the onset
+  # interval_censored_mle, 6.832 d. A 12% disagreement on the delay that then drove the onset
   # imputation, the nowcast rate and the R(t) truncation, with the wrong one bearing the
   # name METHODS.md cites.
   #
@@ -875,12 +939,12 @@ make_delay_fit_figures <- function(ll,
     }
   }, error = function(e) message("  [delay-fig] resolver consistency check skipped: ", conditionMessage(e)))
 
-  # One-line console QA: the number that actually reaches the imputation, next to the
-  # empirical mean it corrects.
+  # One-line console QA: the pooled onset->sample estimates written to the params file, next
+  # to the empirical mean they correct.
   if (verbose) {
     # `plotted` filter matters: the summary also carries runner-up EpiDist families, and
     # without it this line would quote whichever family sorted first rather than the one
-    # routed into the imputation.
+    # written to the params file.
     os <- summary_df[summary_df$delay == "onset_sample" & summary_df$plotted, , drop = FALSE]
     em <- os$mean_d[os$estimator == "empirical"]
     mg <- os$mean_d[os$estimator == "epidist_marginal"]
@@ -891,7 +955,7 @@ make_delay_fit_figures <- function(ll,
                     if (length(mg)) sprintf("%.2f", mg[1]) else "n/a"))
     # Cross-family instability alarm. Two EpiDist families fitted to the SAME data should
     # not disagree by much; when they do, one of them has not identified its tail and the
-    # gamma-preferred pick is carrying a silent modelling choice into the imputation. Loud
+    # gamma-preferred pick is carrying a silent modelling choice into the params file. Loud
     # in the log rather than buried in the CSV, because nobody opens the CSV on a clean run.
     for (dl in unique(summary_df$delay)) {
       mm <- summary_df[summary_df$delay == dl & summary_df$estimator == "epidist_marginal" &
@@ -899,8 +963,9 @@ make_delay_fit_figures <- function(ll,
       if (nrow(mm) < 2) next
       if (max(mm$mean_d) > 1.5 * min(mm$mean_d)) {
         used <- if ("gamma" %in% mm$family) "gamma" else mm$family[1]  # 04c §1.2 pick rule
-        message(sprintf("[delay-fig] WARNING %s: EpiDist marginal families disagree — %s. Plotted and routed into the pipeline: %s.",
-                        dl, paste(sprintf("%s %.2f d", mm$family, mm$mean_d), collapse = ", "), used))
+        message(sprintf("[delay-fig] WARNING %s: EpiDist marginal families disagree — %s. Plotted%s: %s.",
+                        dl, paste(sprintf("%s %.2f d", mm$family, mm$mean_d), collapse = ", "),
+                        if (identical(dl, "onset_sample")) " and written to the params file" else "", used))
       }
     }
   }
@@ -908,13 +973,19 @@ make_delay_fit_figures <- function(ll,
 }
 
 # Standalone: Rscript spatiotemporal/04d_delay_fit_figures.R
-# (fits everything itself; env DELAY_FIG_EPIDIST_ALL=TRUE for all four Bayesian fits)
+# Refits the onset->sample censored MLE and (RUN_EPIDIST) the pooled EpiDist models itself;
+# panel E reads the strata from the params file on disk (DELAY_PARAMS_PATH), as in a run.
+# env DELAY_FIG_EPIDIST_ALL=TRUE also fits EpiDist for the other three delays.
 if (sys.nframe() == 0L) {
   suppressPackageStartupMessages({ library(readr); library(jsonlite) })
   .meta <- jsonlite::fromJSON(LINELIST_JSON)
   .csv  <- file.path(LINELIST_DIR, .meta$folder, "dhis2_processed_linelist.csv")
   .ll   <- readr::read_csv(.csv, col_types = readr::cols(.default = "c"),
                            show_col_types = FALSE, na = c("", "NA", "N/A"))
+  # The SAME sample and lab dates as run_all.R step 1a and 04c's MAIN block (earliest
+  # diagnostic sample; a confirmed record's confirming-test lab date). Without it the figures
+  # describe the extract's repeat-test dates, i.e. different records from the fits.
+  .ll   <- apply_earliest_sample_dates(.ll, label = "04d standalone")
   .osf  <- estimate_dhis2_onset_sample_delay(.ll, analysis_date = ANALYSIS_DATE)
   .ose  <- if (exists("estimate_dhis2_onset_sample_epidist", mode = "function"))
     estimate_dhis2_onset_sample_epidist(.ll, analysis_date = ANALYSIS_DATE) else NULL

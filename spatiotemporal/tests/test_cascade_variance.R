@@ -7,7 +7,7 @@
 #     s2_param = var(p_draw) - mean(p_draw*(1-p_draw))/(n_rep-1)
 #
 # That makes the LEVEL AT WHICH A NOISE SOURCE IS DRAWN decide whether it reaches
-# the interval at all. CASCADE_R_RW_SIGMA (the mean-reverting walk on log R) exists
+# the interval at all. CASCADE_R_RW_SIGMA (the random walk on the national log R) exists
 # specifically to widen the interval with horizon, but it was drawn PER ITERATION,
 # which put it entirely inside the process term and subtracted it back out — at large
 # sigma it made the published interval NARROWER. It is now drawn per parameter group.
@@ -78,9 +78,10 @@ test_that("simulate_cascade draws the R walk per parameter group, not per iterat
   skip_if_missing("simulate_cascade")
   src <- deparse(args(simulate_cascade))
   body_txt <- paste(deparse(body(simulate_cascade)), collapse = "\n")
-  # The group-level array must exist and be indexed by the group id `g`.
+  # The group-level innovations must exist and be indexed by the group id `g` — one per
+  # (week, group), since the walk is of the single NATIONAL R (test_cascade_fixes.R).
   expect_true(grepl("Z_Rw_grp", body_txt, fixed = TRUE))
-  expect_true(grepl("Z_Rw_grp[, , g]", body_txt, fixed = TRUE))
+  expect_true(grepl("Z_Rw_grp[w, g]", body_txt, fixed = TRUE))
   # And the walk must NOT be refilled from a fresh rnorm inside the per-iteration block.
   expect_false(grepl("Z_Rw[] <- stats::rnorm", body_txt, fixed = TRUE))
 })

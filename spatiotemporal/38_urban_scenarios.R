@@ -27,8 +27,8 @@
 #       away as the most affected. Paired, 94% of those zones return exactly zero.
 #       "Materially elevated" is correspondingly a TEST — the 90% paired interval excludes
 #       zero — not a fixed 0.03 cut.
-#   (2) THE SEEDED CITY'S R IS SWEPT, NOT ASSUMED. Left at its province pool, a city with no
-#       case history inherits the national value, at which a one-to-two case seed usually
+#   (2) THE SEEDED CITY'S R IS SWEPT, NOT ASSUMED. Left at the default, a seeded city
+#       transmits at the single national R, at which a one-to-two case seed usually
 #       fades out — so the headline result was a statement
 #       about stochastic fade-out wearing the clothes of a statement about connectivity.
 #       The pooled arm remains the primary specification; the sweep makes the premise
@@ -73,7 +73,7 @@ suppressPackageStartupMessages({ library(ggplot2); library(dplyr) })
 #      outflow to avoid ranking seeds by an outbound quantity that parallels the one
 #      generating the measured impact; the two rankings agree here in 4 of 5 cities.
 #      Population is NOT used to rank: a force-seeded zone receives a zone-independent
-#      n_seed_fun() draw and a province-pool R (32_cascade_simulator.R), so the seed's
+#      n_seed_fun() draw and the national R (32_cascade_simulator.R), so the seed's
 #      own population never enters the dynamics — only its row/column of W does.
 URBAN_CITY_ANTENNES <- list(
   Kinshasa     = c("Kinshasa-Ouest", "Kinshasa-Centre", "Kinshasa-Est"),
@@ -303,16 +303,22 @@ urban_impact_metrics <- function(reach_base, reach_cond, hub_zones, province_map
   # Carry the reach table's 90% CREDIBLE interval (p_lo/p_hi) through to the per-zone
   # impact, so downstream figures can show uncertainty on the conditional (and baseline)
   # invasion probabilities. Falls back gracefully if a reach table lacks the CI columns.
+  # The Monte-Carlo-floor flag travels with each interval (cascade_reach_table()): a flagged
+  # interval (width at most 1/D: exactly 1/D unless clipped at 0 or 1) is the resolution floor,
+  # not an estimated credible interval.
   gb <- function(rt) {
-    keep <- intersect(c("health_zone", "p_case_invasion", "p_lo", "p_hi"), names(rt))
+    keep <- intersect(c("health_zone", "p_case_invasion", "p_lo", "p_hi", "p_ci_at_mc_floor"),
+                      names(rt))
     rt[rt$horizon == horizon, keep]
   }
   b <- gb(reach_base)
   names(b) <- sub("^p_case_invasion$", "p_base", names(b))
   names(b) <- sub("^p_lo$", "p_base_lo", names(b)); names(b) <- sub("^p_hi$", "p_base_hi", names(b))
+  names(b) <- sub("^p_ci_at_mc_floor$", "p_base_ci_at_mc_floor", names(b))
   c2 <- gb(reach_cond)
   names(c2) <- sub("^p_case_invasion$", "p_cond", names(c2))
   names(c2) <- sub("^p_lo$", "p_cond_lo", names(c2)); names(c2) <- sub("^p_hi$", "p_cond_hi", names(c2))
+  names(c2) <- sub("^p_ci_at_mc_floor$", "p_cond_ci_at_mc_floor", names(c2))
   m <- merge(b, c2, by = "health_zone")
   m <- m[!(m$health_zone %in% hub_zones) & is.finite(m$p_base) & is.finite(m$p_cond), ]
   m$delta <- m$p_cond - m$p_base
@@ -364,8 +370,8 @@ urban_impact_metrics <- function(reach_base, reach_cond, hub_zones, province_map
     m$delta_hi    <- ctr$per_zone$delta_hi[j]
     m$exact_zero  <- ctr$per_zone$exact_zero[j]
     m$elevated    <- ctr$per_zone$elevated[j]
-    # Carried so a reader can SEE which zones the saturation term pushed significantly
-    # negative, rather than having to re-derive it from the interval columns.
+    # Carried so a reader can SEE which zones came out significantly negative (noise or the
+    # frontier covariate's posterior tail at psi = 0), rather than re-derive it from the intervals.
     m$reduced     <- ctr$per_zone$reduced[j]
   }
   if (!is.null(cas)) {
@@ -418,9 +424,12 @@ urban_impact_metrics <- function(reach_base, reach_cond, hub_zones, province_map
   # pairing rather than as something to explain away.
   #
   # Structural expectation, stated precisely rather than as a blanket impossibility claim.
-  # With psi = 0 the coupling is exactly monotone — an extra source can only raise the
-  # import force and flip a seeding indicator from 0 to 1 — so no zone's difference can be
-  # negative. With psi > 0 frontier saturation is a genuine NEGATIVE feedback: seeding a
+  # With psi = 0 and a fixed-beta hazard the coupling is exactly monotone — an extra source can
+  # only raise the import force and flip a seeding indicator from 0 to 1 — so no zone's
+  # difference can be negative. Under a featured FRAILTY form it is not: exposure without
+  # invasion lowers a never-invaded zone's later conditional hazard (32_cascade_simulator.R),
+  # so individual paths can go negative at psi = 0 while the expected cumulative risk still
+  # rises. With psi > 0 frontier saturation is a genuine NEGATIVE feedback: seeding a
   # city raises its neighbours' invaded fraction and can lower a third zone's hazard, so
   # small negatives are a model property, not an error, and must not be clipped away. What
   # is still suspect is a negative TOTAL whose paired interval covers zero: that is noise.
@@ -437,9 +446,12 @@ urban_impact_metrics <- function(reach_base, reach_cond, hub_zones, province_map
     else
       warning(sprintf(paste0("[urban] expected_added = %.2f [%.2f, %.2f] at horizon %d is ",
                              "NEGATIVE with an interval excluding zero. At psi > 0 frontier ",
-                             "saturation can genuinely produce this; check psi before reading ",
-                             "it as an error."),
-                      .exp_added, .exp_lo, .exp_hi, horizon), call. = FALSE)
+                             "saturation can genuinely produce this; at psi = %g the only model ",
+                             "channel that can lower an expected total is the frontier covariate's ",
+                             "posterior tail (gamma_dmin > 0 in some draws), so check the pairing ",
+                             "before reading it as a finding."),
+                      .exp_added, .exp_lo, .exp_hi, horizon, get0("CASCADE_PSI", ifnotfound = 0)),
+              call. = FALSE)
   }
 
   list(per_zone = m[order(-m$delta), ],
@@ -451,7 +463,7 @@ urban_impact_metrics <- function(reach_base, reach_cond, hub_zones, province_map
        # A case count is uninterpretable without its denominator: "+10 cases" means one thing
        # against a 200-case baseline and another against 2000. The baseline projection over
        # the same window is carried alongside — MEAN and MEDIAN both, because the per-
-       # iteration distribution is right-skewed (15.7k vs 13.2k on this frame) and quoting
+       # iteration distribution is right-skewed (the report prints both) and quoting
        # either alone would misrepresent it. The percentage in the report divides mean by
        # mean, so the two estimators are never mixed.
        cases_baseline_total = if (is.null(sim_base)) NA_real_
@@ -483,8 +495,8 @@ urban_scenario_grid <- function(prep, scenario, hubs, seed_weeks, delta, psi, n_
                                 seed_r_sweep = get0("CASCADE_SEED_R_SWEEP",
                                                     ifnotfound = NA_real_)) {
   summ <- list(); detail <- list()
-  # THE SEEDED CITY'S REPRODUCTION NUMBER IS A PREMISE, NOT A FINDING. Left at the province
-  # pool, a capital with no case history inherits the national value, at which a one-to-two
+  # THE SEEDED CITY'S REPRODUCTION NUMBER IS A PREMISE, NOT A FINDING. Left at the default, a
+  # seeded capital transmits at the single national R, at which a one-to-two
   # case seed usually fades out — so the analysis
   # answers "what if a capital is seeded and then behaves like the current national average",
   # and quite correctly finds little happens. Sweeping it makes the premise visible and
@@ -516,7 +528,9 @@ urban_scenario_grid <- function(prep, scenario, hubs, seed_weeks, delta, psi, n_
       t20 <- im$thresholds[im$thresholds$threshold == 0.20, ]
       summ[[paste(city, sw, sr)]] <- tibble::tibble(
         city = city, seed_week = sw, seed_r = as.numeric(sr),
-        seed_r_label = if (is.na(sr)) "province pool" else sprintf("R = %.1f", sr),
+        # "national R", not "province pool": there is no province level — a seeded city
+        # transmits at the single national R unless the sweep overrides it.
+        seed_r_label = if (is.na(sr)) "national R" else sprintf("R = %.1f", sr),
         n_hub_zones = length(hubs[[city]]),
         expected_added = im$expected_added, expected_added_se = im$expected_added_se,
         expected_added_lo = im$expected_added_lo, expected_added_hi = im$expected_added_hi,
@@ -608,7 +622,7 @@ urban_map_attributable <- function(impact, hub_label, seed_week,
                          name = "Attributable\nincrease in\nP(invasion)", limits = c(0, NA)) +
     labs(title = sprintf("BDBV 2026 — downstream invasion risk attributable to invasion of %s",
                          hub_label),
-         subtitle = sprintf("Materially-elevated zones only: increase in 13-week reach vs baseline if %s is seeded at week %d (projection; upper bound).",
+         subtitle = sprintf("Materially-elevated zones only: increase in 13-week reach vs baseline if %s is seeded at week %d (scenario projection).",
                             hub_label, seed_week)) +
     theme_void(base_size = 11) + theme(plot.subtitle = element_text(size = 7.5))
   .cascade_ggsave(p, sprintf("%s_%s", file_prefix, gsub("[^A-Za-z0-9]+", "_", hub_label)))
@@ -637,7 +651,7 @@ urban_fig_top_zones <- function(impact, hub_label, top_n = 15L,
 
 # 3. Cross-hub summary bar at the earliest seed week (expected additional invasions).
 urban_fig_summary_bar <- function(summary, min_week, file = "urban_impact_summary") {
-  # The PRIMARY specification: earliest seed week, seeded city at its province pool. The
+  # The PRIMARY specification: earliest seed week, seeded city at the national R. The
   # seeded-R arms are a separate panel, because mixing them here would silently average a
   # premise the reader has not been shown.
   d <- summary[summary$seed_week == min_week, ]
@@ -655,10 +669,12 @@ urban_fig_summary_bar <- function(summary, min_week, file = "urban_impact_summar
               hjust = -0.02, size = 2.9, colour = "grey30") +
     scale_x_continuous(expand = expansion(mult = c(0.05, 0.55))) +
     labs(title = sprintf("BDBV 2026 — downstream impact if a major city is invaded (seeded week %d)", min_week),
+         # Monte-Carlo intervals on the EXPECTATION (mean +- z*SE over draw groups), not a
+         # spread across posterior draws: cascade_paired_contrast()'s lo/hi.
          subtitle = paste("Expected additional health zones invaded within 13 weeks, excluding the",
                           "seeded city itself.\nPaired (common random numbers) contrast against the",
-                          "same-seed baseline; bars are 90% intervals across posterior draws.",
-                          "\nThe seeded city transmits at its province pool — see the seeded-R panel."),
+                          "same-seed baseline; bars are the expected value, lines its 90% Monte-Carlo interval.",
+                          "\nThe seeded city transmits at the national R — see the seeded-R panel."),
          x = "expected additional zones invaded (13 weeks)", y = NULL) +
     theme_minimal(base_size = 11)
   .cascade_ggsave(p, file, w = 9, h = 5.5)
@@ -683,9 +699,9 @@ urban_fig_seed_r <- function(summary, min_week, file = "urban_seed_r_sweep") {
     geom_line(linewidth = 0.9) + geom_point(size = 2.2) +
     labs(title = "BDBV 2026 — the seeded city's transmissibility is the premise, not the finding",
          subtitle = paste("Expected additional zones invaded by 13 weeks against the reproduction",
-                          "number assumed for the seeded city.\nDashed lines: the province-pool",
-                          "arm (the primary specification), in which the city inherits the current",
-                          "national value.\nAt the pooled value a one-to-two case seed usually",
+                          "number assumed for the seeded city.\nDashed lines: the national-R",
+                          "arm (the primary specification), in which the city transmits at the",
+                          "current national value.\nAt that value a one-to-two case seed usually",
                           "fades out, which is why that arm shows little effect."),
          x = "reproduction number of the seeded city", y = "expected additional zones (by 13 wk)",
          colour = NULL, fill = NULL) +
@@ -707,8 +723,8 @@ urban_fig_cases <- function(summary, min_week, file = "urban_case_burden") {
   d <- summary[summary$seed_week == min_week, ]
   if (!nrow(d)) return(invisible(NULL))
   d$city <- as.character(d$city)
-  d$arm <- ifelse(is.na(d$seed_r), "province pool", sprintf("R = %.1f", d$seed_r))
-  arm_lv <- c("province pool", sprintf("R = %.1f", sort(unique(d$seed_r[!is.na(d$seed_r)]))))
+  d$arm <- ifelse(is.na(d$seed_r), "national R", sprintf("R = %.1f", d$seed_r))
+  arm_lv <- c("national R", sprintf("R = %.1f", sort(unique(d$seed_r[!is.na(d$seed_r)]))))
   d$arm <- factor(d$arm, levels = arm_lv)
   # City order by the PRIMARY specification (pooled arm), so this panel, the seeded-R panel
   # and the invasion figures all rank the cities the same way. Guarded: if the pooled arm is
@@ -762,8 +778,8 @@ urban_fig_cases <- function(summary, min_week, file = "urban_case_burden") {
     patchwork::plot_annotation(
       title = sprintf("BDBV 2026 — additional confirmed cases attributable to seeding a city (seeded week %d)", min_week),
       subtitle = paste0(
-        "Paired contrast against the same-seed baseline. Bars are 90% intervals on the MEAN ",
-        "across posterior draws, not\npredictive intervals, which are far wider (see the ",
+        "Paired contrast against the same-seed baseline. Lines are 90% Monte-Carlo intervals on the ",
+        "MEAN (over posterior-draw groups), not\npredictive intervals, which are far wider (see the ",
         "report's case table). LEFT is on a LOG axis: it spans more than an\norder of magnitude because it is ",
         "driven by the assumed seeded-city R, and it is the burden the zone-invasion metric ",
         "excludes\nby construction. RIGHT is the downstream national burden, on a linear axis ",
@@ -796,8 +812,12 @@ urban_fig_timing <- function(summary, file = "urban_timing_sensitivity") {
 # Provenance for the seed-zone rule: EVERY candidate zone of every city antenne, with
 # the quantities the rule sees and the flags that decided it, so a reviewer can audit
 # what was rejected as well as what was chosen. Written next to the scenario outputs.
-urban_write_hub_selection <- function(dir, hubs = URBAN_HUBS,
-                                      file = "urban_hub_selection.csv") {
+# `hubs` MUST be the RESOLVED hubs (resolve_urban_hubs()), whose candidate table carries the
+# `seeded` flag — the zones actually force-seeded, which 40_cascade_next_dominoes.R reads for
+# Figure 4 panel A. It has no default: the old default, URBAN_HUBS, is the unresolved rule
+# output with no `seeded` column, and urban_write_tables() called it that way AFTER run_cascade.R
+# had written the resolved table, overwriting it.
+urban_write_hub_selection <- function(dir, hubs, file = "urban_hub_selection.csv") {
   cand <- attr(hubs, "candidates")
   if (is.null(cand)) {
     message("[urban] no derivation provenance to write (frozen fallback in use)")
@@ -814,9 +834,10 @@ urban_write_hub_selection <- function(dir, hubs = URBAN_HUBS,
 }
 
 # Write per-hub per-zone impact CSVs + the cross-scenario summary table.
+# The seed-zone provenance (urban_hub_selection.csv) is NOT written here: run_cascade.R writes
+# it from the resolved hubs (urban_write_hub_selection(TAB, hubs_u)) before the grid runs.
 urban_write_tables <- function(grid, dir) {
   readr::write_csv(grid$summary, file.path(dir, "urban_scenario_summary.csv"))
-  urban_write_hub_selection(dir)
   for (city in names(grid$detail)) {
     tag <- gsub("[^A-Za-z0-9]+", "_", city)
     d <- grid$detail[[city]]$impact$per_zone
@@ -834,24 +855,12 @@ urban_write_tables <- function(grid, dir) {
 }
 
 # ---- publication figures (Figure4-style) -----------------------------------
-# Province colour identity (extends the Figure-4 eastern palette to the western/
-# southern provinces that host the urban catchments), Okabe-Ito CVD-safe.
-.URBAN_OKABE <- c("#0072B2","#D55E00","#009E73","#CC79A7","#E69F00","#56B4E9","#F0E442","#000000")
-.URBAN_PROV_COL <- c(
-  "Ituri"="#0072B2","Nord-Kivu"="#D55E00","Haut-Uele"="#009E73","Sud-Kivu"="#CC79A7",
-  "Kinshasa"="#E69F00","Haut-Katanga"="#56B4E9","Kasaï-Oriental"="#CC79A7",
-  "Kasaï-Central"="#009E73","Kasaï"="#D55E00","Kwilu"="#0072B2",
-  "Kwango"="#F0E442","Lomami"="#000000","Mai-Ndombe"="#7A7A7A")
-.urban_prov_palette <- function(provs) {
-  provs <- unique(as.character(provs[!is.na(provs)]))
-  cols <- setNames(character(length(provs)), provs)
-  spare <- setdiff(.URBAN_OKABE, unname(.URBAN_PROV_COL)); si <- 1L
-  for (p in provs) {
-    if (p %in% names(.URBAN_PROV_COL)) cols[p] <- unname(.URBAN_PROV_COL[p])
-    else { cols[p] <- spare[((si - 1L) %% max(length(spare), 1L)) + 1L]; si <- si + 1L }
-  }
-  cols
-}
+# Province colours come from prov_palette() (figure_style.R), the suite's ONE province
+# scale, so a province keeps its hue here and in Figures 1-4. This file used to carry a
+# private copy that both disagreed with the main-text figures on Sud-Kivu and reused four
+# Okabe hues twice over, which put two different provinces in the same colour on one panel.
+if (!exists("prov_palette", mode = "function"))
+  source(file.path(get0("ST_DIR", ifnotfound = "."), "figure_style.R"))
 .URBAN_KEYFIG_DIR <- function() file.path(OUT_DIR, "key_outputs", "figures")
 
 # Figure-4 analogue for a city scenario: Panel A = attributable-risk choropleth
@@ -884,9 +893,14 @@ urban_figure4 <- function(impact, hub_label, hub_zones, top_n = 15L,
     theme(legend.position = "right", plot.margin = margin(2, 2, 2, 2))
   # --- Panel B: baseline -> conditional dumbbell, top zones by attributable increase ---
   db <- head(mat[order(-mat$delta), ], top_n)
-  db$zone <- factor(db$health_zone, levels = rev(db$health_zone))
-  pcols <- .urban_prov_palette(db$province)
-  lev <- levels(db$zone); ylab_cols <- unname(pcols[as.character(db$province)[match(lev, db$health_zone)]])
+  # A health zone that shares the seeded city's name ("Kinshasa") is labelled "(HZ)", as Figure 4
+  # does (40_cascade_next_dominoes.R, ZONE_DISPLAY): beside a "Kinshasa" province key it read as
+  # the city or the province. Display only; health_zone stays the join key.
+  db$zone_lab <- ifelse(tolower(db$health_zone) == tolower(hub_label),
+                        paste0(db$health_zone, " (HZ)"), db$health_zone)
+  db$zone <- factor(db$zone_lab, levels = rev(db$zone_lab))
+  pcols <- prov_palette(db$province)
+  lev <- levels(db$zone); ylab_cols <- unname(pcols[as.character(db$province)[match(lev, db$zone_lab)]])
   pB <- ggplot(db) +
     geom_segment(aes(x = p_base, xend = p_cond, y = zone, yend = zone),
                  colour = "grey78", linewidth = 1) +
@@ -909,7 +923,8 @@ urban_figure4 <- function(impact, hub_label, hub_zones, top_n = 15L,
   if (!dir.exists(dirname(path))) dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   .fk <- get0("figure_is_kept", ifnotfound = NULL)
   if (is.function(.fk) && !.fk(path)) return(invisible(path))
-  ggsave(paste0(path, ".pdf"), fig, width = 12.5, height = 6.2, bg = "white")
+  ggsave(paste0(path, ".pdf"), fig, width = 12.5, height = 6.2, bg = "white",
+         device = figure_pdf_device())
   ggsave(paste0(path, ".png"), fig, width = 12.5, height = 6.2, dpi = 150, bg = "white")
   message("  saved ", basename(path)); invisible(path)
 }
@@ -938,7 +953,8 @@ urban_map_facet <- function(impacts, file = "Figure_urban_all_cities") {
   if (!dir.exists(dirname(path))) dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   .fk <- get0("figure_is_kept", ifnotfound = NULL)
   if (is.function(.fk) && !.fk(path)) return(invisible(path))
-  ggsave(paste0(path, ".pdf"), p, width = 15, height = 4.6, bg = "white")
+  ggsave(paste0(path, ".pdf"), p, width = 15, height = 4.6, bg = "white",
+         device = figure_pdf_device())
   ggsave(paste0(path, ".png"), p, width = 15, height = 4.6, dpi = 150, bg = "white")
   message("  saved ", basename(path)); invisible(path)
 }

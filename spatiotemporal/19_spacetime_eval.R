@@ -43,21 +43,22 @@ first_case_from_zone_week <- function(zone_week_raw) {
 #' otherwise); such folds are still reported with NA discrimination so the
 #' event-free periods are visible.
 #'
-#' @return tibble(method, horizon, fold_id, cutoff, n_atrisk, n_events,
-#'   base_rate, auc_pr, auc_pr_skill, hit_at_k, prec_at_k, mean_rank_of_truth).
+#' @return tibble(method, horizon, fold_id, cutoff, n_atrisk, n_events, base_rate,
+#'   auc_pr, auc_roc, auc_pr_skill, auc_pr_lift, hit_at_k, prec_at_k, recall_at_k,
+#'   mean_rank_of_truth). Every column is a within-fold ranking quantity, so it is the same on
+#'   the raw and the recalibrated probability scale (one monotone transform per fold).
 #' @param common_support restrict to the (fold x zone) cells EVERY method covers
 #'   (invasion_common_cells(), 16_invasion_eval.R), so per-fold skill is comparable ACROSS
 #'   methods. TRUE by default and it must stay that way for anything published: this function
-#'   feeds skill_over_time.csv and plot_skill_over_time(), which keeps only the top six
-#'   methods BY THIS MEAN. Scored on native folds the three structural baselines keep the
-#'   earliest origin that the rolling-predictor floor denies every Bayesian model, and that
-#'   origin is far easier -- per-fold auc_pr_skill there is 0.688 / 0.647 / 0.523 for
-#'   Distance-B1 / Gravity-B4 / Adjacency-B7 against their own 11-fold means of
-#'   0.197 / 0.206 / 0.062. It inflates Gravity-B4's mean by 17.8% and Distance-B1's by 20.7%,
-#'   moving them from 5th and 9th of 23 to 14th and 15th. As shipped, Gravity-B4 entered the
-#'   published panel at rank 5 and displaced Bayes-M16-fill-med; on aligned folds it does not
-#'   appear at all. This is the same defect fixed in 16_invasion_eval.R, which did not reach
-#'   here because this module scores independently.
+#'   feeds skill_over_time.csv and plot_skill_over_time(), which draws the featured model plus
+#'   the five best other methods BY THIS MEAN (sensitivity arms and non-featured time-varying
+#'   forms excluded). Scored on native rows, a method that covers an origin or a cell
+#'   the others lack -- the structural baselines use no design, so they keep a round in which
+#'   a Bayesian fit produced no forecast -- averages its per-fold skill over a different set
+#'   of origins, and the early, easier origins can move it up the ranking on that alone. (This
+#'   once put Gravity-B4 into the published panel on an origin the Bayesian models had lost.)
+#'   It is the same defect fixed in 16_invasion_eval.R, which did not reach here because this
+#'   module scores independently.
 spatiotemporal_skill <- function(lfo_results, k = 5L, common_support = TRUE) {
   stopifnot(all(c("method", "horizon", "fold_id", "cutoff", "health_zone",
                   "p_invasion", "is_new_invasion") %in% names(lfo_results)))
@@ -96,8 +97,7 @@ spatiotemporal_skill <- function(lfo_results, k = 5L, common_support = TRUE) {
       #     at its far end.
       # These used to be one vector: this per-fold series published a "mean rank of invaded
       # zones" computed under "max" while the pooled table published the same-named quantity
-      # under "average", so the two disagreed for exactly the models whose scores tie —
-      # Distance-B1 (24 exact zeros) and Adjacency-B7.
+      # under "average", so the two disagreed for exactly the models whose scores tie.
       rk     <- rank(-p, ties.method = "max")         # pessimistic on zero-ties (1 = highest)
       rk_avg <- rank(-p, ties.method = "average")     # reporting rank, matches 16's
       # Top-K membership from the TIE-AWARE rank already computed above, not from
@@ -114,17 +114,18 @@ spatiotemporal_skill <- function(lfo_results, k = 5L, common_support = TRUE) {
         auc_pr = ap, auc_roc = .auc_roc(p, y),
         # PREVALENCE-NORMALISED to [0,1], not the raw lift ap / base_rate.
         #
-        # The lift's attainable MAXIMUM is n / n_pos, which across this outbreak's folds runs
-        # from 71 (500 at risk, 7 events) to 465 (465 at risk, 1 event). Plotted over time it is
-        # therefore dominated by how many invasions happened to land in a fold, not by how well
-        # the model ranked — and it REVERSES the true ordering: fold 1 (auc_pr 0.665) drew at
-        # 47.5 while fold 4 (auc_pr 0.559, strictly worse) drew at 135.5, 2.9x higher. That is
-        # the retained skill_over_time_auc_pr_skill figure, whose question is "does discrimination
-        # improve as the outbreak matures?".
+        # The lift's attainable MAXIMUM is n / n_pos, which varies across folds with the number
+        # of at-risk zones and, above all, with how many invasions happened to land in the fold
+        # (one event among n zones allows a lift of n). Plotted over time it is therefore
+        # dominated by the fold's event count, not by how well the model ranked, and it can
+        # REVERSE the true ordering: a fold with fewer events can draw a higher lift than a fold
+        # with more events and a strictly higher auc_pr. That is the retained
+        # skill_over_time_auc_pr_skill figure, whose question is "does discrimination improve as
+        # the outbreak matures?".
         #
         # (ap - base) / (1 - base) is the standard skill form: 0 = no better than prevalence,
-        # 1 = perfect, comparable across folds. On the two folds above it gives 0.660 and 0.557 —
-        # the correct ordering. NOTE: the POOLED auc_pr_skill in 16_invasion_eval.R is left as a
+        # 1 = perfect, comparable across folds, and monotone in auc_pr at a given base rate.
+        # NOTE: the POOLED auc_pr_skill in 16_invasion_eval.R is left as a
         # lift, which is defensible there because every method is scored on one shared pool with
         # one base rate; only the per-fold series needed this.
         auc_pr_skill = if (n_pos > 0 && n_pos < n) (ap - n_pos / n) / (1 - n_pos / n) else NA_real_,
@@ -149,7 +150,7 @@ spatiotemporal_skill <- function(lfo_results, k = 5L, common_support = TRUE) {
 
 #' For each newly affected zone, how many weeks ahead it entered the top-K.
 #'
-#' Using the h=1 forecast at every fold, rank the at-risk zones; for a zone whose
+#' Using the `horizon` forecast (default h = 1) at every fold, rank the at-risk zones; for a zone whose
 #' first case falls in week W, a fold at cutoff C < W gives lead (W-C)/7 weeks.
 #' The zone's anticipation is the LARGEST lead at which it was in the top-K — i.e.
 #' the earliest the model would have raised the alarm. best_rank is its single
@@ -158,7 +159,9 @@ spatiotemporal_skill <- function(lfo_results, k = 5L, common_support = TRUE) {
 #' @param first_case_week tibble(health_zone, first_wk) from
 #'   first_case_from_zone_week().
 #' @return tibble(health_zone, first_wk, n_prefolds, best_rank,
-#'   anticipation_weeks, ever_topk), one row per zone flagged at least once.
+#'   anticipation_weeks, ever_topk): one row per zone of `first_case_week` scored at
+#'   `horizon` in at least one fold before its first case (whether or not it was ever in the top K;
+#'   ever_topk says which, and anticipation_weeks is 0 for a zone never flagged).
 lead_time_analysis <- function(lfo_results, first_case_week, k = 5L, horizon = 1L,
                                method = NULL) {
   d <- lfo_results %>% dplyr::filter(horizon == !!horizon, is.finite(p_invasion))
@@ -206,12 +209,24 @@ lead_time_analysis <- function(lfo_results, first_case_week, k = 5L, horizon = 1
 # ---------------------------------------------------------------------------
 
 #' Per-zone pooled behaviour across folds: how often at-risk, how often invaded,
-#' mean/max predicted probability, best rank; flags chronic false alarms (high
-#' mean risk, never invaded) and misses (invaded but low mean risk). Joined to
-#' province for spatial mapping.
+#' mean/max predicted probability, best within-fold rank. Flags (k = top-K size):
+#'   hit              invaded (an is_new_invasion row at this horizon) and inside the top K
+#'                    at one or more of its at-risk folds (best_rank <= k);
+#'   miss             invaded but never inside the top K at any at-risk fold;
+#'   false_alarm      never invaded, with mean_p in the top decile of zones (>= the 90th
+#'                    percentile of mean_p across this method's zones);
+#'   correct_negative everything else.
+#' Joined to province for spatial mapping.
+#'
+#' PROBABILITY SCALE. mean_p / max_p (and therefore the false-alarm threshold) are on the
+#' PRIMARY, recalibrated scale -- the prequential p_recal of 16b, which is the raw probability
+#' on rounds without a fitted delta -- whenever the frame carries a usable p_recal for this
+#' method; otherwise on the raw scale, with a warning. Unlike the within-fold ranks, a mean
+#' over folds is NOT invariant to the per-fold recalibration factor, so the scale matters;
+#' `prob_scale` on every row says which one was used.
 #'
 #' @return tibble(health_zone, province, n_atrisk_folds, n_invasions, mean_p,
-#'   max_p, best_rank, flag) sorted by mean_p.
+#'   max_p, best_rank, flag, prob_scale) sorted by mean_p.
 zone_spatial_error <- function(lfo_results, province_map = NULL, horizon = 1L,
                                method = NULL, k = 5L) {
   d <- lfo_results %>% dplyr::filter(horizon == !!horizon, is.finite(p_invasion))
@@ -227,12 +242,23 @@ zone_spatial_error <- function(lfo_results, province_map = NULL, horizon = 1L,
   }
   d <- d %>% dplyr::filter(method == !!method)
   if (nrow(d) == 0) return(NULL)
+  # The scale of mean_p / max_p (see the docstring): the recalibrated column when every scored
+  # row of this method carries it, else the raw one -- said out loud, never silently mixed.
+  .rec <- "p_recal" %in% names(d) && all(is.finite(d$p_recal))
+  if (!.rec)
+    warning(sprintf(paste0("[zone_spatial_error] %s: %s, so mean_p / max_p and the false-alarm ",
+                           "threshold are on the RAW probability scale."), method,
+                    if ("p_recal" %in% names(d)) "p_recal is missing on some scored rows"
+                    else "the frame carries no p_recal"), call. = FALSE)
+  d$.p <- if (.rec) d$p_recal else d$p_invasion
   d <- d %>%
     dplyr::group_by(fold_id) %>%
     # Pessimistic ranking for ties: a zone buried in a large group tied at
     # p_invasion == 0 (no mobility pathway) must NOT be credited as "detected in
     # top-K". min_rank gives every tied zone the group minimum (top) rank; use
     # ties.method="max" so tied zones take the WORST position in their run.
+    # (Within a fold the recalibration is one monotone transform, so this rank is the same on
+    # either scale.)
     dplyr::mutate(rank = rank(-p_invasion, ties.method = "max")) %>%
     dplyr::ungroup()
   z <- d %>%
@@ -240,10 +266,19 @@ zone_spatial_error <- function(lfo_results, province_map = NULL, horizon = 1L,
     dplyr::summarise(
       n_atrisk_folds = dplyr::n(),
       n_invasions = sum(is_new_invasion, na.rm = TRUE),
-      mean_p = mean(p_invasion, na.rm = TRUE),
-      max_p  = max(p_invasion, na.rm = TRUE),
+      mean_p = mean(.p, na.rm = TRUE),
+      max_p  = max(.p, na.rm = TRUE),
       best_rank = min(rank, na.rm = TRUE),
-      .groups = "drop")
+      .groups = "drop") %>%
+    # A round with no fitted delta (delta_estimable FALSE) carries its RAW probability in p_recal,
+    # so the stamp says how many of the rounds averaged here were left uncorrected.
+    dplyr::mutate(prob_scale = if (!.rec) "raw" else {
+      .nf <- dplyr::n_distinct(d$fold_id)
+      .nu <- if ("delta_estimable" %in% names(d))
+               dplyr::n_distinct(d$fold_id[!(d$delta_estimable %in% TRUE)]) else NA_integer_
+      if (is.na(.nu) || .nu == 0L) "recalibrated (prequential)"
+      else sprintf("recalibrated (prequential); %d of %d rounds uncorrected", .nu, .nf)
+    })
   # thresholds relative to the pooled distribution
   hi <- stats::quantile(z$mean_p, 0.9, na.rm = TRUE)
   z <- z %>% dplyr::mutate(flag = dplyr::case_when(

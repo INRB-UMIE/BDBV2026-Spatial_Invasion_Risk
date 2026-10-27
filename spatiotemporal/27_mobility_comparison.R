@@ -4,20 +4,23 @@
 #
 # Purpose: visualise the DIFFERENCES between every mobility kernel built by
 #   03_mobility_matrices.R (M1..M17 and the -dist twins), with an emphasis on the
-#   Flowminder additions — the cohort + relocation-OD composite (M16) and the grand
-#   all-kernel consensus ensemble (M17/M17-dist). Panels C and D show the FILLED
+#   Flowminder additions — the cohort + relocation-OD composite (M16) and the consensus
+#   kernel M17: the equal-weight mean of M4 + M4c + M5 (M4c only when the cohort kernel was
+#   built) with the empirical source rows overlaid (cohort presence, else the short-trip M1);
+#   M17-dist is the same on the road-km twins of those bases. Panels C and D show the FILLED
 #   composites (the default family: source cells the data could not observe are taken
 #   from the base kernel rather than asserted as zero), falling back to the unfilled
 #   parent when a fill kernel was not built. The symmetrised OD kernel (M15) appears
-#   only when INCLUDE_M15_MODELS is on. Reads the saved outputs/mobility/mobility_*.rds files, so it
-#   runs after build_all_mobility_matrices() and needs no model fitting.
+#   only when INCLUDE_M15_MODELS is on. Uses THIS run's kernels (handed in by run_all.R; else
+#   the saved outputs/mobility/mobility_*.rds files listed in the run's manifest), so it runs
+#   after build_all_mobility_matrices() and needs no model fitting.
 #
 # Panels:
 #   A  Kernel similarity heatmap — cosine similarity of the vectorised off-diagonal
-#      outflow weights between every pair of kernels (how M15/M16/M17 relate to the
-#      established kernels).
-#   B  Origin coverage & sparsity — the share of origin zones with any outflow, per
-#      kernel (highlights how much sparser the directed relocation table M3 is than the
+#      outflow weights between every pair of kernels (how the Flowminder composites
+#      relate to the established kernels).
+#   B  Origin coverage — the share of origin zones with any outflow, per kernel
+#      (highlights how much sparser the directed relocation table M3 is than the
 #      composites built on it).
 #   C  Source-zone outflow profiles — top destinations for key invasion source zones
 #      (epicentre Bunia; Kisangani hub Makiso Kisangani; Nord-Kivu hub Beni) compared
@@ -26,17 +29,21 @@
 #      (M13/M14) is visible.
 #   D  Composite divergence — total-variation distance from the plain gravity kernel M4,
 #      computed ONLY over the COHORT SOURCE ROWS the composites actually replace. Every
-#      other row of M13/M14 equals its base kernel, so including them would bury the
-#      signal in a spike at zero (and M16, whose base is the relocation OD rather than
-#      gravity, would not be comparable with the others at all).
+#      other row of a composite equals its BASE kernel: for M13 (base M4) those rows sit at
+#      exactly zero distance and would bury the signal in a spike at zero, and for the
+#      composites on other bases (M13c: M4c; M14: M5; M16: the relocation OD; M17: the
+#      consensus) they would measure the difference between base kernels, not what the
+#      cohort data replaced.
 #
 # Usage:
 #   source(".../27_mobility_comparison.R"); make_mobility_comparison_figures()
 #   # or run standalone:  Rscript spatiotemporal/27_mobility_comparison.R
 #
-# Outputs:
-#   outputs/mobility/mobility_kernel_comparison.pdf (+ .png)
-#   outputs/mobility/mobility_kernel_similarity.csv
+# Outputs (in `out_mobility`, default outputs/mobility/):
+#   mobility_kernel_similarity.csv     (always written)
+#   mobility_kernel_comparison.pdf (+ .png) -- NOT on the retained-figure list (FIGURE_KEEP,
+#                                      00_config.R), so .mc_save() writes it only when the gate
+#                                      is disabled (FIGURE_KEEP_ALL=1)
 # =============================================================================
 
 source(file.path(here::here(), "spatiotemporal", "00_config.R"))
@@ -46,15 +53,6 @@ suppressPackageStartupMessages({
   library(patchwork)
 })
 
-# ONE canonical definition, identical in every module that declares it, so that source()
-# ORDER CANNOT CHANGE SEMANTICS. This file's version used to be
-#   function(a, b) if (!is.null(a) && !is.na(a)[1]) a else b
-# and was declared UNCONDITIONALLY, so sourcing 06 installed it over every other module's and
-# it governed the whole cascade run. It differs in two ways that silently corrupt results:
-# it falls back whenever the FIRST ELEMENT of a vector is NA (blanking an entire otherwise-good
-# vector, e.g. run_cascade.R's R_zone_conjugate column or 33b's pop_vec), and it ERRORS on a
-# zero-length left-hand side ("missing value where TRUE/FALSE needed") instead of falling back.
-`%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 
 # --- House style (mirrors 17_invasion_viz.R) --------------------------------
 .MC_OKABE <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00",
@@ -70,22 +68,21 @@ suppressPackageStartupMessages({
       strip.text = ggplot2::element_text(face = "bold"))
 }
 
-# Robust save: base "pdf" device (NOT cairo) for the batch environment, plus a PNG.
+# PDF via figure_pdf_device() (00_config.R: cairo_pdf, else Quartz, else the base pdf device),
+# plus a PNG.
 .mc_save <- function(p, path, w = 13, h = 10) {
   # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
   # is not on the published allow-list. get0() so the helper still works standalone.
   .fk <- get0("figure_is_kept", ifnotfound = NULL)
   if (is.function(.fk) && !.fk(path)) return(invisible(p))
   if (file.exists(path)) try(file.remove(path), silent = TRUE)
-  ggplot2::ggsave(path, p, width = w, height = h, device = "pdf", limitsize = FALSE)
+  ggplot2::ggsave(path, p, width = w, height = h, device = figure_pdf_device(), limitsize = FALSE)
   png <- sub("\\.pdf$", ".png", path)
   try(ggplot2::ggsave(png, p, width = w, height = h, dpi = 300, device = "png",
                       limitsize = FALSE), silent = TRUE)
   message(sprintf("[mob-viz] wrote %s", path))
 }
 
-#' Load every saved mobility kernel from OUT_MOBILITY.
-#' @return named list id -> row-stochastic matrix (aligned to a common zone set).
 #' Prefer the source-cell-FILL twin of each requested kernel when it was built.
 #'
 #' The fill family is the default (00_config.R), so the curated comparison panels must
@@ -99,6 +96,10 @@ suppressPackageStartupMessages({
   unique(out[out %in% names(kernels)])
 }
 
+#' The mobility kernels to compare: the current run's in-memory list when given, else the
+#' kernels this run's mobility_manifest.csv lists, else (with a warning) every mobility_*.rds in
+#' `out_mobility`.
+#' @return named list id -> row-stochastic matrix (aligned to a common zone set).
 .mc_load_kernels <- function(out_mobility = OUT_MOBILITY,
                              kernels = get0("MOBILITY_MATRICES_CURRENT", ifnotfound = NULL)) {
   # PREFER the kernels of the CURRENT run. Reading every mobility_*.rds in the
@@ -143,11 +144,13 @@ suppressPackageStartupMessages({
   ks[ord]
 }
 
-# Vectorise off-diagonal weights of a kernel (row-major), for similarity.
+# Vectorise off-diagonal weights of a kernel (column-major, as.numeric's order; the cosine
+# similarity only needs every kernel vectorised in the SAME order), for similarity.
 .mc_vec_offdiag <- function(W) { d <- W; diag(d) <- NA_real_; as.numeric(d) }
 
-#' Panel A — pairwise cosine similarity of the off-diagonal outflow fields.
-.mc_panel_similarity <- function(kernels) {
+#' Panel A — pairwise cosine similarity of the off-diagonal outflow fields. The similarity
+#' matrix is also written to `out_dir`/mobility_kernel_similarity.csv.
+.mc_panel_similarity <- function(kernels, out_dir = OUT_MOBILITY) {
   ids <- names(kernels)
   # common zone set across kernels (they are all 519 in practice, but be defensive)
   zc  <- Reduce(intersect, lapply(kernels, rownames))
@@ -161,7 +164,7 @@ suppressPackageStartupMessages({
     cs[a, b] <- if (denom > 0) sum(x[keep] * y[keep]) / denom else NA_real_
   }
   readr::write_csv(as.data.frame(cs) %>% tibble::rownames_to_column("kernel"),
-                   file.path(OUT_MOBILITY, "mobility_kernel_similarity.csv"))
+                   file.path(out_dir, "mobility_kernel_similarity.csv"))
   df <- as.data.frame(as.table(cs)); names(df) <- c("k1", "k2", "cos")
   df$k1 <- factor(df$k1, levels = ids); df$k2 <- factor(df$k2, levels = rev(ids))
   ggplot2::ggplot(df, ggplot2::aes(k1, k2, fill = cos)) +
@@ -175,13 +178,11 @@ suppressPackageStartupMessages({
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1))
 }
 
-#' Panel B — origin coverage (share of origins with any outflow) and sparsity.
+#' Panel B — origin coverage (share of origins with any outflow).
 .mc_panel_coverage <- function(kernels) {
   df <- purrr::imap_dfr(kernels, function(W, id) {
     rs <- rowSums(W)
-    tibble::tibble(id = id,
-                   origin_coverage = mean(rs > 1e-9),
-                   sparsity        = mean(W == 0))
+    tibble::tibble(id = id, origin_coverage = mean(rs > 1e-9))
   })
   df$id <- factor(df$id, levels = df$id[order(df$origin_coverage)])
   ggplot2::ggplot(df, ggplot2::aes(origin_coverage, id)) +
@@ -191,7 +192,7 @@ suppressPackageStartupMessages({
     ggplot2::scale_x_continuous(labels = scales::percent, limits = c(0, 1.08),
                                 expand = c(0, 0)) +
     ggplot2::labs(title = "B. Origin coverage",
-                  subtitle = "Share of origin zones with any outflow (higher = less sparse)",
+                  subtitle = "Share of origin zones with any outflow (higher = fewer empty origin rows)",
                   x = "origins with outflow", y = NULL) +
     .mc_theme()
 }
@@ -250,13 +251,15 @@ tidytext_reorder <- function(x, by) factor(x, levels = unique(x[order(by)]))
   R <- kernels[[ref]]
   zc <- rownames(R)
   # SOURCE ROWS ONLY. A composite differs from its base kernel exactly on the rows whose
-  # profile was replaced by data (the cohort origins, plus the short-trip epicentre for M8);
-  # scoring every origin mixes those with rows that are identical by construction.
+  # profile was replaced by data (the cohort origins; the short-trip epicentre zones where a
+  # kernel overlays M1 instead). Every other row equals the composite's BASE kernel, so
+  # scoring every origin would mix the data replacement with rows that are either identical
+  # to M4 by construction (M13) or measure only the base-kernel difference (the others).
   if (is.null(sources))
     sources <- unique(c(get0("EPICENTRE_ZONES", ifnotfound = character(0)),
                         # COHORT_SOURCES is keyed by cohort id ("ituri","nk","tshopo"); its VALUES are the zone names.
-    # names() never intersects the zone spine, so this fallback silently dropped all seven cohort
-    # origins from panel D whenever no loaded kernel carried a source_rows attribute.
+    # names() never intersects the zone spine, so this fallback silently dropped every cohort
+    # origin from panel D whenever no loaded kernel carried a source_rows attribute.
     unlist(get0("COHORT_SOURCES", ifnotfound = list()), use.names = FALSE)))
   src_rows <- intersect(unlist(lapply(comps, function(id) attr(kernels[[id]], "source_rows"))), zc)
   if (!length(src_rows)) src_rows <- intersect(sources, zc)
@@ -292,7 +295,7 @@ make_mobility_comparison_figures <- function(out_mobility = OUT_MOBILITY,
   message(sprintf("[mob-viz] loaded %d kernels: %s",
                   length(kernels), paste(names(kernels), collapse = ", ")))
 
-  pA <- .mc_panel_similarity(kernels)
+  pA <- .mc_panel_similarity(kernels, out_dir = out_mobility)
   pB <- .mc_panel_coverage(kernels)
   pC <- .mc_panel_source_profiles(kernels)
   pD <- .mc_panel_divergence(kernels)
@@ -304,8 +307,16 @@ make_mobility_comparison_figures <- function(out_mobility = OUT_MOBILITY,
             else pC %||% pD
   fig <- if (!is.null(bottom)) top / bottom + patchwork::plot_layout(heights = c(1, 1.1))
          else top
+  # The title names only the Flowminder kernels this run actually built (M15 exists only with
+  # INCLUDE_M15_MODELS on), each by what it is.
+  .feat <- c(M15 = "symmetrised Flowminder OD (M15)",
+             M16 = "cohort + relocation-OD composite (M16)",
+             M17 = "gravity/radiation consensus with empirical source rows (M17)")
+  .feat <- .feat[vapply(names(.feat), function(id)
+    any(c(id, paste0(id, "-fill")) %in% names(kernels)), logical(1))]
   fig <- fig + patchwork::plot_annotation(
-    title = "Mobility-kernel comparison — Flowminder static (M15), cohort+static (M16), all-kernel ensemble (M17)",
+    title = paste0("Mobility-kernel comparison",
+                   if (length(.feat)) paste0(" — ", paste(.feat, collapse = ", ")) else ""),
     theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold")))
 
   .mc_save(fig, file.path(out_mobility, "mobility_kernel_comparison.pdf"), w = 14, h = 12)

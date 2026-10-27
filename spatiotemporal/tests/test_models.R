@@ -10,7 +10,7 @@
 # NOTE: the WIS, Brier, log-loss and calibration tests that formerly lived here
 # depended on compute_wis()/compute_brier_score()/compute_log_loss()/
 # compute_calibration() from 11_metrics.R and 12_calibration.R, which have been
-# RETIRED to spatiotemporal/stale/. Their assertions are ported to the live
+# DELETED (they were never archived). Their assertions are ported to the live
 # equivalents in test_invasion_pipeline.R:
 #   * WIS      -> live `wis_one` (04b_epinowcast.R), Bracher-2021 hand example
 #   * Brier    -> .brier      (16_invasion_eval.R)
@@ -284,7 +284,7 @@ test_that("FOI is non-negative and correctly directed through mobility matrix", 
 # weekly_censored_gt() drops the weekly lag-0 term (an explicit weekly recursion cannot carry
 # a self-referential term) and renormalises. EpiNow2's R lives on the DAILY renewal, which
 # retains that mass, so applying it unchanged to the weekly kernel understates growth.
-# weekly_renewal_R_eff() is the algebraic correction.
+# weekly_renewal_R_eff() is the exact (Euler-Lotka growth-matching) correction.
 
 test_that("weekly_censored_gt reports the lag-0 mass it drops", {
   skip_if_missing("weekly_censored_gt")
@@ -301,37 +301,86 @@ test_that("weekly_censored_gt reports the lag-0 mass it drops", {
   expect_equal(sum(G), 1, tolerance = 1e-9)
 })
 
-test_that("weekly_renewal_R_eff is the identity at R = 1 and at g0 = 0, and increases with R", {
+test_that("weekly_renewal_R_eff is the identity at R = 1, increasing, and finite for every R", {
   skip_if_missing("weekly_renewal_R_eff")
-  g0 <- attr(weekly_censored_gt(15.3, 9.3), "lag0_mass")
-  expect_equal(weekly_renewal_R_eff(1, g0), 1, tolerance = 1e-12,
-               info = "the correction must vanish at the critical point")
-  expect_equal(weekly_renewal_R_eff(1.7, 0), 1.7, tolerance = 1e-12,
-               info = "a kernel with no lag-0 mass needs no correction")
-  expect_gt(weekly_renewal_R_eff(2.5, g0), 2.5)   # supercritical: correction inflates
-  expect_lt(weekly_renewal_R_eff(0.8, g0), 0.8)   # subcritical: correction deflates
-  # Monotone increasing in R, which the test name claims and nothing asserted.
+  G <- weekly_censored_gt(15.3, 9.3)
+  expect_equal(weekly_renewal_R_eff(1, G), 1, tolerance = 1e-6,
+               info = "the multiplier must equal R at the critical point")
+  expect_equal(weekly_renewal_R_eff(1.7, c(0.6, 0.4)), 1.7, tolerance = 1e-12,
+               info = "a kernel with no lag-0 mass and no grid needs no correction")
+  expect_gt(weekly_renewal_R_eff(2.5, G), 2.5)   # supercritical: correction inflates
+  expect_lt(weekly_renewal_R_eff(0.8, G), 0.8)   # subcritical: correction deflates
   .rs <- seq(0.5, 4, by = 0.25)
-  expect_true(all(diff(weekly_renewal_R_eff(.rs, g0)) > 0),
-              info = "R_eff must be strictly increasing in R")
-  # The inflation factor itself must grow with R (it is 1 at R = 1 by construction).
-  .ratio <- weekly_renewal_R_eff(.rs, g0) / .rs
-  expect_true(all(diff(.ratio) > 0), info = "the correction must strengthen as R rises")
+  expect_true(all(diff(weekly_renewal_R_eff(.rs, G)) > 0), info = "M must be strictly increasing in R")
+  # FINITE where the retired closed form R(1-G0)/(1-R G0) diverged (R >= 1/G0 = 17.2) and was
+  # then capped into values of order 1e7.
+  big <- weekly_renewal_R_eff(c(17, 30), G)
+  expect_true(all(is.finite(big)) && all(big < 100), info = "no blow-up at R >= 1/G0")
+  expect_identical(weekly_renewal_R_eff(0, G), 0)
+  # A legacy kernel carrying only the lag-0 mass returns NA where the closed form is undefined.
+  leg <- structure(c(0.5, 0.5), lag0_mass = 0.058)
+  expect_warning(v <- weekly_renewal_R_eff(c(1.5, 18), leg), "undefined")
+  expect_true(is.finite(v[1]) && is.na(v[2]))
 })
 
 test_that("R_eff makes the weekly recursion reproduce the DAILY renewal's growth rate", {
   skip_if_missing("weekly_renewal_R_eff"); skip_if_missing("make_gt_pmf")
   w <- make_gt_pmf(15.3, 9.3, 90); w <- w / sum(w)
-  G <- weekly_censored_gt(15.3, 9.3); g0 <- attr(G, "lag0_mass")
+  G <- weekly_censored_gt(15.3, 9.3)
   lam_daily  <- function(R) uniroot(function(l) R * sum(w * l^(-seq_along(w))) - 1,
                                     c(1e-6, 10), tol = 1e-12)$root
   lam_weekly <- function(M) uniroot(function(l) M * sum(G * l^(-seq_along(G))) - 1,
-                                    c(1e-6, 50), tol = 1e-12)$root
-  for (R in c(1.19, 1.5, 2.5)) {
+                                    c(1e-6, 1e4), tol = 1e-12)$root
+  for (R in c(0.7, 1.19, 1.5, 2.5, 5, 10)) {
     truth <- lam_daily(R)^7
-    err_old <- abs(lam_weekly(R) / truth - 1)
-    err_new <- abs(lam_weekly(weekly_renewal_R_eff(R, g0)) / truth - 1)
-    expect_lt(err_new, err_old,
-              label = sprintf("R=%.2f: corrected weekly growth must be closer to the daily renewal", R))
+    err_raw <- abs(lam_weekly(R) / truth - 1)
+    err_new <- abs(lam_weekly(weekly_renewal_R_eff(R, G)) / truth - 1)
+    # EXACT up to the continuous-vs-discretised generation interval (< 0.3% here).
+    expect_lt(err_new, 0.003, label = sprintf("R=%.2f: weekly growth matches the daily renewal", R))
+    expect_lt(err_new, err_raw, label = sprintf("R=%.2f: better than the uncorrected R", R))
   }
+})
+
+test_that("epinowcast weekly interval is the per-draw quantile of the weekly total, not summed daily quantiles", {
+  skip_if_missing("epinowcast_weekly_factors")
+  set.seed(7L)
+  days <- seq(as.Date("2026-09-19"), as.Date("2026-10-09"), by = "day")
+  nd   <- 2000L
+  S    <- sapply(seq(10, 30, length.out = length(days)), function(l) stats::rpois(nd, l))  # draws x days
+  smry <- function(object, type = "nowcast", ...) {
+    if (identical(type, "nowcast"))
+      return(data.table::data.table(reference_date = days, mean = colMeans(S),
+                                    q5 = apply(S, 2, stats::quantile, 0.05),
+                                    q95 = apply(S, 2, stats::quantile, 0.95)))
+    if (isTRUE(attr(object, "no_samples"))) stop("no samples")
+    data.table::data.table(reference_date = rep(days, each = nd), .draw = rep(seq_len(nd), length(days)),
+                           sample = as.vector(S))
+  }
+  registerS3method("summary", "mock_enw_fit", smry)
+  tri <- data.table::data.table(reference_date = days, report_date = days, confirm = 5L)
+  f   <- epinowcast_weekly_factors(structure(list(), class = "mock_enw_fit"), tri)
+  wk  <- lubridate::floor_date(days, "week", week_start = get0("WEEK_ANCHOR", ifnotfound = 1L))
+  tot <- function(j) rowSums(S[, j, drop = FALSE])
+  expect_equal(f$nowcast_lo, as.numeric(tapply(seq_along(days), wk, function(j) stats::quantile(tot(j), 0.05))))
+  expect_equal(f$nowcast_hi, as.numeric(tapply(seq_along(days), wk, function(j) stats::quantile(tot(j), 0.95))))
+  expect_equal(f$nowcast_mean, as.numeric(tapply(colMeans(S), wk, sum)))
+  summed_hi <- as.numeric(tapply(seq_along(days), wk, function(j) sum(apply(S[, j, drop = FALSE], 2, stats::quantile, 0.95))))
+  expect_true(all(f$nowcast_hi < summed_hi))          # the retired construction was wider
+  # no samples -> NA interval (never a different quantity), loudly
+  expect_warning(f0 <- epinowcast_weekly_factors(structure(list(), class = "mock_enw_fit", no_samples = TRUE), tri),
+                 "could not be read")
+  expect_true(all(is.na(f0$nowcast_lo)) && all(is.na(f0$cv)))
+  expect_equal(f0$factor, f$factor)
+})
+
+test_that("cascade_weekly_gt: a pmf carrying its generator gives the censored kernel silently; only a bare pmf is binned, and warns", {
+  skip_if_missing("cascade_weekly_gt"); skip_if_missing("make_gt_pmf")
+  # No GT_PROFILES entry for the key (a GT-prior grid point), so the daily pmf is the fallback.
+  g <- make_gt_pmf(15.3, 9.3, 90)
+  expect_silent(k <- cascade_weekly_gt("gtgrid01", list(gtgrid01 = g), profiles = list()))
+  expect_equal(k, weekly_censored_gt(15.3, 9.3), tolerance = 1e-12)
+  expect_warning(kb <- cascade_weekly_gt("gtgrid01", list(gtgrid01 = as.numeric(g)), profiles = list()),
+                 "BINNING")
+  expect_null(attr(kb, "R_eff_grid"))
+  expect_false(isTRUE(all.equal(as.numeric(kb), as.numeric(k))))
 })

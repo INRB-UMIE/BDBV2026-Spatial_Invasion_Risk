@@ -5,32 +5,25 @@
 # Usage: Rscript spatiotemporal/run_all.R
 #   or:  source("spatiotemporal/run_all.R")  within an interactive session
 #
-# Order of operations:
-#   00  Config and package checks
-#   01  Data preparation
-#   02  Epidemiological parameters (EpiNow2 R(t), GT PMFs, delays)
-#   03  Mobility matrices (M1–M8)
-#   04  Nowcast correction
-#   05–09 Model fitting and forecasting
-#   10  LFO-CV evaluation
-#   11  Metric computation
-#   12  Risk scores (no separate calibration step; see 16b recalibration)
-#   13  Visualisations
-#   14  Methodology report
-#
-# The list above stops at 14 because it predates most of what this script now schedules.
-# What actually runs, after the steps above:
-#   16b Prequential recalibration (delta per method x horizon); the pooled delta is DEPLOYED
-#       into the live forecast, the per-fold one is used for scoring
-#   18  Mean / median / loo-stacked ensembles
-#   19  Space-time evaluation      20  Forecast detail, risk tables, published CSVs
-#   21  Bayesian renewal suite (the featured model)      22  Daily re-issue
-#   24  Review-response figures (FigR1/R3/R4)            27  Mobility comparison
+# Order of operations (ONE list; the two that used to sit here disagreed, because the first
+# stopped at step 14 and predated most of what this script schedules):
+#   00   config and package checks
+#   01   data preparation                     02  epidemiological parameters, EpiNow2 R(t)
+#   03   mobility kernels                     04  nowcast correction (deterministic)
+#   05/06/15  baselines and shared primitives
+#   10   invasion LFO-CV (16)                 11  evaluation (16) + recalibration (16b)
+#   11b  space-time evaluation (19)           12  risk scores (15/20)
+#   12b  Bayesian renewal suite (21) — the featured model
+#   12c  daily re-issue (22)                  13  visualisations (17/20/24/27)
+#   14   invasion report + model specification
 #   Then write_run_info.R and write_model_selection.R (run metadata + selection provenance),
-#   and .run_downstream(), which launches the figure suites (make_publication_figures.R,
-#   make_manuscript_figures.R, make_si_model_figures.R, make_si_data_figures.R,
-#   make_topk15_ever.R, make_spread_kinematics_compact.R),
-#   update_bayesian_report.R, and the cascade driver run_cascade.R (modules 30-43).
+#   and .run_downstream(), which launches — as SUBPROCESSES, never source() — 43, 50, the
+#   figure suites (make_publication_figures.R, make_manuscript_figures.R,
+#   make_si_model_figures.R, make_si_data_figures.R, make_topk15_ever.R,
+#   make_spread_kinematics_compact.R), 45_ascertainment_figures.R,
+#   update_bayesian_report.R, the cascade driver
+#   run_cascade.R (modules 30-36, 38, 39) and the cascade figures (37, 40, 42,
+#   make_manuscript_figure2_cascade.R).
 #   Finally the key_outputs manifest and the retained-figure archive sweep.
 # =============================================================================
 
@@ -156,13 +149,13 @@ suppressWarnings(rm(list = intersect(c("lfo_fig3", ".bl_ok", "lfo_results"),
 # ---------------------------------------------------------------------------
 # 1. Data preparation
 # ---------------------------------------------------------------------------
-# 1a. Refresh the DHIS2-specific onset->sample delay (windowed interval-censored MLE)
-#     BEFORE data prep, so the onset imputation (01_data_prep.R) draws its parametric
-#     fallback / reported rate from the current line list's own delay rather than the
-#     faster lab reference. Sourcing defines the estimator functions only (the script's
-#     main block is Rscript-gated); the fit is fast (~5 s) and non-fatal — if it fails the
-#     imputation falls back to the windowed empirical bootstrap + Exp(1/mean). Set
-#     RUN_EPIDIST=TRUE to additionally run the Bayesian truncation-corrected fit standalone.
+# 1a. Refresh the DHIS2-specific onset->sample delay for the CURRENT line list. Since
+#     2026-10-15 it does not drive the onset imputation (missing onsets are drawn from
+#     same-class donor intervals, 01_data_prep.R); it is the REPORTED delay (captions, 04d's
+#     QA figures) and the fallback of effective_onset_sample_delay(). Sourcing defines the
+#     estimator functions only (the script's main block is Rscript-gated). Non-fatal: if it
+#     fails, the file on disk still names an earlier snapshot and .load_dhis2_delay_params()
+#     refuses it with a warning, so no other snapshot's delay is quoted as this one's.
 message("\n=== Step 1a: DHIS2 onset->sample delay refresh ===")
 source(file.path(ST_DIR, "04c_dhis2_delay_windows.R"))   # estimate_dhis2_onset_sample_delay(), estimate_dhis2_onset_sample_epidist(), write_onset_sample_long()
 tryCatch({
@@ -170,35 +163,40 @@ tryCatch({
   .dll_csv <- file.path(LINELIST_DIR, .dmeta$folder, "dhis2_processed_linelist.csv")
   .dll_raw <- readr::read_csv(.dll_csv, col_types = readr::cols(.default = "c"),
                               show_col_types = FALSE, na = c("", "NA", "N/A"))
+  # The delay fits use the SAME diagnostic sample date as load_linelist() (SAMPLE_DATE_SOURCE).
+  .dll_raw <- apply_earliest_sample_dates(.dll_raw, label = "delay fits (step 1a)")
   .osfit   <- estimate_dhis2_onset_sample_delay(.dll_raw, analysis_date = ANALYSIS_DATE)
   # Bayesian EpiDist MARGINAL delay (truncation + double-interval-censoring corrected) — the
   # DEFAULT estimator (RUN_EPIDIST, 00_config.R). Fit ONCE here on the same windowed pairs;
   # write_onset_sample_long() appends its (family, mean, sd) as epidist_* rows so
-  # .load_dhis2_delay_params() (01_data_prep.R) PREFERS it for the onset imputation AND the
-  # nowcast rate. NULL (no epidist_* rows; censored-MLE used) when RUN_EPIDIST=FALSE, the
-  # package is absent, or the fit fails — the run stays non-fatal either way. This is a
-  # ONE-TIME data-prep fit (a handful of Stan fits), NOT repeated per LFO fold or per model.
+  # .load_dhis2_delay_params() (00_config.R) PREFERS it for the reported delay. NULL when
+  # RUN_EPIDIST=FALSE, the package is absent, or the fit fails. On a FAILED fit (RUN_EPIDIST on)
+  # the writer keeps an EpiDist fit of the SAME records already in the file; otherwise -- and
+  # always when EpiDist is off or absent -- it selects the censored MLE. A ONE-TIME
+  # data-prep fit (a handful of Stan fits), not repeated per fold.
   .osepi   <- estimate_dhis2_onset_sample_epidist(.dll_raw, analysis_date = ANALYSIS_DATE)
-  # PER-CLASSIFICATION delays (2026-09-22). The onset imputation imputes onsets for CONFIRMED
-  # records, so it must draw from the confirmed-case delay; the pooled fit above is majority
-  # test-negative and one-seventh unadjudicated on this line list (6,823 not_a_case windowed
-  # pairs and 2,038 with no final classification, against 4,981 confirmed) and runs 2.47 d
-  # (32%) short. Each stratum is fitted independently, with its own interval censoring and
-  # its own truncation correction, because confirmed cases are sampled more slowly and are
-  # therefore also more truncated -- a pooled correction would distort the contrast.
-  # The pooled rows are still written unchanged, so every other consumer is unaffected.
+  # PER-CLASSIFICATION delays (2026-09-22): the REPORTED delay is the CONFIRMED-case one
+  # (ONSET_IMPUTE_STRATUM; the onset imputation uses donor intervals, not this fit), because
+  # test-negatives -- the largest single group of the pooled
+  # pairs -- are swabbed on an alert-driven schedule. Each stratum is fitted independently,
+  # with its own interval censoring and truncation correction. The pooled rows are still
+  # written unchanged.
   .osstr   <- tryCatch(estimate_onset_sample_strata(.dll_raw, analysis_date = ANALYSIS_DATE),
                        error = function(e) {
                          warning("[run_all] delay strata not fitted (", conditionMessage(e),
-                                 "); the onset imputation will warn and use the POOLED delay.",
-                                 call. = FALSE); list() })
+                                 "); the per-classification reported delays are unavailable and ",
+                                 "the loader reports the POOLED delay.", call. = FALSE); list() })
   if (!is.null(.osfit)) {
-    write_onset_sample_long(.osfit,
-      file.path(DATA_DIR, "cfr_reference", "dhis2_onset_sample_delay_params.csv"),
+    # DELAY_PARAMS_PATH (00_config.R): the canonical file, or the sensitivity's own tree when a
+    # data-definition switch is off its default. The per-snapshot copy beside the line list is
+    # the published definition's only.
+    dir.create(dirname(DELAY_PARAMS_PATH), recursive = TRUE, showWarnings = FALSE)
+    write_onset_sample_long(.osfit, DELAY_PARAMS_PATH,
       source_label = .dmeta$folder, epidist = .osepi, strata = .osstr)
-    write_onset_sample_long(.osfit,
-      file.path(LINELIST_DIR, .dmeta$folder, "dhis2_onset_sample_delay_params.csv"),
-      source_label = .dmeta$folder, epidist = .osepi, strata = .osstr)
+    if (!nzchar(DATA_DEFINITION_TAG))
+      write_onset_sample_long(.osfit,
+        file.path(LINELIST_DIR, .dmeta$folder, "dhis2_onset_sample_delay_params.csv"),
+        source_label = .dmeta$folder, epidist = .osepi, strata = .osstr)
     if (length(.osstr))
       message(sprintf("[run_all] delay strata written: %s",
                       paste(sprintf("%s %.2f d (n=%s)", names(.osstr),
@@ -211,12 +209,16 @@ tryCatch({
                       sprintf(" | EpiDist marginal PREFERRED: %s mean %.2f d sd %.2f d",
                               .osepi$family, .osepi$mean, .osepi$sd)
                     else " | EpiDist marginal: not used (censored-MLE)"))
-  } else message("[run_all] DHIS2 delay fit returned NULL (too few pairs); imputation uses the windowed bootstrap.")
-}, error = function(e) message("[run_all] DHIS2 delay refresh skipped (non-fatal): ", conditionMessage(e)))
+  } else warning("[run_all] DHIS2 delay fit returned NULL (too few pairs); no delay is reported for this snapshot.",
+                 call. = FALSE)
+}, error = function(e) warning("[run_all] DHIS2 delay refresh FAILED (non-fatal; the stale file is refused): ",
+                               conditionMessage(e), call. = FALSE))
 
-# 1b. VISUAL CHECK of the delay fits just made. The onset->sample distribution feeds the
-#     onset imputation, the nowcast rate and the R(t) truncation, so a bad fit propagates
-#     into every downstream number — and until now nothing in a run ever plotted it (04c's
+.phase("Step 1a  delay refresh")
+
+# 1b. VISUAL CHECK of the delay fits just made. The onset->sample distribution is the reported
+#     delay (confirmed stratum), and its pooled fit is the fallback of the nowcast and R(t)
+#     truncation, so a bad fit propagates downstream — and until now nothing in a run ever plotted it (04c's
 #     QA figure sits inside its Rscript-gated MAIN block, which source()ing skips). This
 #     renders the EpiDist naive + marginal densities and the interval-censored MLE against
 #     the empirical delay histograms, on exactly the records the fits used.
@@ -248,7 +250,6 @@ zone_week_nc <- dat$zone_week   # all zone-week counts (will be nowcast-correcte
 zones_all    <- names(dat$pop)  # canonical zone name vector (519 zones, from population spine)
 pop_vec      <- dat$pop
 covariates   <- dat$covariates
-sitrep       <- dat$sitrep
 
 # ---------------------------------------------------------------------------
 # 2. Epidemiological parameters
@@ -276,7 +277,6 @@ RUN_RT_ESTIMATION <- .env_flag("RUN_RT_ESTIMATION", TRUE, allow_global = TRUE)
 Rt_national_list <- list()
 Rt_primary <- NULL
 Rt_scalar  <- NULL
-Rt_zone    <- NULL   # zone-level R(t): optional, never populated in the default path
 if (isTRUE(RUN_RT_ESTIMATION)) {
   # CONFIRMED cases only (dat$ll retains all classifications, so an unfiltered count would be
   # "all alerts", inflating R(t)), dated EXACTLY as the weekly case counts (date_index: onset,
@@ -289,9 +289,8 @@ if (isTRUE(RUN_RT_ESTIMATION)) {
     message(sprintf("[Rt] Estimating national R(t) with GT profile: %s", gt_name))
     gt_p <- GT_PROFILES[[gt_name]]
     Rt_national_list[[gt_name]] <- tryCatch(
-      # ll is passed for the truncation BASIS GUARD only (it compares the recorded-onset
-      # basis used for the truncation fit against the date_index basis this series uses).
-      # issue_date stays NULL: this is the deployed fit, so the extract regime applies.
+      # issue_date stays NULL: this is the deployed fit, so the extract regime applies (fitted
+      # on the date_index series of the archive vintages; no basis guard runs for it).
       estimate_rt_epinow2(daily_cases, gt_name, gt_p, ANALYSIS_DATE, ll = dat$ll),
       error = function(e) { warning("EpiNow2 failed for ", gt_name, ": ", e$message); NULL }
     )
@@ -316,8 +315,10 @@ if (isTRUE(RUN_RT_ESTIMATION)) {
                     format(tail(.rt_est$date, 1)), Rt_scalar$mean,
                     tail(.rt_est$R_lo_90, 1), tail(.rt_est$R_hi_90, 1)))
   } else {
-    Rt_scalar <- list(mean = 1.5, sd = 0.3)  # fallback prior
-    warning("[Rt] EpiNow2 failed; using prior R(t) = 1.5")
+    # No fabricated fallback: a failed fit leaves Rt_scalar NULL (nothing downstream reads it;
+    # it is only returned), and rt_national.pdf is not produced.
+    Rt_scalar <- NULL
+    warning("[Rt] EpiNow2 failed for the primary GT profile; no national R(t) this run.")
   }
 } else {
   message("[Rt] RUN_RT_ESTIMATION = FALSE — skipping EpiNow2 R(t); rt_national.pdf will NOT be produced.")
@@ -331,7 +332,7 @@ message("\n=== Step 3: Mobility matrices ===")
 source(file.path(ST_DIR, "03_mobility_matrices.R"))
 
 osrm_mat <- load_osrm()                          # travel time (minutes) — base kernels
-# OSRM road-distance (km) — drives the -dist mobility variants (M4/M8/M9/M10/M11-dist).
+# OSRM road-distance (km) — drives the -dist mobility variants (MOBILITY_DIST_IDS, 00_config.R).
 # Optional: if the matrix is absent the -dist variants are simply not built and the
 # Bayesian grid filters them out (bayes_default_grid keeps only available kernels).
 osrm_dist_mat <- tryCatch(load_osrm("road_distance"), error = function(e) {
@@ -347,9 +348,10 @@ shared_zones <- intersect(zones_all, rownames(osrm_mat))
 message(sprintf("[mobility] %d zones with OSRM coverage (of %d total)",
                 length(shared_zones), length(zones_all)))
 
-# OSRM road-distance (-dist) kernels are OPTIONAL (INCLUDE_OSRM_DIST_MODELS, default TRUE).
-# The road-distance matrix is supplied when EITHER the generic -dist family OR the cohort
-# geographic-distance composites (M13/M14-dist, INCLUDE_COHORT_MODELS, default TRUE) are wanted;
+# OSRM road-distance (-dist) kernels are OPTIONAL (INCLUDE_OSRM_DIST_MODELS, default FALSE).
+# The road-distance matrix is supplied when the generic -dist family, the cohort
+# geographic-distance composites (M13/M14-dist, INCLUDE_COHORT_MODELS, default TRUE) or the
+# static-flow -dist composite (M17-dist, INCLUDE_FLOWSTATIC_MODELS) is wanted;
 # build_all_mobility_matrices gates the GENERIC -dist variants separately (on INCLUDE_OSRM_DIST_MODELS)
 # so passing the matrix for the cohort composites does not switch the generic -dist family on.
 mobility_matrices <- build_all_mobility_matrices(
@@ -419,12 +421,15 @@ source(file.path(ST_DIR, "04b_epinowcast.R"))
 # rather than bit-identical to the raw arm.
 # THE NOWCAST USES THE SAME ESTIMATED TRUNCATION AS R(t), not the onset->sample delay.
 # This is the h = 1 channel: R(t) enters only at h >= 2 (.bayes_project_mu), so the 1-week
-# invasion hazard is driven entirely by these corrected counts. They were corrected for
-# onset->SAMPLE (~7.7 d) while the series is truncated by onset->APPEARANCE (~11.4 d measured),
-# so the most recent week was inflated 2.63x where the fitted truncation gives 5.92x —
-# under-correcting the very week the live forecast is issued from. Resolved once here (the fit is cached) and passed
-# explicitly, so the deployed nowcast and the deployed R(t) provably use one distribution.
-# NULL falls through to apply_nowcast_correction()'s own resolver, which warns.
+# invasion hazard is driven entirely by these corrected counts. The live extract is truncated by
+# onset -> APPEARANCE, estimated from the snapshot archive on the SAME date_index series these
+# counts are built on (02_epi_params.R, SERIES BASIS). The back-test folds are a different
+# series (re-censored on sample date) with their own "asof" truncation; each truncation is
+# calibrated to its own series, which 52_vintage_level_check.R measures on every run (newest-week
+# completeness assumed vs observed in the archived snapshots). Until 2026-10-14 the extract fit
+# used recorded onsets and over-corrected the newest live week about 2x. Resolved once here (the
+# fit is cached) and passed explicitly, so the deployed nowcast and the deployed R(t) provably use
+# one distribution. NULL falls through to apply_nowcast_correction()'s own resolver, which warns.
 .trunc_deployed <- tryCatch(
   .trunc_as_delay_spec(epinow2_truncation(issue_date = NULL, ll = dat$ll), "extract"),
   error = function(e) { warning("[nowcast] deployed truncation unavailable (", conditionMessage(e),
@@ -447,7 +452,8 @@ if (.env_flag("RUN_EPINOWCAST_DIAGNOSTIC", FALSE)) {
   tryCatch({
     .enw <- nowcast_zone_week_epinowcast(
       zone_week = dat$zone_week, linelist = dat$ll,
-      analysis_date = ANALYSIS_DATE, outbreak_start = OUTBREAK_START)
+      analysis_date = ANALYSIS_DATE, outbreak_start = OUTBREAK_START,
+      fallback_delay = .trunc_deployed)
     enw_factors <- attr(.enw, "epinowcast_factors")
     if (!is.null(enw_factors))
       readr::write_csv(enw_factors, file.path(OUT_DIAGNOSTICS, "epinowcast_weekly_factors.csv"))
@@ -460,14 +466,15 @@ if (.env_flag("RUN_EPINOWCAST_DIAGNOSTIC", FALSE)) {
 # ---------------------------------------------------------------------------
 source(file.path(ST_DIR, "05_baseline_models.R"))   # forecast_B1/B4, zone_week_to_wide
 source(file.path(ST_DIR, "06_simple_models.R"))     # compute_foi, daily_to_weekly_gt
-source(file.path(ST_DIR, "15_workhorse.R"))         # mobility-informed renewal workhorse
+source(file.path(ST_DIR, "15_workhorse.R"))         # shared invasion-design helpers and risk scores
 source(file.path(ST_DIR, "16_invasion_eval.R"))     # invasion LFO + evaluation
 source(file.path(ST_DIR, "16b_invasion_recalibration.R"))  # post-hoc hazard-scale delta
 source(file.path(ST_DIR, "18_ensemble.R"))          # Q3 mean/median invasion ensembles
 source(file.path(ST_DIR, "19_spacetime_eval.R"))    # Q5 spatiotemporal evaluation
 source(file.path(ST_DIR, "20_forecast_detail.R"))   # spec/params/priority/uncertainty viz + build_invasion_design
 source(file.path(ST_DIR, "21_bayesian_renewal.R"))  # Bayesian (brms) renewal invasion suite
-source(file.path(ST_DIR, "22_daily_reissue.R"))     # daily re-issue dating/persistence + intra-week backtest
+source(file.path(ST_DIR, "21c_frailty_models.R"))   # time-varying forms (Stan engine)
+source(file.path(ST_DIR, "22_daily_reissue.R"))     # as-of reconstruction, snapshot dispatch, issue-date windows
 source(file.path(ST_DIR, "23_prospective_eval.R"))  # prospective + forecast-vs-observed eval (review §3.4/3.5/3.6/3.8)
 source(file.path(ST_DIR, "24_review_figures.R"))    # publication figures for the review analyses (house style)
 
@@ -511,10 +518,9 @@ if (isTRUE(INCLUDE_M11_MODELS)) {
 # It is handed THIS RUN's kernels: reading the output directory instead would mix in
 # mobility_*.rds files left by earlier runs (a kernel since switched off, or one from
 # another branch) and show them as current. tryCatch so a plotting hiccup never aborts.
-MOBILITY_MATRICES_CURRENT <- mobility_matrices
 tryCatch({
   source(file.path(ST_DIR, "27_mobility_comparison.R"))
-  make_mobility_comparison_figures(kernels = MOBILITY_MATRICES_CURRENT)
+  make_mobility_comparison_figures(kernels = mobility_matrices)
 }, error = function(e) warning("[mobility] comparison figure failed: ", conditionMessage(e)))
 
 all_weeks <- sort(unique(zone_week_nc$week_start))
@@ -546,11 +552,9 @@ message(sprintf("\n=== Fitting invasion models for cutoff: %s (t=%d) ===",
 # reporting-rate structures (Q6), completeness-weighted calibration (Q1), and the
 # NEW suspected-but-not-confirmed leading-indicator covariate models). Every
 # addition is an EXTRA variant; the base formulations are untouched. OPTIONAL families
-# are gated by the 00_config.R toggles. Defaults, verified against 00_config.R: the reduced
-# "geo" covariate model (INCLUDE_GEO_COV_MODELS) is ON, the M11 inward-FOI variants
-# (INCLUDE_M11_MODELS) are ON, the suspected-covariate models (INCLUDE_SUSPECTED_COV_MODELS)
-# are OFF, and the FULL-exogenous covariate model (INCLUDE_FULL_COV_MODELS) is OFF. This
-# paragraph previously stated all four the wrong way round. Comparators: gravity (B4) / distance (B1)
+# are gated by the 00_config.R toggles, which are the authority — check the flags there
+# rather than trusting a prose summary here, which is how this paragraph came to state four
+# of them the wrong way round. Comparators: gravity (B4) / distance (B1)
 # / adjacency (B7) baselines. Broken models (S2/S3/S4, KNN B2, null
 # B3/B5/B6, INLA C4, ZINB C5) remain removed. The full grid is cross-validated; only the
 # best per family is featured in figures.
@@ -558,9 +562,10 @@ message(sprintf("\n=== Fitting invasion models for cutoff: %s (t=%d) ===",
 # It was 28 model definitions (Renewal-M*) driven by forecast_workhorse(), behind a
 # RUN_FREQUENTIST_MODELS flag that defaulted FALSE. Both are gone. Verified on the shipped
 # evaluation table:
-# ZERO Renewal-* models are scored — the published field is 52 Bayesian models plus the three
-# always-on structural baselines (Gravity-B4, Distance-B1, Adjacency-B7), which are defined
-# below and are unaffected. The workhorse and its private helpers (fit_import_beta,
+# ZERO Renewal-* models are scored. The published field is the Bayesian grid
+# bayes_default_grid() composes plus the always-on structural baselines defined below; the
+# realised count is printed by the [config] line and stamped into run_info.json, and is NOT
+# repeated here, because a literal goes stale the moment a flag moves. The workhorse and its private helpers (fit_import_beta,
 # fit_import_model, estimate_R_local, .reporting_rate_vec, .beta_vector, .invasion_prob,
 # .qcount, .workhorse_temporal_dispersion) are gone from 15_workhorse.R with them; the
 # helpers the BAYESIAN design builder shares with it (.count_wide, .feature_matrix,
@@ -629,25 +634,16 @@ zone_week_outbreak <- dat$zone_week %>%
   dplyr::filter(week_start >= lubridate::floor_date(OUTBREAK_START, "week",
                                                     week_start = get0("WEEK_ANCHOR", ifnotfound = 1L)))
 
-# Task 6: evaluate a curated set of BAYESIAN renewal models in the SAME folds as
-# the frequentist models (each refit on the fold's training data, cmdstanr reusing
-# the compiled Stan binary), so the over-time evaluation includes them. Kept small
-# (2 specs, lighter sampling) to bound cross-validation runtime; toggle with
-# RUN_BAYES_LFO.
+# EVERY Bayesian model in the current-forecast grid is cross-validated on the SAME
+# leave-future-out rounds as the structural baselines (single source of truth:
+# bayes_default_grid(), which composes the kernels at the single medium GT anchor -- the
+# generation time is treated as KNOWN -- crossed with the covariate sets, under the optional
+# families toggled in 00_config.R). Each model is refitted per round by MCMC with lighter
+# sampling (iter = 600). The FEATURED model is chosen by CV skill in two stages (below): the
+# fixed-beta specification first, then that specification against its time-varying forms, which
+# are cross-validated after stage 1. RUN_BAYES_LFO <- FALSE is NOT a supported setting: without the
+# Bayesian back-test there is nothing to select, and the run stops at the selection.
 RUN_BAYES_LFO <- TRUE
-# EVERY Bayesian model in the current-forecast grid is also cross-validated on the
-# SAME leave-future-out folds as the frequentist ones (single source of truth:
-# bayes_default_grid). So the ranking / over-time / detection plots compare exactly the
-# Bayesian grid that bayes_default_grid() composes from the CORE (mobility {M4, M8, M10} at the
-# single medium GT anchor — the generation time is treated as KNOWN, neither swept across the
-# grid nor marginalised over GT_PRIOR (00_config.R) — plus the
-# cohort M13/M14, the OD/consensus M16/M17 and their source-cell-fill and origin-split forms)
-# and whichever OPTIONAL families are toggled on in 00_config.R (M9, M11, M15, the FULL-exogenous
-# and suspected-case covariate sets, the logit-link sensitivity, the time-varying-beta families,
-# and — ON by default — the OSRM road-distance kernels and the reduced "geo" covariate set) — and the
-# FEATURED Bayesian model is chosen BY CV SKILL (best_bayes_method), not hardcoded. Each model is
-# refit per fold by MCMC, so LFO uses lighter sampling (iter=600) to keep the full-
-# grid cross-validation tractable; set RUN_BAYES_LFO <- FALSE to skip it entirely.
 # The AS-OF truncation for the per-fold nowcasts, resolved ONCE before the LFO.
 # regime = "asof" is forced rather than derived from a date, because deriving it here would
 # pick the EXTRACT regime: issue_date is absent, and absent means deployed. The fit itself is
@@ -666,28 +662,39 @@ RUN_BAYES_LFO <- TRUE
 if (!is.null(.trunc_asof))
   message(sprintf("[nowcast] fold truncation: %s (mean %.2f d, sd %.2f d, %s)",
                   .trunc_asof$family, .trunc_asof$mean, .trunc_asof$sd, .trunc_asof$estimator))
+# TRAINING DATA AS KNOWN AT EACH ORIGIN (LFO_TRAINING_SOURCE, 00_config.R). "vintage" (the
+# default): a round with an archived snapshot reads it, nowcast with the truncation estimated on
+# that date; a round without one (or before the archive supports that fit) re-censors the final
+# line list with the shared as-of truncation above. asof_counts_source() (22_daily_reissue.R)
+# decides per date; run_invasion_lfo() logs which rounds took which.
+message(sprintf("[LFO] training source: %s", LFO_TRAINING_SOURCE))
 
-BAYES_LFO_SPECS <- bayes_default_grid(mobility_matrices)
+# gt_arms = FALSE: the generation-time sensitivity arms are refits of THIS run's selected model,
+# so they are built and cross-validated after the selection (see "GENERATION-TIME SENSITIVITY
+# ARMS" below), not here from the previous run's pick.
+BAYES_LFO_SPECS <- bayes_default_grid(mobility_matrices, gt_arms = FALSE)
+# brms iterations per back-test fit (the GT arms use the same), and the members of the
+# back-test Bayesian ensemble rows. Named here because both shape the cached LFO frame and are
+# stamped into .lfo_stamp below.
+BAYES_LFO_ITER_BRMS <- 600L
+BAYES_ENSEMBLE_MEMBERS_BASE <- c("Bayes-M4-med", "Bayes-M8-med", "Bayes-M9-med", "Bayes-M10-med")
 bayes_lfo_models <- list()
 if (isTRUE(RUN_BAYES_LFO) && requireNamespace("brms", quietly = TRUE)) {
   for (sp in BAYES_LFO_SPECS) {
-    bayes_lfo_models[[sp$label]] <- make_bayes_lfo_model(sp$mob, sp$gt, sp$cov,
-      mobility_matrices, gt_pmfs, covariates, osrm_mat, zones_all,
-      iter = 600L, link = sp$link %||% "cloglog", tv = sp$tv %||% "none", linelist = dat$ll,
-      # ROLLING AS-OF PREDICTORS: each training transition's import force is computed from the
-      # counts known AT that transition, not from one matrix per fold. Without this, beta0 is
-      # fitted against a lambda ~2x smaller than the forecast's and the recalibration delta
-      # absorbs the difference (see ROLLING_PREDICTORS in 00_config.R).
-      trunc_delay = .trunc_asof)
+    # ROLLING AS-OF PREDICTORS (trunc_delay): each training transition's import force is computed
+    # from the counts known AT that transition, not from one matrix per round. Without this, beta0
+    # is fitted against a lambda ~2x smaller than the forecast's and the recalibration delta
+    # absorbs the difference (see ROLLING_PREDICTORS in 00_config.R).
+    bayes_lfo_models[[sp$label]] <- make_suite_lfo_model(sp, mobility_matrices, gt_pmfs,
+      covariates, osrm_mat, zones_all, linelist = dat$ll, trunc_delay = .trunc_asof,
+      iter_brms = BAYES_LFO_ITER_BRMS)
   }
 }
 message(sprintf("[bayes] cross-validating %d Bayesian models in LFO", length(bayes_lfo_models)))
-# Leakage-free per-fold training reconstruction: when TRUE the weekly LFO rebuilds
-# each fold's training counts from the line list censored to the forecast moment
-# (cut+7), excluding cases only reported later — rather than slicing the final
-# onset-bucketed counts (which carry a mild training-side revision leak). This
-# CHANGES the reported LFO metrics relative to the previous behaviour; set to FALSE
-# to reproduce the older (mildly leaky) numbers.
+# Leakage-free per-fold training reconstruction: when TRUE the weekly LFO rebuilds each
+# round's training counts as known on its origin (cutoff + 6): the archived snapshot of that
+# date where one exists, else the final line list censored to it (asof_counts_source(),
+# 22_daily_reissue.R). FALSE slices the FINAL onset-bucketed counts (revision-leaky).
 LEAKAGE_FREE_LFO <- TRUE
 # REUSE_CACHED_LFO (default FALSE): load the previous run's lfo_cv_results.rds instead of
 # re-running the hours-long cross-validation. Valid ONLY when nothing that affects the LFO has
@@ -695,8 +702,9 @@ LEAKAGE_FREE_LFO <- TRUE
 # re-run, which changes ONLY the current-forecast step (predict_bayes_gt_marginal), not the LFO.
 # The cached RDS already has the ensembles appended, so the append/save block below is skipped.
 .lfo_cache <- file.path(OUT_FORECASTS, "lfo_cv_results.rds")
-.reuse_lfo <- (tolower(trimws(Sys.getenv("REUSE_CACHED_LFO", ""))) %in% c("true", "t", "1", "yes", "y") ||
-               isTRUE(get0("REUSE_CACHED_LFO", ifnotfound = FALSE))) && file.exists(.lfo_cache)
+# .env_flag(): the environment wins when set (so REUSE_CACHED_LFO=0 overrides a leftover session
+# global), an unrecognised spelling warns, and the global is consulted only when the env is unset.
+.reuse_lfo <- .env_flag("REUSE_CACHED_LFO", FALSE, allow_global = TRUE) && file.exists(.lfo_cache)
 # The cache is stamped with the Bayesian h >= 2 source projection and the Bayesian grid it was
 # produced under. A cache from a different projection (e.g. the retired crude-R / fixed-constant
 # one) or grid (e.g. a different INCLUDE_UNFILLED_MODELS) is NOT reused: its selection and
@@ -719,13 +727,69 @@ LEAKAGE_FREE_LFO <- TRUE
                      paste(.m$folder, .m$processed_at, sep = "|")
                    }, error = function(e) NA_character_),
                    leakage_free     = isTRUE(get0("LEAKAGE_FREE_LFO", ifnotfound = TRUE)),
+                   # THE DELAY STRATUM. Since 2026-10-15 it no longer drives the onset
+                   # imputation (donor intervals do; ONSET_MODE below), but it still selects
+                   # the onset->sample delay that effective_onset_sample_delay() falls back to.
+                   # (explicit local, not %||%: get0 on a variable BOUND TO NULL returns
+                   # NULL rather than `ifnotfound`, and as.character(NULL) is character(0),
+                   # which would drop the field from the hashed list instead of marking it.)
+                   onset_impute_stratum = local({
+                     .s <- get0("ONSET_IMPUTE_STRATUM", ifnotfound = NULL)
+                     if (is.null(.s) || !length(.s)) "pooled" else as.character(.s)[1]
+                   }),
+                   # THE ONSET IMPUTATION: its mode, its donor minimum and THE SEED. A missing
+                   # onset is drawn from same-class donor intervals with a per-record uniform
+                   # hashed from (alert_id, RANDOM_SEED), so each of these re-dates imputed
+                   # onsets, and with them a zone's FIRST confirmed onset -- the OUTCOME every
+                   # fold is scored against -- and the training counts. `linelist_snapshot`
+                   # cannot cover them (folder and processed_at are identical across
+                   # settings); without the seed, every arm of an imputation sweep would
+                   # silently be the FIRST arm.
+                   onset_mode       = as.character(get0("ONSET_MODE", ifnotfound = "impute")),
+                   onset_donor_min  = as.integer(get0("ONSET_DONOR_MIN", ifnotfound = NA_integer_)),
+                   random_seed      = as.integer(get0("RANDOM_SEED", ifnotfound = NA_integer_)),
+                   onset_impute_seed = as.integer(get0("ONSET_IMPUTE_SEED", ifnotfound = NA_integer_)),
+                   # Which sample date dates the training counts and the imputed onsets.
+                   sample_date_source = as.character(get0("SAMPLE_DATE_SOURCE", ifnotfound = "extract")),
+                   ascertainment_burnin = as.integer(get0("ASCERTAINMENT_BURNIN_WEEKS", ifnotfound = NA_integer_)),
+                   # Where each round's training counts come from, and -- under "vintage" --
+                   # the snapshot archive they are read from (each snapshot's real-time
+                   # truncation is a deterministic function of the archive and the code, the
+                   # latter versioned by TRUNC_SERIES_VERSION).
+                   training_source  = as.character(get0("LFO_TRAINING_SOURCE", ifnotfound = "vintage")),
+                   # The other two data-definition switches (00_config.R): which zone a case
+                   # counts in, and how the sitrep top-up rows are dated. Both move the outcomes.
+                   case_zone_basis  = as.character(get0("CASE_ZONE_BASIS", ifnotfound = "reporting")),
+                   sitrep_shift_days = as.integer(get0("SITREP_APPEND_SHIFT_DAYS", ifnotfound = 0L)),
+                   # Whether the sitrep-confirmed floor rows are appended at all (they give
+                   # zones their first case, i.e. they move the outcomes).
+                   append_sitrep    = isTRUE(get0("APPEND_SITREP_CONFIRMED", ifnotfound = TRUE)),
+                   vintage = if (identical(get0("LFO_TRAINING_SOURCE", ifnotfound = "vintage"), "vintage"))
+                     rlang::hash(list(list_linelist_snapshots()$folder, LFO_VINTAGE_MAX_GAP_DAYS,
+                                      TRUNC_SERIES_VERSION, TRUNC_WINDOW_DAYS, TRUNC_THIN_DAYS,
+                                      TRUNC_MIN_SNAPSHOTS))
+                     else "none",
                    lfo_horizons     = as.integer(LFO_HORIZONS),
                    # THE FOLD WINDOW. These decide WHICH rounds exist and therefore which
                    # outcomes the recalibration delta is fitted on and which rows every
                    # metric is pooled over. A cache built under the old 25-day admission
                    # threshold holds five fewer rounds and must not be served for this run.
-                   lfo_min_eval_age  = as.integer(get0("LFO_MIN_EVAL_AGE_DAYS", ifnotfound = 25L)),
+                   lfo_min_eval_age  = as.integer(get0("LFO_MIN_EVAL_AGE_DAYS", ifnotfound = 13L)),
                    lfo_min_events    = 0L,
+                   # The origin (cutoff + offset), the minimum training length (which rounds
+                   # exist) and the settled age (the eval_reliable label every row carries,
+                   # which decides the deployment delta's training pool).
+                   lfo_origin_offset = as.integer(LFO_ORIGIN_OFFSET_DAYS),
+                   lfo_common_grid   = isTRUE(get0("LFO_COMMON_FOLD_GRID", ifnotfound = TRUE)),
+                   outbreak_start    = format(OUTBREAK_START),
+                   # The generation-time PMFs, the static covariates and the travel-time
+                   # matrix every design is built from (values, not names).
+                   gt_pmfs    = rlang::hash(lapply(gt_pmfs, as.numeric)),
+                   covariates = rlang::hash(covariates),
+                   osrm       = rlang::hash(if (is.null(osrm_mat)) NULL
+                                            else list(dimnames(osrm_mat), as.numeric(osrm_mat))),
+                   lfo_min_train     = as.integer(LFO_MIN_TRAINING_WEEKS),
+                   lfo_reliable_age  = as.integer(get0("LFO_RELIABLE_EVAL_AGE_DAYS", ifnotfound = 25L)),
                    # STAMP WHAT THE BASELINES ACTUALLY COMPUTE, not just their wrappers.
                    # as.character(BASELINE_MODELS) deparses the three closures DEFINED IN THIS
                    # FILE, so a change to forecast_B1/B4/B7 in 05_baseline_models.R — the B1
@@ -765,9 +829,30 @@ LEAKAGE_FREE_LFO <- TRUE
                    # fold truncation. Hashing the FITTED spec rather than the config is tighter:
                    # a config edit that does not move the fit does not invalidate the cache.
                    trunc_asof = if (is.null(.trunc_asof)) "none" else
-                     rlang::hash(.trunc_asof[c("family", "params", "mean", "sd", "estimator")]),
+                     rlang::hash(.trunc_asof[c("family", "params", "mean", "sd", "estimator", "trunc_max")]),
                    bayes_grid = sort(vapply(BAYES_LFO_SPECS, function(s) s$label, character(1)),
-                                     method = "radix"))   # locale-independent order
+                                     method = "radix"),   # locale-independent order
+                   iter_brms = BAYES_LFO_ITER_BRMS,
+                   ensemble_members = BAYES_ENSEMBLE_MEMBERS_BASE,
+                   # WHAT THE LABELS DENOTE: a label fixes the kernel and the covariate-set NAME,
+                   # not its members, nor the kernel's values. Hash the specs and the matrices.
+                   bayes_specs = rlang::hash(lapply(BAYES_LFO_SPECS, function(s)
+                     list(s$label, s$mob, s$gt, sort(as.character(s$cov)), s$link %||% "cloglog",
+                          s$tv %||% "none"))),
+                   # (values and dimnames only: some kernels carry fitted-model attributes)
+                   mobility = rlang::hash(lapply(mobility_matrices[sort(unique(vapply(BAYES_LFO_SPECS,
+                                function(s) s$mob, character(1))), method = "radix")],
+                                function(W) list(dimnames(W), as.numeric(W)))),
+                   # THE CODE that builds the folds, the nowcast and the fits. RT_CACHE_VERSION is
+                   # a manual discipline; hashing the files is not. Any edit invalidates the cache
+                   # (a refit), which is the safe direction for an opt-in reuse.
+                   # 00_config.R carries the line-list definition (apply_earliest_sample_dates())
+                   # and 18_ensemble.R the ensemble rows inside the cached frame.
+                   code = unname(tools::md5sum(file.path(here::here(), "spatiotemporal", c(
+                     "00_config.R", "01_data_prep.R",
+                     "02_epi_params.R", "04_nowcasting.R", "05_baseline_models.R",
+                     "06_simple_models.R", "15_workhorse.R", "16_invasion_eval.R", "18_ensemble.R",
+                     "20_forecast_detail.R", "21_bayesian_renewal.R", "22_daily_reissue.R")))))
 if (isTRUE(.reuse_lfo)) {
   .cached_stamp <- tryCatch(attr(readRDS(.lfo_cache), "lfo_stamp"), error = function(e) NULL)
   if (!identical(.cached_stamp, .lfo_stamp)) {
@@ -778,7 +863,9 @@ if (isTRUE(.reuse_lfo)) {
   }
 }
 lfo_results <- if (isTRUE(.reuse_lfo)) {
-  message("[LFO] REUSE_CACHED_LFO=TRUE — loading cached lfo_cv_results.rds (cross-validation NOT re-run)")
+  message(paste0("[LFO] REUSE_CACHED_LFO=TRUE — loading cached lfo_cv_results.rds (the main ",
+                 "cross-validation is not re-run; the forms reuse their own cache when it matches, ",
+                 "and the GT arms, built on this run's selection, are always cross-validated)"))
   tryCatch(readRDS(.lfo_cache), error = function(e) { warning("cached LFO load failed: ", e$message); NULL })
 } else tryCatch(
   # BASELINE_MODELS are always scored (review §3.1/§3.2), alongside the Bayesian models.
@@ -791,6 +878,9 @@ lfo_results <- if (isTRUE(.reuse_lfo)) {
   run_invasion_lfo(zone_week_outbreak, c(BASELINE_MODELS, bayes_lfo_models),
                    delay = .trunc_asof,
                    horizons = LFO_HORIZONS, analysis_date = ANALYSIS_DATE,
+                   # From 00_config.R, so the constant, the fold grid and the metadata
+                   # write-out (plan_folds(), write_run_info.R) cannot disagree.
+                   min_train_weeks = LFO_MIN_TRAINING_WEEKS,
                    # SCORE EVERY COMPLETE ROUND, INCLUDING THE QUIET ONES. Dropping rounds
                    # with no invasion is selection on the outcome: it enriches the pooled
                    # base rate (flattering calibration-in-the-large) and punches a hole in
@@ -814,7 +904,7 @@ if (!is.null(lfo_results) && !isTRUE(.reuse_lfo)) {
   # carried through the combination).
   # Bayesian ENSEMBLE in the SAME folds — the pre-specified, leakage-free analogue of the
   # frequentist ensemble: mean/median over the diverse mobility-kernel Bayesian members
-  # (M4/M8/M9/M10/M11 at medium GT, cloglog). Labelled "Bayes-ens-{mean,median}" so it is
+  # (BAYES_ENSEMBLE_MEMBERS_BASE at medium GT, cloglog). Labelled "Bayes-ens-{mean,median}" so it is
   # picked up by the Bayesian-restricted discrimination / detection / top-K figures and can
   # be compared against the individual Bayesian models. (The loo-STACKED ensemble remains the
   # separate full-data featured product — "Bayes-stack".)
@@ -828,7 +918,7 @@ if (!is.null(lfo_results) && !isTRUE(.reuse_lfo)) {
   # M14-fill. With M9 and M11 both off, the realised ensemble is three members: Bayes-M4-med
   # plus the fill twins of M8 and M10. Whether the primary family should be represented is a
   # modelling decision, flagged rather than taken.
-  BAYES_ENSEMBLE_MEMBERS <- c("Bayes-M4-med", "Bayes-M8-med", "Bayes-M9-med", "Bayes-M10-med")
+  BAYES_ENSEMBLE_MEMBERS <- BAYES_ENSEMBLE_MEMBERS_BASE
   # INCLUDE_UNFILLED_MODELS = FALSE does not fit an unfilled composite whose fill twin was built,
   # so take that member's fill twin: the ensemble keeps the same kernel families instead of
   # shrinking. Only a twin that was actually cross-validated is swapped in — when the fill
@@ -875,8 +965,8 @@ if (is.null(lfo_results)) {
 # live system always corrects it — the opposite of "mirrors the LIVE operating point exactly".
 # The weekly LFO now exercises exactly the deployed operating point: its fold origin is
 # cut + 6, the last day of the last training week, which is the same geometry as the live
-# grid (last week ends on ANALYSIS_DATE) and therefore the same nowcast regime (2.631x).
-daily_lfo_results <- NULL
+# grid (last week ends on ANALYSIS_DATE): the newest training week is always the partially
+# observed one the nowcast corrects.
 
 # ---------------------------------------------------------------------------
 # 11. Invasion evaluation (pooled; AUC-PR, ranking, log-score, calibration)
@@ -886,11 +976,19 @@ message("\n=== Step 11: Invasion evaluation ===")
 
 # ── Post-hoc recalibration (16b) ─────────────────────────────────────────────
 # PURELY ADDITIVE under the default flags: attaches a prequentially-fitted, strictly
-# rank-preserving delta per (method, horizon, fold) plus the recalibrated probability,
+# rank-preserving delta per (method, fold) -- fitted on 1-week rows, applied to every horizon --
+# plus the recalibrated probability,
 # so evaluate_invasion() can report recalibrated proper scores ALONGSIDE the raw ones.
 # No existing metric changes. Selection moves under INVASION_SELECT_ON_RECAL and the live
 # forecast under INVASION_RECALIBRATE_DEPLOY — BOTH DEFAULT TRUE since 2026-09-11 (they
 # answer the same question and must not disagree; see the rationale in 00_config.R).
+# The previous run's recalibration and delta-stability files go FIRST: they are written only
+# when recalibration is on and succeeds, and the cascade (cascade_fit_delta()) and the
+# delta-stability figure read them with no run stamp, so a run with INVASION_RECALIBRATE off or
+# a failed fit would otherwise hand them last run's delta.
+invisible(suppressWarnings(file.remove(file.path(OUT_DIAGNOSTICS, c(
+  "invasion_recalibration.csv", "invasion_recalibration.json", "invasion_delta_stability.csv",
+  "invasion_delta_stability_summary.csv", "invasion_delta_stability.json")))))
 recal_tbl <- NULL
 if (isTRUE(INVASION_RECALIBRATE)) {
   lfo_results <- tryCatch(attach_invasion_recalibration(lfo_results),
@@ -898,27 +996,36 @@ if (isTRUE(INVASION_RECALIBRATE)) {
                                   " — continuing with raw probabilities only."); lfo_results })
   recal_tbl <- tryCatch(invasion_delta_table(lfo_results),
     error = function(e) { warning("[recal] delta table failed: ", e$message); NULL })
-  if (!is.null(recal_tbl) && nrow(recal_tbl)) {
+  # The deployment deltas' CSV + JSON, as a function: the generation-time sensitivity arms are
+  # fitted after the selection (below) and their deltas are appended and re-written then.
+  .write_recal_outputs <- function(recal_tbl) {
     readr::write_csv(recal_tbl, file.path(OUT_DIAGNOSTICS, "invasion_recalibration.csv"))
     # Deployment deltas, keyed method -> horizon, for the live forecast path.
     jsonlite::write_json(
       list(generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
            estimator = paste("Jeffreys-penalised maximum likelihood (Firth), p -> 1 - (1-p)^delta",
                              "on the LFO at-risk pool; no event or origin floors"),
-           note = paste("POOLED over all folds — for recalibrating the LIVE forecast only.",
-                        "Scoring and selection use the prequential delta_preq attached to",
-                        "lfo_results, never these."),
+           note = paste("ONE factor per model, fitted on 1-week outcomes of settled, post-burn-in",
+                        "folds and applied to both horizons. It recalibrates the LIVE forecast",
+                        "(drawn per posterior draw from Gamma(gamma_shape, gamma_rate)) and is",
+                        "read by the 13-week cascade, which multiplies its own raw hazard by it",
+                        "once. Scoring and selection use the prequential delta_preq attached",
+                        "to lfo_results, which replays this rule at each forecast date."),
            band = RECAL_BAND, min_folds = RECAL_MIN_FOLDS,
            delta = recal_tbl %>% dplyr::transmute(method, horizon, delta, delta_lo, delta_hi,
-                                                  n_events, boundary_hit)),
+                                                  n_events, gamma_shape, gamma_rate,
+                                                  boundary_hit)),
       file.path(OUT_DIAGNOSTICS, "invasion_recalibration.json"),
       auto_unbox = TRUE, pretty = TRUE, digits = 6)
+  }
+  if (!is.null(recal_tbl) && nrow(recal_tbl)) {
+    .write_recal_outputs(recal_tbl)
     # Built from the horizons actually present, so a change to LFO_HORIZONS cannot
     # leave this line reporting NA for a horizon that was never scored.
     .dmed <- vapply(sort(unique(recal_tbl$horizon)), function(hh)
       stats::median(recal_tbl$delta[recal_tbl$horizon == hh], na.rm = TRUE), numeric(1))
-    message(sprintf("[recal] pooled delta fitted for %d method x horizon slices (median by horizon: %s)",
-                    nrow(recal_tbl),
+    message(sprintf("[recal] pooled delta fitted for %d methods (one factor each, reported per horizon; median by horizon: %s)",
+                    dplyr::n_distinct(recal_tbl$method),
                     paste(sprintf("h%d=%.3f", sort(unique(recal_tbl$horizon)), .dmed),
                           collapse = ", ")))
   }
@@ -927,51 +1034,68 @@ if (isTRUE(INVASION_RECALIBRATE)) {
   # on each fold ALONE (not cumulatively, which cannot separate drift from an expanding window
   # converging) and testing for heterogeneity therefore answers two design questions at once:
   # whether the deployment delta should use all history or a recent window, and whether a
-  # time-varying beta_0 is supported. Computed HERE and written to disk; the figure reads it
-  # and computes nothing.
-  .dstab <- tryCatch(invasion_delta_stability(lfo_results),
-                     error = function(e) { warning("[recal] delta-stability diagnostic failed: ",
-                                                   conditionMessage(e), call. = FALSE); NULL })
-  if (!is.null(.dstab) && nrow(.dstab$summary)) {
-    readr::write_csv(.dstab$per_fold,
-                     file.path(OUT_DIAGNOSTICS, "invasion_delta_stability.csv"))
-    readr::write_csv(.dstab$summary,
-                     file.path(OUT_DIAGNOSTICS, "invasion_delta_stability_summary.csv"))
-    .hs <- sort(unique(.dstab$summary$horizon))
-    jsonlite::write_json(
-      list(generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
-           question = paste("Does the calibration offset vary between folds? If not, the",
-                            "deployment delta should pool ALL history (no window) and a",
-                            "time-varying beta_0 is not supported by these data."),
-           method = paste("delta fitted independently per fold; DerSimonian-Laird random",
-                          "effects on log delta; se from the observed information."),
-           note_not_tested = paste("The anchor-week nowcast multiplier is CONSTANT across",
-                                   "folds by construction (same lag from each cutoff, shared",
-                                   "as-of delay fit), so it cannot be regressed on."),
-           by_horizon = lapply(.hs, function(hh) {
-             z <- .dstab$summary[.dstab$summary$horizon == hh, ]
-             list(horizon = hh, n_methods = nrow(z),
-                  median_I2 = stats::median(z$I2, na.rm = TRUE),
-                  median_tau2 = stats::median(z$tau2, na.rm = TRUE),
-                  n_heterogeneous_p05 = sum(z$Q_p < 0.05, na.rm = TRUE),
-                  n_trend_p05 = sum(z$trend_p < 0.05, na.rm = TRUE),
-                  n_extent_p05 = sum(z$extent_p < 0.05, na.rm = TRUE),
-                  median_se_log_delta = stats::median(z$median_se_log, na.rm = TRUE)) })),
-      file.path(OUT_DIAGNOSTICS, "invasion_delta_stability.json"),
-      auto_unbox = TRUE, pretty = TRUE, digits = 6)
-    for (hh in .hs) {
-      z <- .dstab$summary[.dstab$summary$horizon == hh, ]
-      message(sprintf(paste0("[recal] delta stability h=%s: median I2 %.1f%%, median tau2 %.4f; ",
-                             "heterogeneous (Q p<0.05) in %d/%d methods, trend in %d/%d. %s"),
-                      hh, 100 * stats::median(z$I2, na.rm = TRUE),
-                      stats::median(z$tau2, na.rm = TRUE),
-                      sum(z$Q_p < 0.05, na.rm = TRUE), nrow(z),
-                      sum(z$trend_p < 0.05, na.rm = TRUE), nrow(z),
-                      if (stats::median(z$I2, na.rm = TRUE) < 0.25)
-                        "=> pool ALL folds; a window and a time-varying beta_0 are unsupported."
-                      else "=> delta MOVES; revisit the pooled deployment factor."))
+  # time-varying beta_0 is supported. Tested on the deployed pool (post-burn-in, settled
+  # rounds); the deployed factor is fitted at h = 1, so the h = 1 verdict is the one about it.
+  # Computed HERE and written to disk; the figure reads it and computes nothing.
+  # Defined as a function because .append_cv_models() re-runs it after the forms and the GT
+  # arms join the frame: computed once here it would describe a frame without them, and a
+  # featured form would have no row to draw.
+  .write_delta_stability <- function() {
+    .dstab <- tryCatch(invasion_delta_stability(lfo_results),
+                       error = function(e) { warning("[recal] delta-stability diagnostic failed: ",
+                                                     conditionMessage(e), call. = FALSE); NULL })
+    # No result this run: remove the previous run's tables so the figure cannot redraw them.
+    if (is.null(.dstab) || !nrow(.dstab$summary))
+      invisible(suppressWarnings(file.remove(file.path(OUT_DIAGNOSTICS, c("invasion_delta_stability.csv",
+        "invasion_delta_stability_summary.csv", "invasion_delta_stability.json")))))
+    if (!is.null(.dstab) && nrow(.dstab$summary)) {
+      readr::write_csv(.dstab$per_fold,
+                       file.path(OUT_DIAGNOSTICS, "invasion_delta_stability.csv"))
+      readr::write_csv(.dstab$summary,
+                       file.path(OUT_DIAGNOSTICS, "invasion_delta_stability_summary.csv"))
+      .hs <- sort(unique(.dstab$summary$horizon))
+      jsonlite::write_json(
+        list(generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+             question = paste("Does the calibration offset vary between folds? If not, the",
+                              "deployment delta should pool ALL settled post-burn-in history",
+                              "(no window) and a time-varying beta_0 is not supported by these",
+                              "data. The deployed factor is fitted on 1-week rows, so the h = 1",
+                              "row answers this for it; h = 2 is reported for completeness."),
+             pool = paste("Post-burn-in rounds with settled outcomes (eval_reliable), on the",
+                          "shared (fold x zone) support: the deployment delta's training pool."),
+             method = paste("delta fitted independently per fold; DerSimonian-Laird random",
+                            "effects on log delta; se from the expected (Fisher) information."),
+             note_not_tested = paste("The nowcast multiplier applied to each round is not carried",
+                                     "in the LFO frame and is not regressed on; each fold's",
+                                     "training_source (snapshot vs re-censored) is reported in",
+                                     "the per-fold table."),
+             by_horizon = lapply(.hs, function(hh) {
+               z <- .dstab$summary[.dstab$summary$horizon == hh, ]
+               list(horizon = hh, n_methods = nrow(z),
+                    median_I2 = stats::median(z$I2, na.rm = TRUE),
+                    median_tau2 = stats::median(z$tau2, na.rm = TRUE),
+                    n_heterogeneous_p05 = sum(z$Q_p < 0.05, na.rm = TRUE),
+                    n_trend_p05 = sum(z$trend_p < 0.05, na.rm = TRUE),
+                    n_extent_p05 = sum(z$extent_p < 0.05, na.rm = TRUE),
+                    median_se_log_delta = stats::median(z$median_se_log, na.rm = TRUE)) })),
+        file.path(OUT_DIAGNOSTICS, "invasion_delta_stability.json"),
+        auto_unbox = TRUE, pretty = TRUE, digits = 6)
+      for (hh in .hs) {
+        z <- .dstab$summary[.dstab$summary$horizon == hh, ]
+        message(sprintf(paste0("[recal] delta stability h=%s: median I2 %.1f%%, median tau2 %.4f; ",
+                               "heterogeneous (Q p<0.05) in %d/%d methods, trend in %d/%d. %s"),
+                        hh, 100 * stats::median(z$I2, na.rm = TRUE),
+                        stats::median(z$tau2, na.rm = TRUE),
+                        sum(z$Q_p < 0.05, na.rm = TRUE), nrow(z),
+                        sum(z$trend_p < 0.05, na.rm = TRUE), nrow(z),
+                        if (hh != 1L) "(the deployed factor is fitted at h = 1)"
+                        else if (stats::median(z$I2, na.rm = TRUE) < 0.25)
+                          "=> pool ALL settled post-burn-in folds; a window and a time-varying beta_0 are unsupported."
+                        else "=> delta MOVES; revisit the pooled deployment factor."))
+      }
     }
   }
+  .write_delta_stability()
 }
 
 # ---- STRUCTURAL BASELINES -> lfo_results, BEFORE the evaluation table is built --------
@@ -1080,8 +1204,309 @@ if (!is.null(eval_tbl)) {
   message("[eval] Models by AUC-PR skill (h=1):")
   print(as.data.frame(eval_tbl %>% dplyr::filter(horizon == 1) %>%
     dplyr::transmute(method, n_inv = n_invasions, auc_pr = round(auc_pr, 3),
-      aucpr_skill = round(auc_pr_skill, 1), rank_of_truth = round(mean_rank_of_truth, 1),
+      aucpr_skill = round(auc_pr_skill, 1), aucpr_skill_per_date = round(auc_pr_skill_date, 1),
+      rank_of_truth = round(mean_rank_of_truth, 1),
       log_score = round(log_score, 4), cal = round(calibration_in_large, 1))))
+}
+
+
+# metrics_summary alias for downstream figures/report
+metrics_summary <- eval_tbl
+
+# NOTE: the forecast-vs-observed + prospective block (§3.4/§3.5/§3.6/§3.8) is placed
+# AFTER best_bayes_method is defined (below the headline-model selection), since it keys
+# on the featured Bayesian method.
+
+# ── THE FEATURED MODEL: TWO-STAGE SELECTION (00_config.R, TIME-VARYING FORMS) ─────────────────
+# STAGE 1 picks the specification (kernel, covariates) among the fixed-beta Bayesian candidates
+# by the calibration-aware CV composite (summed within-horizon ranks of per-date AUC-PR skill,
+# mean rank-of-truth and the recalibrated log score on the post-burn-in rounds, both horizons).
+# STAGE 2 refits that specification under the three time-varying forms (TV_FORMS), cross-validates
+# them on the same rounds, and puts fixed beta and the SELECTABLE forms through the same
+# composite; the winner is the FEATURED model (best_bayes_method), which every figure, the live
+# forecast and the cascade use. The frailty forms are cross-validated and reported (secondary
+# analysis, tv_comparison_*) but are never candidates (00_config.R, TV_FORMS `selectable`).
+# Ensembles, the structural baselines (rank-only) and the sensitivity arms are never candidates.
+# The loo stacking weights do not select (they define the stacked ensemble).
+.bayes_singles <- if (!is.null(eval_tbl))
+  eval_tbl %>% dplyr::filter(grepl("^Bayes", method), !grepl("-ens-", method)) else NULL
+best_bayes_stage1 <- if (!is.null(.bayes_singles) && nrow(.bayes_singles))
+  select_featured_two_stage(.bayes_singles)$stage1 else NA_character_
+# NO SUBSTITUTE. If the composite cannot name a model the run stops rather than feature one the
+# selection never chose.
+if (length(best_bayes_stage1) != 1 || is.na(best_bayes_stage1))
+  stop("[select] the composite selection returned no stage-1 Bayesian model; refusing to ",
+       "feature a substitute. Check invasion_evaluation.csv.", call. = FALSE)
+message(sprintf("[select] stage 1 (fixed beta): %s", best_bayes_stage1))
+
+# Cross-validate extra models on the SAME rounds and append them on the zone-rounds every other
+# method shares, so every other model's metrics are unchanged (checked). A model that does not
+# cover every shared zone-round is NOT appended (it would change the common support). Re-attaches
+# the recalibration, re-writes the deltas and the evaluation. Returns the appended labels.
+.append_cv_models <- function(lfo_new, labels, tag, all_or_nothing) {
+  if (is.null(lfo_new) || !nrow(lfo_new)) {
+    warning(sprintf("[%s] the cross-validation returned no rows; %s NOT added.", tag,
+                    paste(labels, collapse = ", ")), call. = FALSE)
+    return(character(0))
+  }
+  ok <- stats::setNames(rep(TRUE, length(labels)), labels)
+  rows <- list()
+  if (any(ok)) for (.h in sort(unique(lfo_results$horizon))) {
+    .cells <- invasion_common_cells(lfo_results, .h)
+    for (.m in labels) {
+      .a  <- lfo_new[lfo_new$method == .m & lfo_new$horizon == .h & is.finite(lfo_new$p_invasion), , drop = FALSE]
+      .ac <- paste(.a$fold_id, .a$health_zone, sep = "\r")
+      if (!all(.cells %in% .ac)) ok[[.m]] <- FALSE
+      rows[[length(rows) + 1L]] <- .a[.ac %in% .cells, , drop = FALSE]
+    }
+  }
+  if (all_or_nothing && !all(ok)) ok[] <- FALSE
+  if (any(!ok))
+    warning(sprintf(paste0("[%s] %s do(es) not cover every shared zone-round and is NOT added ",
+                           "(adding it would change the other models' common support)."),
+                    tag, paste(names(ok)[!ok], collapse = ", ")), call. = FALSE)
+  keep <- names(ok)[ok]
+  if (!length(keep)) return(character(0))
+  .cmp_cols <- intersect(c("auc_pr", "auc_pr_skill", "mean_rank_of_truth", "log_score",
+                           "log_score_recal", "n_atrisk", "n_invasions", "sel_auc_pr_skill_date",
+                           "sel_mean_rank_of_truth", "sel_log_score_recal"), names(eval_tbl))
+  .before <- eval_tbl[, c("method", "horizon", .cmp_cols)]
+  .add <- dplyr::bind_rows(rows); .add <- .add[.add$method %in% keep, , drop = FALSE]
+  lfo_results <<- dplyr::bind_rows(lfo_results, .add)
+  if (isTRUE(INVASION_RECALIBRATE)) {
+    lfo_results <<- attach_invasion_recalibration(lfo_results)
+    recal_tbl <<- invasion_delta_table(lfo_results)
+    if (!is.null(recal_tbl) && nrow(recal_tbl)) .write_recal_outputs(recal_tbl)
+    .write_delta_stability()   # now including the appended models
+  }
+  eval_tbl <<- evaluate_invasion(lfo_results)
+  .after <- eval_tbl[eval_tbl$method %in% .before$method, c("method", "horizon", .cmp_cols)]
+  .chk <- dplyr::inner_join(.before, .after, by = c("method", "horizon"), suffix = c(".b", ".a"))
+  .moved <- vapply(.cmp_cols, function(cc)
+    !isTRUE(all.equal(.chk[[paste0(cc, ".b")]], .chk[[paste0(cc, ".a")]], tolerance = 1e-12)),
+    logical(1))
+  if (nrow(.chk) != nrow(.before) || any(.moved))
+    stop(sprintf("[%s] appending %s changed other models' metrics (%s); refusing to continue.",
+                 tag, paste(keep, collapse = ", "), paste(.cmp_cols[.moved], collapse = ", ")),
+         call. = FALSE)
+  readr::write_csv(eval_tbl, file.path(OUT_DIAGNOSTICS, "invasion_evaluation.csv"))
+  metrics_summary <<- eval_tbl
+  message(sprintf("[%s] cross-validated %s on the shared zone-rounds; no other model's metrics moved.",
+                  tag, paste(keep, collapse = ", ")))
+  keep
+}
+
+# ---- STAGE 2: the time-varying forms of the stage-1 specification -----------------------------
+.form_specs <- list(); .forms_cv <- character(0)
+.tv_key_files <- file.path(OUT_DIR, "key_outputs", c("tv_comparison_metrics.csv",
+                   "tv_comparison_guard.csv", "tv_comparison_by_date.csv", "tv_comparison.json",
+                   "tv_comparison.md"))
+# Per-fit convergence of the forms' back-test. Removed before every fresh back-test and whenever
+# the forms are not run, so it always describes the fits this run's comparison is based on (a
+# reused back-test rewrites it from the table cached WITH that back-test).
+.tv_fits_file <- file.path(OUT_DIAGNOSTICS, "tv_form_fits.csv")
+# The forms exist only of a cloglog specification (the Stan engine is cloglog-only). A logit
+# sensitivity model (INCLUDE_LOGIT_SENS_MODELS) can win stage 1; it then has no forms, so stage 1's
+# pick is featured -- said, rather than stopping in bayes_tv_form_specs().
+.s1_link <- bayes_spec_for_label(best_bayes_stage1, BAYES_LFO_SPECS)$link %||% "cloglog"
+if (isTRUE(INCLUDE_TV_FORMS) && !identical(.s1_link, "cloglog"))
+  message(sprintf(paste0("[tv-forms] stage 1 picked %s, a %s-link model; the time-varying forms ",
+                         "(cloglog only) are not fitted, so stage 1's pick is featured."),
+                  best_bayes_stage1, .s1_link))
+if (isTRUE(INCLUDE_TV_FORMS) && identical(.s1_link, "cloglog") && isTRUE(RUN_BAYES_LFO) &&
+    !is.null(lfo_results) && !is.null(eval_tbl)) {
+  .s1 <- bayes_spec_for_label(best_bayes_stage1, BAYES_LFO_SPECS)
+  if (is.null(.s1)) stop(sprintf("[tv-forms] the stage-1 pick %s is not a grid spec.", best_bayes_stage1),
+                         call. = FALSE)
+  .form_specs <- bayes_tv_form_specs(.s1)
+  .form_labels <- vapply(.form_specs, `[[`, "", "label")
+  invisible(frailty_stan_model())   # compile once here, before any parallel worker needs it
+  .form_diag_dir <- file.path(OUT_DIAGNOSTICS, "tv_form_fits")
+  unlink(.form_diag_dir, recursive = TRUE)
+  # REUSE under the same opt-in as the main LFO (REUSE_CACHED_LFO), keyed on everything that
+  # defines these fits: the main LFO's stamp, the stage-1 specification and its forms, the Stan
+  # engine's code, model and priors, and the sampling effort.
+  .form_cache <- file.path(OUT_FORECASTS, "lfo_tv_forms.rds")
+  .form_stamp <- list(lfo = .lfo_stamp, stage1 = best_bayes_stage1,
+                      specs = rlang::hash(.form_specs), iter = as.integer(TV_FORM_ITER),
+                      priors = c(BAYES_PRIOR_INTERCEPT, BAYES_PRIOR_COEF, TV_FORM_PRIOR_RW_SD,
+                                 TV_FORM_PRIOR_LOG_THETA),
+                      code = unname(tools::md5sum(c(file.path(ST_DIR, "21c_frailty_models.R"),
+                                                    FRAILTY_STAN_FILE))))
+  .form_lfo <- NULL
+  if (isTRUE(.reuse_lfo) && file.exists(.form_cache)) {
+    .fc <- tryCatch(readRDS(.form_cache), error = function(e) NULL)
+    if (!is.null(.fc) && identical(attr(.fc, "form_stamp"), .form_stamp)) {
+      .form_lfo <- .fc
+      invisible(suppressWarnings(file.remove(.tv_fits_file)))
+      if (!is.null(attr(.fc, "fits_tbl"))) readr::write_csv(attr(.fc, "fits_tbl"), .tv_fits_file)
+      message("[tv-forms] REUSE_CACHED_LFO: the forms' cross-validation matches its stamp; reused.")
+    } else message("[tv-forms] cached forms' cross-validation does not match this run; re-running it.")
+  }
+  if (is.null(.form_lfo)) {
+    invisible(suppressWarnings(file.remove(.tv_fits_file)))
+    .form_models <- stats::setNames(lapply(.form_specs, function(sp)
+      make_suite_lfo_model(sp, mobility_matrices, gt_pmfs, covariates, osrm_mat, zones_all,
+                           linelist = dat$ll, trunc_delay = .trunc_asof,
+                           iter_stan = TV_FORM_ITER, diag_dir = .form_diag_dir)), .form_labels)
+    .tf_forms <- Sys.time()
+    .form_lfo <- tryCatch(
+      run_invasion_lfo(zone_week_outbreak, .form_models, delay = .trunc_asof,
+                       horizons = LFO_HORIZONS, analysis_date = ANALYSIS_DATE,
+                       min_train_weeks = LFO_MIN_TRAINING_WEEKS, min_atrisk_events = 0L,
+                       nowcast_fn = apply_nowcast_correction,
+                       linelist = if (isTRUE(LEAKAGE_FREE_LFO)) dat$ll else NULL),
+      error = function(e) { warning("[tv-forms] cross-validation failed: ", conditionMessage(e),
+                                    call. = FALSE); NULL })
+    message(sprintf("[tv-forms] cross-validation of %d forms: %.1f min", length(.form_models),
+                    as.numeric(difftime(Sys.time(), .tf_forms, units = "mins"))))
+    .fits_tbl <- collect_stan_form_diagnostics(.form_diag_dir)
+    if (!is.null(.fits_tbl)) {
+      readr::write_csv(.fits_tbl, .tv_fits_file)
+      # "no_events" is a fold with nothing to fit (the brms closures skip it too), not a failure.
+      .noev <- .fits_tbl$status %in% "no_events"
+      .bad  <- !(.fits_tbl$status %in% c("ok", "no_events")) |
+               (.fits_tbl$rhat_max > 1.05) %in% TRUE | (.fits_tbl$n_divergent > 0) %in% TRUE
+      message(sprintf(paste0("[tv-forms] %d back-test fold x form rows: %d with no events to fit; %d ",
+                             "failed or flagged (no design, sampling or offsets failure, error, ",
+                             "R-hat > 1.05 or divergences)."),
+                      nrow(.fits_tbl), sum(.noev), sum(.bad)))
+    }
+    if (!is.null(.form_lfo)) {
+      attr(.form_lfo, "form_stamp") <- .form_stamp
+      attr(.form_lfo, "fits_tbl") <- .fits_tbl      # travels with the back-test it describes
+      saveRDS(.form_lfo, .form_cache)
+    }
+  }
+  .forms_cv <- .append_cv_models(.form_lfo, .form_labels, "tv-forms", all_or_nothing = FALSE)
+} else invisible(suppressWarnings(file.remove(.tv_fits_file)))
+.sel2 <- select_featured_two_stage(eval_tbl %>% dplyr::filter(grepl("^Bayes", method),
+                                                               !grepl("-ens-", method)))
+if (!identical(.sel2$stage1, best_bayes_stage1))
+  stop(sprintf("[select] stage 1 moved from %s to %s after the forms were appended.",
+               best_bayes_stage1, .sel2$stage1), call. = FALSE)
+best_bayes_method <- .sel2$featured
+if (length(best_bayes_method) != 1 || is.na(best_bayes_method))
+  stop("[select] stage 2 returned no featured model.", call. = FALSE)
+message(sprintf("[select] stage 2 (%s): featured = %s%s",
+                if (length(.sel2$forms)) paste(c("fixed beta", .sel2$forms), collapse = " vs ")
+                else "no cross-validated selectable forms", best_bayes_method,
+                if (length(.sel2$secondary))
+                  sprintf("; secondary, scored but never candidates: %s",
+                          paste(.sel2$secondary, collapse = ", ")) else ""))
+# THE HEADLINE MODEL IS THE FEATURED MODEL. It drives the skill/lead/detection/predobs figures;
+# selecting it over every scored method (as before) could return an ensemble, which the design
+# excludes from featuring and which has no live forecast.
+best_method <- best_bayes_method
+message(sprintf("[eval] Headline model: %s", best_method))
+
+# The forms against fixed beta (calibration, discrimination, and the paired log-score gain with
+# its zone-bootstrap and Diebold-Mariano bounds): reported, not used to select. Written every run
+# the forms were cross-validated; otherwise the previous run's files are removed so no figure can
+# redraw them.
+.tv_cmp <- if (length(.forms_cv))
+  tryCatch(invasion_tv_form_comparison(lfo_results, best_bayes_stage1),
+           error = function(e) { warning("[tv-forms] comparison failed: ", conditionMessage(e),
+                                         call. = FALSE); NULL }) else NULL
+if (is.null(.tv_cmp)) {
+  invisible(suppressWarnings(file.remove(.tv_key_files[file.exists(.tv_key_files)])))
+} else {
+  .KO <- file.path(OUT_DIR, "key_outputs")
+  .add_id <- function(x) dplyr::mutate(x, featured_model = best_bayes_method,
+                                       stage1_model = best_bayes_stage1, .before = 1)
+  readr::write_csv(.add_id(.tv_cmp$metrics), file.path(.KO, "tv_comparison_metrics.csv"))
+  readr::write_csv(.add_id(.tv_cmp$guard), file.path(.KO, "tv_comparison_guard.csv"))
+  readr::write_csv(.add_id(.tv_cmp$by_date), file.path(.KO, "tv_comparison_by_date.csv"))
+  .gp <- .tv_cmp$guard[.tv_cmp$guard$forecasts == "p_recal", , drop = FALSE]
+  jsonlite::write_json(list(
+    generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+    stage1_model = best_bayes_stage1, featured_model = best_bayes_method,
+    forms = as.list(unname(.tv_cmp$labels[names(.tv_cmp$labels) != "fixed"])),
+    n_rounds_post_burnin = .tv_cmp$n_rounds,
+    selection = paste("Two-stage: stage 1 picks the fixed-beta specification by the CV composite;",
+                      "stage 2 puts it and its selectable time-varying forms through the same",
+                      "composite. The frailty forms are a secondary analysis: scored here, never",
+                      "candidates, because a frailty cannot tell a zone that resists invasion",
+                      "from one invaded but not yet detected."),
+    selectable_forms = as.list(.sel2$forms), secondary_forms = as.list(.sel2$secondary),
+    guard = list(statistic = paste("horizon-mean paired log-score gain over fixed beta,",
+                                   "recalibrated forecasts, post-burn-in rounds"),
+                 zone_bootstrap_replicates = .tv_cmp$B, k = .tv_cmp$k,
+                 bonferroni_level = .tv_cmp$bonferroni_level,
+                 origin_test = paste("Diebold-Mariano with the Harvey-Leybourne-Newbold correction,",
+                                     "t on n_origins - 1 df"),
+                 role = "reported only; it does not select",
+                 passed = as.list(.gp$form[.gp$guard_passed %in% TRUE])),
+    iter = as.integer(TV_FORM_ITER),
+    priors = list(intercept = BAYES_PRIOR_INTERCEPT, coef = BAYES_PRIOR_COEF,
+                  rw_sd = TV_FORM_PRIOR_RW_SD, log_theta = TV_FORM_PRIOR_LOG_THETA)),
+    file.path(.KO, "tv_comparison.json"), auto_unbox = TRUE, pretty = TRUE, digits = 6)
+  .fmt <- function(x, d = 2) formatC(x, format = "f", digits = d)
+  .mt <- .tv_cmp$metrics %>% dplyr::arrange(horizon, form)
+  writeLines(c(sprintf("# Time-varying forms of the stage-1 specification (%s)", format(ANALYSIS_DATE)), "",
+    sprintf(paste0("_Stage 1_: `%s`. _Featured (stage 2)_: `%s`. %s %d post-burn-in rounds; every form ",
+                   "recalibrated by the single-delta rule (each round's prequential factor; %s)."),
+            best_bayes_stage1, best_bayes_method,
+            if (length(.sel2$secondary))
+              sprintf(paste0("_Secondary, scored but never featured_: %s (a frailty cannot tell a zone ",
+                             "that resists invasion from one invaded but not yet detected; see ",
+                             "Figure A6 of the ascertainment report)."),
+                      paste(sprintf("`%s`", .sel2$secondary), collapse = ", ")) else "",
+            .tv_cmp$n_rounds,
+            local({
+              .bd <- .tv_cmp$by_date
+              .nu <- dplyr::n_distinct(.bd$cutoff[!(.bd$burnin %in% TRUE) & .bd$delta_estimable %in% FALSE])
+              if (.nu) sprintf(paste0("%d of them precede any fitted factor, so their \"recalibrated\" ",
+                                      "probabilities are the raw ones"), .nu)
+              else "every one of them carries a fitted factor"
+            })), "",
+    "## Scores (post-burn-in; log score x1000, lower is better; E/O = expected / observed)", "",
+    "| Form | Horizon | Log score (raw) | Log score (recalibrated) | E/O raw | E/O recalibrated | E/O early / late | Per-date AUC-PR skill | Mean rank of invaded zones |",
+    "|---|---|---|---|---|---|---|---|---|",
+    sprintf("| %s | %d wk | %s | %s | %s | %s | %s / %s | %s | %s |", .mt$form, .mt$horizon,
+            .fmt(.mt$log_score_raw_x1000, 3), .fmt(.mt$log_score_recal_x1000, 3), .fmt(.mt$eo_raw),
+            .fmt(.mt$eo_recal), .fmt(.mt$eo_recal_early), .fmt(.mt$eo_recal_late),
+            .fmt(.mt$auc_pr_skill_per_date, 1), .fmt(.mt$mean_rank_of_truth, 1)), "",
+    sprintf("## Gain over fixed beta (x1000, recalibrated; Bonferroni k = %d, one-sided %.2f%% level). Reported; the selection is the composite.",
+            .tv_cmp$k, 100 * .tv_cmp$bonferroni_level), "",
+    "| Form | Gain | Bonferroni lower (zone bootstrap) | Bonferroni lower (origin, Diebold-Mariano) | 90% (zone) | 90% (origin) | Both bounds > 0 |",
+    "|---|---|---|---|---|---|---|",
+    sprintf("| %s | %s | %s | %s | [%s, %s] | [%s, %s] | %s |", .gp$form, .fmt(.gp$gain_x1000, 3),
+            .fmt(.gp$zone_lo_bonferroni, 3), .fmt(.gp$origin_lo_bonferroni, 3), .fmt(.gp$zone_lo90, 3),
+            .fmt(.gp$zone_hi90, 3), .fmt(.gp$origin_lo90, 3), .fmt(.gp$origin_hi90, 3),
+            ifelse(.gp$guard_passed, "yes", "no")), "",
+    "_The frailty cannot distinguish a zone that resists invasion from one invaded but not yet detected._"),
+    file.path(.KO, "tv_comparison.md"))
+}
+
+# ── GENERATION-TIME SENSITIVITY ARMS OF THIS RUN'S FEATURED MODEL ─────────────────────────────
+# The generation time is an assumption, so the featured model (a fixed-beta spec or a form) is
+# refitted at the short and long profiles. Built AFTER both selection stages so the arms are refits
+# of the model this run features. Cross-validated on the same rounds, appended only if both cover
+# every shared zone-round (all or nothing, so FigureS8 never shows one arm), fitted live in the
+# deployed suite, and never eligible for selection (sensitivity arms).
+.gt_arm_specs <- list()
+if (isTRUE(get0("INCLUDE_GT_SENSITIVITY_MODELS", ifnotfound = TRUE)) && isTRUE(RUN_BAYES_LFO) &&
+    !is.null(lfo_results) && !is.null(eval_tbl)) {
+  .fsp <- bayes_spec_for_label(best_bayes_method, c(BAYES_LFO_SPECS, .form_specs))
+  if (!is.null(.fsp)) .gt_arm_specs <- bayes_gt_sensitivity_specs(.fsp)
+  if (length(.gt_arm_specs)) {
+    .arm_labels <- vapply(.gt_arm_specs, `[[`, "", "label")
+    .arm_models <- stats::setNames(lapply(.gt_arm_specs, function(sp)
+      make_suite_lfo_model(sp, mobility_matrices, gt_pmfs, covariates, osrm_mat, zones_all,
+                           linelist = dat$ll, trunc_delay = .trunc_asof, iter_brms = BAYES_LFO_ITER_BRMS,
+                           iter_stan = TV_FORM_ITER)), .arm_labels)
+    .arm_lfo <- tryCatch(
+      run_invasion_lfo(zone_week_outbreak, .arm_models, delay = .trunc_asof,
+                       horizons = LFO_HORIZONS, analysis_date = ANALYSIS_DATE,
+                       min_train_weeks = LFO_MIN_TRAINING_WEEKS, min_atrisk_events = 0L,
+                       nowcast_fn = apply_nowcast_correction,
+                       linelist = if (isTRUE(LEAKAGE_FREE_LFO)) dat$ll else NULL),
+      error = function(e) { warning("[gt-arms] cross-validation failed: ", conditionMessage(e),
+                                    call. = FALSE); NULL })
+    if (!length(.append_cv_models(.arm_lfo, .arm_labels, "gt-arms", all_or_nothing = TRUE)))
+      .gt_arm_specs <- list()
+  }
 }
 
 # ── TRUNCATION SENSITIVITY: the same evaluation on SETTLED folds only ─────────────────
@@ -1093,6 +1518,8 @@ if (!is.null(eval_tbl)) {
 # window admitted — so the size of the effect on every published metric is visible rather
 # than argued about. Nothing downstream reads this table: it is a sensitivity, not the result.
 local({
+  # Written fresh or not at all: no earlier run's table survives a run that does not write one.
+  invisible(suppressWarnings(file.remove(file.path(OUT_DIAGNOSTICS, "invasion_evaluation_reliable_folds.csv"))))
   if (is.null(lfo_results) || !"eval_reliable" %in% names(lfo_results)) return(invisible(NULL))
   rel <- lfo_results[lfo_results$eval_reliable %in% TRUE, , drop = FALSE]
   n_drop <- dplyr::n_distinct(lfo_results$fold_id) - dplyr::n_distinct(rel$fold_id)
@@ -1110,23 +1537,109 @@ local({
                   as.integer(get0("LFO_RELIABLE_EVAL_AGE_DAYS", ifnotfound = 25L))))
 })
 
-# metrics_summary alias for downstream figures/report
-metrics_summary <- eval_tbl
+# ── PER-RUN CHECKS (2026-10-14) ───────────────────────────────────────────────
+# The review of 2026-10-12/14 found that pooled summaries hid what mattered: one round set the
+# recalibration factor, calibration drifted from round to round, separate per-horizon factors broke
+# the nesting of the 1- and 2-week windows, and the featured pick was less firm than its margin
+# suggested. These three checks are written every run so none of that can be missed again.
+#   (1) diagnostics/invasion_calibration_by_date.csv: expected (raw and recalibrated) against
+#       observed invasions, per method x horizon x round, with the burn-in flag;
+#   (2) diagnostics/invasion_nesting_check.csv: rows where P(<= 2 wk) < P(<= 1 wk) after
+#       recalibration -- zero by construction under the single factor; a warning if not;
+#   (3) key_outputs/model_selection_bootstrap.csv: how often each candidate (and kernel) wins
+#       the selection over zone-bootstrap replicates (invasion_selection_bootstrap()).
+if (!is.null(lfo_results)) local({
+  d <- lfo_results[!(as.logical(lfo_results$was_active_before) %in% TRUE) &
+                     is.finite(lfo_results$p_invasion), , drop = FALSE]
+  # Rank-only comparators (prob_calibrated = FALSE: a score, not a probability) have no expected
+  # count: summing their scores gave "expected invasions" in the millions.
+  if ("prob_calibrated" %in% names(d)) d <- d[!(d$prob_calibrated %in% FALSE), , drop = FALSE]
+  # The nesting check is written only when recalibrated rows exist; never leave last run's.
+  invisible(suppressWarnings(file.remove(file.path(OUT_DIAGNOSTICS, "invasion_nesting_check.csv"))))
+  has_rec <- "p_recal" %in% names(d); has_dp <- "delta_preq" %in% names(d)
+  cb <- d %>%
+    dplyr::group_by(method, horizon, cutoff) %>%
+    dplyr::summarise(burnin = invasion_is_burnin(dplyr::first(cutoff)),
+                     eval_age_days = dplyr::first(eval_age_days), n_atrisk = dplyr::n(),
+                     observed = sum(is_new_invasion), expected_raw = sum(p_invasion),
+                     expected_recal = if (has_rec) sum(p_recal, na.rm = TRUE) else NA_real_,
+                     delta_preq = if (has_dp) dplyr::first(delta_preq) else NA_real_,
+                     .groups = "drop")
+  readr::write_csv(cb, file.path(OUT_DIAGNOSTICS, "invasion_calibration_by_date.csv"))
+  if (has_rec && all(c(1L, 2L) %in% d$horizon)) {
+    w <- d %>% dplyr::filter(horizon %in% c(1L, 2L), is.finite(p_recal)) %>%
+      dplyr::select(method, fold_id, health_zone, horizon, p_recal) %>%
+      tidyr::pivot_wider(names_from = horizon, values_from = p_recal, names_prefix = "h")
+    nc <- w %>% dplyr::group_by(method) %>%
+      dplyr::summarise(rows = dplyr::n(), violations = sum(h2 < h1 - 1e-12, na.rm = TRUE), .groups = "drop")
+    readr::write_csv(nc, file.path(OUT_DIAGNOSTICS, "invasion_nesting_check.csv"))
+    if (any(nc$violations > 0))
+      warning(sprintf("[check] %d recalibrated rows have P(<= 2 wk) < P(<= 1 wk) (methods: %s).",
+                      sum(nc$violations), paste(nc$method[nc$violations > 0], collapse = ", ")),
+              call. = FALSE)
+    else message("[check] nesting holds: no recalibrated row has P(<= 2 wk) < P(<= 1 wk).")
+  }
+})
+if (!is.null(lfo_results)) {
+  .sb <- tryCatch(invasion_selection_bootstrap(lfo_results),
+                  error = function(e) { warning("[check] selection bootstrap failed: ",
+                                                conditionMessage(e), call. = FALSE); NULL })
+  # No result this run: remove the previous run's file so write_model_selection.R cannot
+  # publish it as this run's selection stability.
+  if (is.null(.sb))
+    invisible(suppressWarnings(file.remove(file.path(OUT_DIR, "key_outputs", "model_selection_bootstrap.csv"))))
+  if (!is.null(.sb)) {
+    readr::write_csv(.sb, file.path(OUT_DIR, "key_outputs", "model_selection_bootstrap.csv"))
+    .ks <- attr(.sb, "kernel_share")
+    message(sprintf("[check] selection stability over %d zone resamples: %s; kernels: %s",
+                    attr(.sb, "B"),
+                    paste(sprintf("%s %.0f%%", utils::head(.sb$method, 3), 100 * utils::head(.sb$share, 3)),
+                          collapse = ", "),
+                    paste(sprintf("%s %.0f%%", names(.ks), 100 * as.numeric(.ks)), collapse = ", ")))
+  }
+}
 
-# ── Held-out (last-two-origins) confirmatory evaluation + optimism gap (§2.2) ──
+# ── Held-out (last-k-origins) confirmatory evaluation, DECOMPOSED (§2.2) ──────
 # The all-fold eval_tbl above SELECTS the featured model AND reports its skill, so it is
 # selection-optimistic. Re-evaluate honestly: select on the earlier folds, score once on the
-# two most-recent origins (never seen by selection). Report both and the gap.
+# most-recent origins (never seen by selection, with an embargo between the two sets).
+#
+# WHY THE HEADLINE NUMBER IS NOW A DECOMPOSITION, NOT A DIFFERENCE. `optimism_gap` is one
+# model's inner-minus-outer skill, and on this outbreak it is dominated by an effect that has
+# nothing to do with selection: the outer origins are the sparsest, lowest-base-rate window in
+# the series (h=1 base rate 0.0080 at the first round against 0.0043 at the last; the last
+# three origins carry 6 of the 36 h=1 events), so EVERY candidate scores worse there. Scoring
+# the whole eligible field on the same two sets separates the two: the field's median drop is
+# the window, the selected model's EXCESS over that median is the selection. Measured on the
+# 2026-09-07 frame at k=3 the excess is +2.0 skill points at h=1 and +6.3 at h=2, against a
+# conflated gap of 27.8 that the manuscript previously reported as the optimism.
+#
+# k = 3, NOT 2. The function's own default is 3 and this call overrode it to 2, which left the
+# outer set carrying 4 h=1 events on the 2026-09-07 frame; the excess is unstable at that size
+# (+9.2 at k=2 against +2.0 at k=3 there). It is one split on a handful of outer events (the
+# table's event counts give the frame at hand) and must be read as such.
+# Written fresh or not at all: a run without a held-out result must not leave the previous run's
+# tables for FigR4 (make_review_figures()) to redraw.
+invisible(suppressWarnings(file.remove(file.path(OUT_DIAGNOSTICS, c("invasion_heldout_optimism.csv",
+  "invasion_heldout_field.csv", "invasion_heldout_decomposition.csv")))))
 heldout_eval <- if (!is.null(lfo_results))
-  tryCatch(evaluate_invasion_heldout(lfo_results, n_holdout = 2L, restrict = "^Bayes", horizon = 1L),
+  tryCatch(evaluate_invasion_heldout(lfo_results, n_holdout = 3L, restrict = "^Bayes",
+                                     horizon = 1L, featured = best_bayes_method),
            error = function(e) { warning("held-out eval failed: ", e$message); NULL }) else NULL
 if (!is.null(heldout_eval)) {
+  .hs <- heldout_eval$field_summary
   readr::write_csv(
     # The base rates and the common-denominator gap are exported alongside the headline gap.
     # inner_cv_skill and heldout_skill are each scored against their OWN base rate, so their
     # difference mixes selection optimism with a shift in how hard the window is; on the
-    # shipped folds that shift is 37% and it roughly halves the reported gap.
+    # shipped folds that shift is 31% and it roughly halves the reported gap. The
+    # field_* / selected_excess_* columns are the decomposition that removes it.
+    # Every skill, AP and base rate here is on the SELECTION'S axis (INVASION_SELECTION_BASIS:
+    # per-date AUC-PR skill on the post-burn-in rounds by default; event-weighted AP and base
+    # rate) — the optimism of a choice is measured on what it was chosen on. The pooled skill is
+    # kept in the *_pooled columns.
     tibble::tibble(selected = heldout_eval$selected, horizon = heldout_eval$horizon,
+                   axis = invasion_selection_axis_label(),
                    inner_cv_skill = heldout_eval$inner_skill,
                    heldout_skill  = heldout_eval$outer_skill,
                    optimism_gap   = heldout_eval$optimism_gap,
@@ -1136,50 +1649,51 @@ if (!is.null(heldout_eval)) {
                    base_rate_ratio = heldout_eval$base_rate_ratio,
                    inner_auc_pr = heldout_eval$inner_auc_pr,
                    heldout_auc_pr = heldout_eval$outer_auc_pr,
-                   n_holdout_origins = heldout_eval$n_holdout),
+                   inner_cv_skill_pooled = heldout_eval$inner_skill_pooled,
+                   heldout_skill_pooled  = heldout_eval$outer_skill_pooled,
+                   n_holdout_origins = heldout_eval$n_holdout,
+                   featured_model = best_bayes_method) %>%
+      # Drop the summary's own copies of the columns the tibble above already carries,
+      # or the join suffixes them into inner_base_rate.x / .y.
+      dplyr::left_join(if (!is.null(.hs))
+                         .hs %>% dplyr::select(-dplyr::any_of(c("selected", "inner_base_rate")))
+                       else tibble::tibble(horizon = integer(0)), by = "horizon"),
     file.path(OUT_DIAGNOSTICS, "invasion_heldout_optimism.csv"))
-  message(sprintf(paste0("[held-out §2.2] %s: inner-CV AUC-PR skill %.1fx vs held-out (last 2 origins) ",
-                         "%.1fx (optimism gap %.1fx; %.1fx on a common base rate - the held-out base ",
+  # THE FIELD TABLE IS THE FIGURE'S INPUT. One row per (candidate x horizon), carrying both
+  # sets' AUC-PR and skill, the drop on each set's own base rate and on the common one, and
+  # the inner/outer ranks. FigR4 draws it as a slope chart.
+  if (!is.null(heldout_eval$field))
+    readr::write_csv(tibble::as_tibble(heldout_eval$field) %>%
+                       dplyr::mutate(axis = invasion_selection_axis_label()),
+                     file.path(OUT_DIAGNOSTICS, "invasion_heldout_field.csv"))
+  # The decomposition at EVERY horizon. invasion_heldout_optimism.csv keeps its historical
+  # one-row (h=1) shape because extract_numbers.py reads row 0 by name; the h=2 decomposition
+  # would otherwise exist only inside the figure's caption.
+  if (!is.null(.hs))
+    readr::write_csv(tibble::as_tibble(.hs),
+                     file.path(OUT_DIAGNOSTICS, "invasion_heldout_decomposition.csv"))
+  message(sprintf(paste0("[held-out §2.2] %s: inner-CV per-date AUC-PR skill %.1fx vs held-out (last %d origins) ",
+                         "%.1fx (conflated gap %.1fx; %.1fx on a common base rate - the held-out base ",
                          "rate is %.2fx the inner one)"),
                   heldout_eval$selected, heldout_eval$inner_skill %||% NA_real_,
+                  heldout_eval$n_holdout,
                   heldout_eval$outer_skill %||% NA_real_, heldout_eval$optimism_gap %||% NA_real_,
                   heldout_eval$optimism_gap_common_base %||% NA_real_,
                   heldout_eval$base_rate_ratio %||% NA_real_))
+  # Say the decomposition out loud: the conflated gap above is NOT the optimism.
+  if (!is.null(.hs)) for (.i in seq_len(nrow(.hs))) {
+    .r <- .hs[.i, ]
+    message(sprintf(paste0("[held-out §2.2] h=%s DECOMPOSED over %d eligible candidates: window ",
+                           "effect (field median drop) %.1fx [range %.1f to %.1f], selection effect ",
+                           "(selected model's excess) %.1fx; inner->outer rank %d->%d of %d; rank ",
+                           "correlation %.2f; outer set carries %d event(s)."),
+                    .r$horizon, .r$n_candidates, .r$field_median_drop_common,
+                    .r$field_min_drop_common, .r$field_max_drop_common,
+                    .r$selected_excess_common, .r$selected_rank_inner, .r$selected_rank_outer,
+                    .r$selected_rank_of, .r$rank_correlation, .r$n_events_outer))
+  }
 }
 
-# NOTE: the forecast-vs-observed + prospective block (§3.4/§3.5/§3.6/§3.8) is placed
-# AFTER best_bayes_method is defined (below the headline-model selection), since it keys
-# on the featured Bayesian method.
-
-# Headline model (best overall) + best renewal model, both by a
-# calibration-aware criterion (discrimination + targeting + log-score) POOLED across
-# both forecast horizons, so we do not feature an over-confident variant or one that
-# is strong at 1-week but weak at 2-week (or vice versa).
-# There is no frequentist model to fall back to, so a missing/empty evaluation leaves
-# best_method NA and the Bayesian fallback immediately below supplies it.
-best_method <- if (!is.null(eval_tbl)) best_invasion_model(eval_tbl) else NA_character_
-# Featured BAYESIAN model: the best cross-validated SINGLE Bayesian model by the calibration-aware
-# CV composite (summed within-horizon ranks of AUC-PR skill + mean rank-of-truth + log-score, POOLED
-# across both horizons) — the same leave-future-out forecast-skill criterion as the frequentist
-# featured model. This is the PRIMARY (and default) selector; the loo predictive-stacking weight is
-# NOT used to pick the featured single model (it defines the loo-stacked ENSEMBLE, bayes_ensemble_*).
-# Not hardcoded. Ensembles (Bayes-ens-*) are excluded so the featured single model always has a
-# current-forecast row.
-best_bayes_method <- if (!is.null(eval_tbl) && any(grepl("^Bayes", eval_tbl$method))) {
-  .bayes_singles <- eval_tbl %>% dplyr::filter(grepl("^Bayes", method), !grepl("-ens-", method))
-  if (nrow(.bayes_singles) > 0) best_invasion_model(.bayes_singles) else NA_character_
-} else NA_character_
-if (length(best_bayes_method) != 1 || is.na(best_bayes_method)) {
-  .cand <- if (!is.null(lfo_results)) grep("^Bayes", unique(lfo_results$method), value = TRUE) else character(0)
-  .cand <- .cand[!grepl("-ens-", .cand)]
-  best_bayes_method <- if (length(.cand)) .cand[1] else NULL
-}
-# Degenerate fallback: if the evaluation table is missing or empty, best_invasion_model()
-# returns NA. best_method drives the skill/lead/detection/predobs figures, so it must be a real
-# cross-validated method — fall back to the featured Bayesian pick.
-if ((length(best_method) != 1 || is.na(best_method)) && !is.null(best_bayes_method))
-  best_method <- best_bayes_method
-message(sprintf("[eval] Headline model: %s", best_method))
 
 # ── Forecast-vs-observed suite + prospective check (review §3.4/§3.5/§3.6/§3.8) ──
 # Uses the featured Bayesian model's LFO forecasts (predicted vs realised). Guarded and
@@ -1190,9 +1704,16 @@ if (!is.null(lfo_results) && !is.null(best_bayes_method) &&
   .rel_dir <- function(raw) if (raw) { d <- file.path(OUT_DIAGNOSTICS, "raw")
                                        if (!dir.exists(d)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
                                        d } else OUT_DIAGNOSTICS
-  # BOTH horizons: FigR1_reliability is a retained deliverable at h=1 AND h=2, and the
-  # horizon was previously hard-coded to 1 here and again in 24_review_figures.R, so the
-  # h=2 panel could never be produced. The basenames now carry the horizon.
+  # Each table below is written only when it has rows: the previous run's go first, on both
+  # scales, so a horizon with nothing to write cannot keep last run's table.
+  invisible(suppressWarnings(file.remove(as.vector(outer(
+    c(OUT_DIAGNOSTICS, file.path(OUT_DIAGNOSTICS, "raw")),
+    sprintf(c("forecast_reliability_h%d.csv", "forecast_reliability_folds_h%d.csv",
+              "forecast_count_calibration_h%d.csv"), rep(LFO_HORIZONS, each = 3L)),
+    file.path)))))
+  # BOTH horizons: the calibration figure is a retained deliverable at h=1 AND h=2, and the
+  # horizon was previously hard-coded to 1 here, so the h=2 tables could never be written.
+  # The basenames now carry the horizon.
   for (.hh in LFO_HORIZONS) {
   fvo <- lfo_results %>% dplyr::filter(method == best_bayes_method, horizon == .hh,
                                        !was_active_before, is.finite(p_invasion))
@@ -1200,18 +1721,39 @@ if (!is.null(lfo_results) && !is.null(best_bayes_method) &&
     # (§3.5 view 1) reliability curve; (view 2) aggregate-count calibration over folds.
     # Written on BOTH probability scales, same basenames, the raw one under diagnostics/raw/.
     # The PRIMARY files carry the PREQUENTIAL recalibration — the leakage-free retrospective
-    # scale, fitted for each fold only on folds whose outcome had already closed — because
+    # scale, fitted for each fold only on post-burn-in folds whose outcome had settled
+    # (>= LFO_RELIABLE_EVAL_AGE_DAYS) by its issue date — because
     # that is the forecast the deployed system issues. The raw twin is what motivates the
-    # correction, and 24_review_figures.R overlays the two so the calibration panels show
-    # the defect and the fix together rather than one without the other.
+    # correction. FigureS7_calibration (make_si_model_figures.R) does not read these files: it
+    # recomputes the same curve from the LFO frame with the same estimator and RELIABILITY_*
+    # constants.
     .pcol <- if ("p_recal" %in% names(fvo) && all(is.finite(fvo$p_recal))) "p_recal" else {
       warning("[eval §3.5] no usable recalibrated probability for the featured model; the ",
               "calibration files are written on the RAW scale.", call. = FALSE); "p_invasion" }
     for (.v in list(list(col = .pcol, raw = FALSE), list(col = "p_invasion", raw = TRUE))) {
       .p  <- fvo[[.v$col]]
-      rc  <- reliability_curve(.p, as.integer(fvo$is_new_invasion), n_bins = 10L)
+      # `fold` is what makes the reliability curve's uncertainty CROSS-VALIDATED (review
+      # 2.25): with it, each bin carries the between-origin design effect and a Wilson
+      # interval on the effective sample size alongside the within-bin binomial one, and the
+      # per-(bin, origin) cells are written beside the curve so the figure can draw the
+      # across-origin spread it summarises. Without it the curve would report only the
+      # binomial sampling error of a bin, which is not the uncertainty of an out-of-sample
+      # forecast.
+      # Expected-event-balanced bins; RELIABILITY_N_BINS / RELIABILITY_BINNING (00_config.R) carry the
+      # reasoning and are named there so the table and the figure cannot bin differently. The
+      # two probability scales get their OWN edges — they are different distributions — and each
+      # scale's curve and per-origin cells share one set, so the cells always belong to the bins
+      # they are drawn against.
+      .brk <- reliability_breaks(.p, as.integer(fvo$is_new_invasion),
+                                 n_bins = RELIABILITY_N_BINS, binning = RELIABILITY_BINNING)
+      rc  <- reliability_curve(.p, as.integer(fvo$is_new_invasion),
+                               fold = fvo$fold_id, breaks = .brk, conf = RELIABILITY_CONF)
       if (nrow(rc)) readr::write_csv(rc, file.path(.rel_dir(.v$raw),
                        sprintf("forecast_reliability_h%d.csv", .hh)))
+      rfc <- reliability_fold_cells(.p, as.integer(fvo$is_new_invasion),
+                                    fvo$fold_id, breaks = .brk)
+      if (nrow(rfc)) readr::write_csv(rfc, file.path(.rel_dir(.v$raw),
+                        sprintf("forecast_reliability_folds_h%d.csv", .hh)))
       acc <- aggregate_count_calibration(data.frame(time = as.character(fvo$fold_id),
                p_invasion = .p, invaded = as.integer(fvo$is_new_invasion)))
       if (nrow(acc)) readr::write_csv(acc, file.path(.rel_dir(.v$raw),
@@ -1219,53 +1761,51 @@ if (!is.null(lfo_results) && !is.null(best_bayes_method) &&
     }
   }
   }
-  # (§3.4/§3.8) prospective check: zones invaded AFTER the last CV origin — were they ranked
-  # highly by the forecast issued at that origin (before their first case)?
+  # (§3.4/§3.8) prospective check: zones invaded AFTER every back-test outcome window -- were they
+  # ranked highly by the forecast issued at the last origin (before their first case)?
+  # OUTSIDE THE CROSS-VALIDATION, or it is not a prospective check: the last rounds' own outcome
+  # windows (weeks after the cutoff, up to the longest horizon) are scored back-test events that
+  # the selection used, so a zone first invaded inside them is excluded -- by date, and by any
+  # scored event in the back-test frame.
+  # The previous run's files go first: a run with no zone to check must not leave them for
+  # make_review_figures() to redraw.
+  invisible(suppressWarnings(file.remove(file.path(OUT_DIAGNOSTICS, c("prospective_invasion_summary.csv",
+                                                                      "prospective_invasion_per_zone.csv")))))
   last_cut <- max(lfo_results$cutoff, na.rm = TRUE)
   fc_last  <- lfo_results %>% dplyr::filter(method == best_bayes_method, horizon == 1L,
                                             cutoff == last_cut, !was_active_before)
-  aff_at_cut    <- affected_zones(zone_week_nc, last_cut)
-  invaded_after <- setdiff(affected_now, aff_at_cut)
+  # The end of the LAST scored outcome window over every (round, horizon) in the frame -- not
+  # last_cut + 7 * max(H), which with a per-horizon fold grid is an h = 1-only round.
+  aff_scored    <- affected_zones(zone_week_nc,
+                                  max(as.Date(lfo_results$cutoff) + 7L * as.integer(lfo_results$horizon),
+                                      na.rm = TRUE))
+  invaded_after <- setdiff(setdiff(affected_now, aff_scored),
+                           unique(lfo_results$health_zone[lfo_results$is_new_invasion %in% 1L]))
   if (nrow(fc_last) && length(invaded_after)) {
     pc <- prospective_invasion_check(
-      dplyr::transmute(fc_last, health_zone, p_invasion), invaded_after, top_k = 15L)
+      dplyr::select(fc_last, health_zone, p_invasion, dplyr::any_of("p_recal")),
+      invaded_after, top_k = 15L)
     readr::write_csv(pc$summary,  file.path(OUT_DIAGNOSTICS, "prospective_invasion_summary.csv"))
     readr::write_csv(pc$per_zone, file.path(OUT_DIAGNOSTICS, "prospective_invasion_per_zone.csv"))
-    message(sprintf("[prospective §3.4] %d zones invaded after the last CV origin; median pre-invasion rank %.0f; %d/%d in top-15",
+    message(sprintf("[prospective §3.4] %d zones invaded after every back-test outcome window; median pre-invasion rank %.0f; %d/%d in top-15",
                     pc$summary$n_zones, pc$summary$median_rank %||% NA_real_,
                     pc$summary$n_in_topk, pc$summary$n_zones))
-  }
+  } else message(sprintf(paste0("[prospective §3.4] not run: %s; no prospective table or figure ",
+                                "this run."),
+                         if (!nrow(fc_last)) "the featured model has no forecast at the last round"
+                         else "no zone was first invaded after every back-test outcome window"))
 }, error = function(e) warning("forecast-vs-observed / prospective suite: ", e$message))
 
-# Render the review-response figures (reliability, count-calibration, prospective ranks,
-# held-out optimism) in the key_outputs house style, from the CSVs just written (§3.4/3.5/2.2).
-tryCatch({
-  # Calibration-in-the-large of the PRIMARY (recalibrated) curve, so the annotation and the
-  # points it annotates are on one scale; the raw value travels alongside for the overlay.
-  # PER HORIZON, named by horizon. This was a scalar computed at h == 1 and handed to both
-  # panels, so FigR1_reliability_h2 would have printed h=1's calibration-in-the-large against
-  # h=2 data (1.32/2.03 where the truth is 1.55/2.36). make_review_figures()'s .cal_for()
-  # already reads a horizon-named vector.
-  .cil <- function(col) {
-    if (is.null(eval_tbl) || is.null(best_bayes_method) || !col %in% names(eval_tbl))
-      return(NULL)
-    stats::setNames(vapply(LFO_HORIZONS, function(h) {
-      v <- eval_tbl[[col]][eval_tbl$method == best_bayes_method & eval_tbl$horizon == h]
-      if (length(v)) as.numeric(v[1]) else NA_real_
-    }, numeric(1)), as.character(LFO_HORIZONS))
-  }
-  .cal_raw <- .cil("calibration_in_large")
-  # Fall back to the raw value PER HORIZON where the recalibrated one is unavailable.
-  .cal     <- local({
-    v <- .cil("calibration_in_large_recal")
-    if (is.null(v)) .cal_raw
-    else { bad <- !is.finite(v); if (any(bad) && !is.null(.cal_raw)) v[bad] <- .cal_raw[bad]; v }
-  })
+# Render the review-response figures (prospective ranks, held-out optimism) in the
+# key_outputs house style, from the CSVs just written (§3.4/2.2). The calibration figure is
+# NOT here: FigureS7_calibration is built by make_si_model_figures.R, which recomputes the
+# reliability curve from the LFO frame with the same estimator and RELIABILITY_* constants as the
+# tables written above, so that the per-round panels and the pooled diagram stay in one figure.
+tryCatch(
   make_review_figures(OUT_DIAGNOSTICS,
                       file.path(OUT_DIR, "key_outputs", "manuscript_figures", "panels"),
-                      cal_in_large = .cal, cal_in_large_raw = .cal_raw,
-                      top_k = 15L, horizons = LFO_HORIZONS)
-}, error = function(e) warning("review figures: ", e$message))
+                      top_k = 15L),
+  error = function(e) warning("review figures: ", e$message))
 
 # Curated display set for the (otherwise cluttered) multi-model figures: the featured
 # model, the best few Bayesian variants, both Bayesian ensembles and the three structural
@@ -1273,7 +1813,10 @@ tryCatch({
 eval_display <- eval_tbl
 if (!is.null(eval_tbl)) {
   top_bayes <- {
-    .tb <- eval_tbl %>% dplyr::filter(horizon == 1, grepl("^Bayes", method)) %>%
+    # Candidates only: no sensitivity arm and no time-varying form other than the featured one
+    # (they are refits of one specification; FigureS8 / FigureS9 compare them).
+    .tb <- eval_tbl %>% dplyr::filter(horizon == 1, grepl("^Bayes", method), !grepl("-ens-", method),
+                                      !grepl(INVASION_SELECTION_EXCLUDE, method)) %>%
       dplyr::arrange(dplyr::desc(auc_pr_skill)) %>% dplyr::pull(method)
     unique(c(head(.tb, 6L), "Bayes-ens-mean", "Bayes-ens-median"))
   }
@@ -1297,6 +1840,9 @@ if (!is.null(lfo_results)) {
   zone_err <- tryCatch(zone_spatial_error(lfo_results, province_map, horizon = 1L,
                          method = best_method),
                        error = function(e) { warning("spatial-error: ", e$message); NULL })
+  # Each written only when its analysis succeeds: clear the previous run's first.
+  invisible(suppressWarnings(file.remove(file.path(OUT_DIAGNOSTICS, c("skill_over_time.csv",
+    "lead_time.csv", "zone_spatial_error.csv")))))
   if (!is.null(st_skill))
     readr::write_csv(st_skill, file.path(OUT_DIAGNOSTICS, "skill_over_time.csv"))
   if (!is.null(lead_tbl))
@@ -1326,12 +1872,12 @@ local({
   if (length(.stale_freq)) {
     message(sprintf("[cleanup] removing %d stale frequentist product(s) (that arm is retired): %s",
                     length(.stale_freq), paste(basename(.stale_freq), collapse = ", ")))
-    suppressWarnings(file.remove(.stale_freq))
+    invisible(suppressWarnings(file.remove(.stale_freq)))
   }
   # Same reasoning for risk_scores_current.rds: it was written by the frequentist branch and
   # was read unguarded downstream, so a leftover copy fails with an opaque pipe error instead
   # of saying the arm did not run.
-  suppressWarnings(file.remove(file.path(OUT_FORECASTS, "risk_scores_current.rds")))
+  invisible(suppressWarnings(file.remove(file.path(OUT_FORECASTS, "risk_scores_current.rds"))))
 })
 # Q2 + Q3: 0-1 relative-risk indices (1 = highest) and the vulnerability-and-capacity-adjusted
 # preparedness-priority score (invasion risk x vulnerability). The BAYESIAN suite consumes this.
@@ -1413,7 +1959,6 @@ readr::write_csv(harmonised_confirmed,
 # featured model's risk_scores (and still referenced the retired p_infection_invasion column).
 # The Bayesian suite writes the equivalents: bayes_risk_scores_all_zones.csv and the priority
 # products in section 12.
-calibrated_forecasts <- NULL; calibration_gain <- NULL; fc_ensemble <- NULL
 
 # ---------------------------------------------------------------------------
 # 12b. Bayesian renewal suite (Task 6): posterior parameters + posterior
@@ -1423,17 +1968,30 @@ calibrated_forecasts <- NULL; calibration_gain <- NULL; fc_ensemble <- NULL
 # ---------------------------------------------------------------------------
 bayes_suite <- NULL; bayes_stack <- NULL; bayes_risk_scores <- NULL; bayes_stack_risk_scores <- NULL
 bayes_best_preds <- NULL   # featured single Bayesian model's current forecast (set inside the block)
+# The probability scale a deployed product is published on, from the factors the suite ACTUALLY
+# applied (.suite_delta_for(), the lookup fit_bayes_suite() uses), not from the switch: a model
+# with a factor for every horizon is "recalibrated-deployed", one with none "raw", and anything in
+# between -- a model with factors on some horizons only, or a product combining models with and
+# without one -- "mixed" (which the figure suites refuse rather than label).
+.prob_scale_of <- function(methods) {
+  .dl <- get0(".deploy_delta", ifnotfound = NULL)
+  .n  <- vapply(methods, function(m)
+    length(suppressWarnings(.suite_delta_for(.dl, m, LFO_HORIZONS))), integer(1))
+  if (length(.n) && all(.n == length(LFO_HORIZONS))) "recalibrated-deployed"
+  else if (!length(.n) || all(.n == 0L)) "raw" else "mixed"
+}
 if (requireNamespace("brms", quietly = TRUE)) {
   message("\n=== Step 12b: Bayesian renewal suite (brms) ===")
   # Deployment recalibration (16b), ON by default since 2026-09-11. Each suite model's
   # LIVE forecast is rescaled by its own pooled delta inside the posterior draws, so
   # rankings, top-K watch-lists and rank credible intervals are unchanged while absolute
   # probabilities move onto the observed frequency scale.
-  # NOTE the cascade is deliberately NOT affected: 33_cascade_eval.R calls
-  # predict_bayes_invasion() without a delta and cascade_fit_delta() derives its own
-  # factor from the RAW calibration_in_large column of invasion_evaluation.csv (which is
-  # computed from the LFO frame and is itself unaffected by this flag), so the correction
-  # is applied once in each layer and never compounded across them.
+  # NOTE the cascade is not affected by this flag: 33_cascade_eval.R calls
+  # predict_bayes_invasion() without a delta, and cascade_fit_delta() (30_projection_config.R)
+  # reads the SAME pooled delta from invasion_recalibration.csv (its first tier; the moment
+  # estimator on invasion_evaluation.csv is only the last fallback) and multiplies the
+  # cascade's own RAW hazard by it, so the correction is applied once in each layer and never
+  # compounded across them.
   .deploy_delta <- NULL
   if (isTRUE(INVASION_RECALIBRATE_DEPLOY)) {
     if (is.null(recal_tbl) || !nrow(recal_tbl)) {
@@ -1441,7 +1999,10 @@ if (requireNamespace("brms", quietly = TRUE)) {
               "(is INVASION_RECALIBRATE on, and did the LFO succeed?); the live Bayesian ",
               "forecast is NOT recalibrated.", call. = FALSE)
     } else {
-      .deploy_delta <- recal_tbl[, c("method", "horizon", "delta")]
+      # One factor per model (16b, 2026-10-14) plus its Gamma posterior, so the live draws
+      # carry delta's uncertainty (.suite_delta_for() -> .scale_invasion_draws()).
+      .deploy_delta <- recal_tbl[, intersect(c("method", "horizon", "delta", "gamma_shape",
+                                               "gamma_rate"), names(recal_tbl))]
       message(sprintf("[recal] DEPLOYING pooled delta to the live Bayesian suite (%d method x horizon rows).",
                       nrow(.deploy_delta)))
     }
@@ -1449,6 +2010,12 @@ if (requireNamespace("brms", quietly = TRUE)) {
   bayes_suite <- tryCatch(
     fit_bayes_suite(zone_week_nc, mobility_matrices, gt_pmfs, covariates, osrm_mat,
                     zones_all, affected_now, LFO_HORIZONS, iter = 2000L,
+                    # The cross-validated grid, the time-varying forms that were cross-validated
+                    # and appended (stage 2), and THIS run's generation-time arms: every model
+                    # with a back-test row gets a live forecast, and nothing else does.
+                    grid = c(BAYES_LFO_SPECS,
+                             Filter(function(g) g$label %in% .forms_cv, .form_specs),
+                             .gt_arm_specs),
                     delta_tbl = .deploy_delta, linelist = dat$ll,
                     analysis_date = ANALYSIS_DATE,
                     # Same rolling predictors the LFO uses, and the same as-of truncation:
@@ -1456,8 +2023,20 @@ if (requireNamespace("brms", quietly = TRUE)) {
                     # on the observation date, so the as-of fit is the one that describes it.
                     # See the note in fit_bayes_suite() for why this must not diverge.
                     trunc_delay = .trunc_asof),
-    error = function(e) { warning("bayes suite: ", e$message); NULL })
+    # FATAL, not a warning: without the suite the featured model has no live forecast, and the
+    # run would carry on to the figures with whatever the previous run left in reports/.
+    error = function(e) stop("[bayes] the deployed suite failed (", conditionMessage(e),
+                             "); the featured model has no live forecast.", call. = FALSE))
   if (!is.null(bayes_suite)) {
+    # Everything below is written only when its own producer succeeds, and its readers
+    # (FigureS13, the convergence figure, update_bayesian_report.R) carry no run stamp: the
+    # previous run's copies go first, so a failed producer leaves no file rather than last run's.
+    .bes_old <- file.path(OUT_REPORTS, "bayes_ensemble_risk_scores_all_zones.csv")
+    invisible(suppressWarnings(file.remove(c(
+      file.path(OUT_FORECASTS, c("bayes_stacking_weights.rds", "bayes_stacked_current.rds")),
+      file.path(OUT_DIR, "key_outputs", c("bayes_posterior_draws.csv", "bayes_beta_trajectory.csv")),
+      file.path(OUT_REPORTS, c("bayes_convergence_diagnostics.csv", "bayes_pairwise_import_force.csv")),
+      .bes_old, .raw_path(.bes_old)))))
     bayes_stack <- tryCatch(bayes_stacked_prediction(bayes_suite), error = function(e) NULL)
     # Raw twin of the stacked ensemble: the same weights and the same combination rule
     # applied to the uncorrected member summaries. Built from `preds_raw`, not by
@@ -1473,6 +2052,42 @@ if (requireNamespace("brms", quietly = TRUE)) {
       saveRDS(bayes_suite$weights, file.path(OUT_FORECASTS, "bayes_stacking_weights.rds"))
     if (!is.null(bayes_stack)) saveRDS(bayes_stack, file.path(OUT_FORECASTS, "bayes_stacked_current.rds"))
     readr::write_csv(bayes_suite$params, file.path(OUT_REPORTS, "bayes_parameters.csv"))
+    # FULL POSTERIOR DRAWS of every suite model's parameters, with each row carrying the PRIOR
+    # it was fitted under. bayes_parameters.csv keeps only the median and the 90% interval, so
+    # nothing on disk recorded the SHAPE of a posterior — the prior-versus-posterior figure
+    # (FigureS13) needs the draws themselves, and the fits are not persisted.
+    #
+    # WHY THIS IS WRITTEN BY THE PIPELINE AND NOT REBUILT BY THE FIGURE. Refitting the featured
+    # model outside a run reproduces the published posterior only if the training design is
+    # rebuilt EXACTLY, and that design is more fragile than it looks: the as-of truncation
+    # behind the rolling predictors is resolved by .trunc_fit_asof_cohort(), which returns NULL
+    # — silently, no warning — when linelist_observation_date() is not in scope. A rebuild that
+    # forgets to source 22_daily_reissue.R therefore fits every model with ROLLING PREDICTORS
+    # OFF, which leaves the forecast offsets bit-identical (they never use them) while moving
+    # the training design from 7,595 rows/39 events to 8,609/53, and with it every coefficient
+    # (the featured model's ccvi posterior median goes 2.39 -> 1.67). Two artefacts that
+    # disagree, and the only visible symptom is the number of rows in a log line. Writing the
+    # draws from the fits the suite actually made removes the second definition entirely.
+    # EVERY DRAW, NOT bayes_posterior_draws()'s 1500-draw default. The default thins 2,000 draws
+    # to 1,500 for the diagnostic ridgeline plot, where it is invisible. Here it is not: the
+    # published interval in bayes_parameters.csv is computed from ALL the draws, so a thinned
+    # artefact puts the figure's 90% interval up to ~2.5% away from the table's for the same
+    # parameter — two numbers for one quantity, differing for no reason a reader could guess.
+    # Keeping every draw makes them identical (verified: 0.000% deviation across the featured
+    # model's median and both endpoints). The cost is ~2,000 rows per parameter, a few MB.
+    .bayes_draws <- tryCatch(bayes_posterior_draws(bayes_suite$fits,
+                                                   max_draws = .Machine$integer.max),
+                             error = function(e) { warning("[bayes] posterior draws: ",
+                                                           conditionMessage(e)); NULL })
+    if (!is.null(.bayes_draws) && nrow(.bayes_draws)) {
+      readr::write_csv(.bayes_draws %>%
+          dplyr::mutate(hr = signif(hr, 8)),
+        file.path(OUT_DIR, "key_outputs", "bayes_posterior_draws.csv"))
+      message(sprintf("[bayes] posterior draws written: %d model(s) x %d parameter(s), %d draws each",
+                      dplyr::n_distinct(.bayes_draws$model),
+                      dplyr::n_distinct(paste(.bayes_draws$model, .bayes_draws$term)),
+                      max(.bayes_draws$.draw)))
+    }
     # POSTERIOR TRAJECTORY OF beta_t FOR EVERY SUITE MODEL (fixed-beta models included, as the
     # flat reference the time-varying variants are read against). This is the numeric content
     # behind the time-varying-beta figure, and the only artefact that records what the fitted
@@ -1503,13 +2118,14 @@ if (requireNamespace("brms", quietly = TRUE)) {
     # (AUC-PR skill + mean rank-of-truth + log-score), already selected above from eval_tbl. The loo
     # predictive-stacking WEIGHTS are still computed and saved — they define the loo-stacked ENSEMBLE
     # (bayes_ensemble_*) and the bayes_stacking_weights figure — but they NO LONGER pick the featured
-    # single model. Guard: only if the CV pick somehow lacks a current-forecast row do we fall back to
-    # the highest-weight model that does have one (then the stacked ensemble downstream).
-    if ((is.null(best_bayes_method) || !best_bayes_method %in% bayes_suite$preds$method) &&
-        !is.null(bayes_suite$weights) && length(bayes_suite$weights)) {
-      .valid_w <- bayes_suite$weights[names(bayes_suite$weights) %in% bayes_suite$preds$method]
-      if (length(.valid_w)) best_bayes_method <- names(.valid_w)[which.max(.valid_w)]
-    }
+    # single model.
+    # NO SUBSTITUTE: the featured model is the composite selection's pick. If its live fit
+    # failed, the run stops; it used to switch silently to the highest stacking-weight model
+    # while the log still called it "best CV composite".
+    if (is.null(best_bayes_method) || !best_bayes_method %in% bayes_suite$preds$method)
+      stop(sprintf(paste0("[bayes] the composite-selected model %s has no live forecast (its deployed ",
+                          "fit failed); refusing to feature a different model."),
+                   best_bayes_method %||% "NULL"), call. = FALSE)
     message(sprintf("[bayes] featured single model = %s (best CV composite: AUC-PR skill + mean rank + log-score)",
                     best_bayes_method %||% "n/a"))
     # Bayesian risk products come from this featured model; the loo-stacked posterior is
@@ -1531,7 +2147,13 @@ if (requireNamespace("brms", quietly = TRUE)) {
       # flag is on, it falls back to the fixed-GT prediction on any error.
       .fm_i <- which(vapply(bayes_suite$grid, function(g) identical(g$label, best_bayes_method), logical(1)))
       .fm   <- if (length(.fm_i)) bayes_suite$grid[[.fm_i[1]]] else NULL
-      if (!is.null(.fm) && isTRUE(get0("GT_MARGINALISE_FEATURED", ifnotfound = FALSE))) {
+      # predict_bayes_gt_marginal() refits with brms; a featured time-varying form (Stan engine)
+      # keeps its fixed-GT forecast, said loudly rather than refitted as a different model.
+      if (!is.null(.fm) && .spec_is_stan(.fm) && isTRUE(get0("GT_MARGINALISE_FEATURED", ifnotfound = FALSE)))
+        warning(sprintf(paste0("[gt-marginal] the featured model %s is a time-varying form; GT ",
+                               "marginalisation is implemented for brms fits only, so its ",
+                               "fixed-GT forecast is published."), best_bayes_method), call. = FALSE)
+      if (!is.null(.fm) && !.spec_is_stan(.fm) && isTRUE(get0("GT_MARGINALISE_FEATURED", ifnotfound = FALSE))) {
         .mp <- tryCatch({
           # The featured model's OWN deployment delta must travel with it. This branch
           # replaces the suite's prediction for the featured model, and the suite applied
@@ -1544,7 +2166,8 @@ if (requireNamespace("brms", quietly = TRUE)) {
                   affected_zones = affected_now, gt_prior = GT_PRIOR, link = .fm$link %||% "cloglog",
                   tv = .fm$tv %||% "none", scales = TRUE,
                   linelist = dat$ll, analysis_date = ANALYSIS_DATE,
-                  delta = .suite_delta_for(.deploy_delta, best_bayes_method, LFO_HORIZONS))
+                  delta = .suite_delta_for(.deploy_delta, best_bayes_method, LFO_HORIZONS),
+                  trunc_delay = .trunc_asof)
           if (!is.null(mp)) {
             mp$calibrated$method <- best_bayes_method
             mp$raw$method        <- best_bayes_method
@@ -1563,14 +2186,22 @@ if (requireNamespace("brms", quietly = TRUE)) {
         bayes_best_preds_raw <- if (!is.null(bayes_suite$preds_raw) && nrow(bayes_suite$preds_raw))
           bayes_suite$preds_raw %>% dplyr::filter(method == best_bayes_method) else NULL
       }
-    } else if (!is.null(bayes_stack)) {
-      bayes_best_preds     <- bayes_stack                      # fallback
-      bayes_best_preds_raw <- bayes_stack_raw
+    } else {
+      # DEFENSIVE (unreachable while the NO-SUBSTITUTE stop above guards the same condition):
+      # publishing the stacked ensemble or anything else in the featured model's place would
+      # label every featured product, and model_selection.json, with a model that did not
+      # produce them.
+      stop(sprintf(paste0("[bayes] the featured model %s has no live forecast in the deployed ",
+                          "suite (its fit or forecast failed; see the warnings above)."),
+                   best_bayes_method), call. = FALSE)
     }
     if (!is.null(bayes_best_preds)) {
       bayes_risk_scores <- tryCatch({
         rs <- compute_risk_scores(bayes_best_preds, province_map)
         if (!is.null(vuln_index)) rs <- add_risk_indices(rs, vuln_index)
+        # The scale ACTUALLY applied, carried in memory too: the maps' legends read it
+        # (.risk_prob_scale(), 17_invasion_viz.R) rather than the deploy switch.
+        rs$prob_scale <- .prob_scale_of(best_bayes_method)
         rs
       }, error = function(e) { warning("bayes risk scores: ", e$message); NULL })
       if (!is.null(bayes_risk_scores)) {
@@ -1578,7 +2209,7 @@ if (requireNamespace("brms", quietly = TRUE)) {
         # Full per-zone Bayesian invasion probabilities + risk scores (all zones) to CSV,
         # on the DEPLOYED (recalibrated) scale.
         .brs_path <- file.path(OUT_REPORTS, "bayes_risk_scores_all_zones.csv")
-        tryCatch(.write_risk_csv(bayes_risk_scores, .brs_path),
+        tryCatch(.write_risk_csv(bayes_risk_scores, .brs_path, prob_scale = .prob_scale_of(best_bayes_method)),
                  error = function(e) warning("bayes risk CSV: ", e$message))
         # Uncorrected twin, same basename, under reports/raw/. Built through the SAME
         # risk-score machinery so the two files differ only in the probability scale and in
@@ -1604,10 +2235,24 @@ if (requireNamespace("brms", quietly = TRUE)) {
           .beta_med <- if (!is.null(.pr)) {
             v <- .pr$hr[.pr$model == best_bayes_method & .pr$is_intercept]; if (length(v)) v[1] else NA_real_
           } else NA_real_
+          # A featured RW1 form: exp(b0) is the level BEFORE the first training week, so the
+          # decomposition uses the posterior-median import coefficient of the first FORECAST week
+          # (the trajectory the forecast itself uses), covariates at their mean.
+          if (!is.null(.fm) && .spec_is_stan(.fm) && isTRUE(.fm$use_rw)) {
+            .bt <- bayes_suite$beta_traj
+            .bt <- if (is.null(.bt)) NULL else .bt[.bt$model == best_bayes_method & .bt$is_forecast, , drop = FALSE]
+            .beta_med <- if (!is.null(.bt) && nrow(.bt)) .bt$beta[which.min(.bt$week)] else NA_real_
+          }
           if (!is.null(.fm) && is.finite(.beta_med)) {
-            if (length(.fm$cov))
-              warning(sprintf("[bayes] pairwise FOI: featured model %s carries covariates; pairwise decomposition uses the intercept-only posterior-median beta (per-zone covariate modulation omitted).",
-                              best_bayes_method))
+            if (length(.fm$cov) || isTRUE(.fm$use_frailty))
+              warning(sprintf(paste0("[bayes] pairwise FOI: featured model %s carries %s; the pairwise ",
+                                     "decomposition uses one posterior-median beta for every ",
+                                     "destination, so its absolute `foi` omits the per-zone ",
+                                     "modulation (share_of_dest is unaffected)."),
+                              best_bayes_method,
+                              paste(c(if (length(.fm$cov)) "covariates",
+                                      if (isTRUE(.fm$use_frailty)) "a zone frailty"),
+                                    collapse = " and ")), call. = FALSE)
             pw <- bayes_pairwise_import_force(
               zone_week_nc, mobility_matrices, gt_pmfs, zones_all,
               mob = .fm$mob, gt = .fm$gt, beta_med = .beta_med, horizons = LFO_HORIZONS,
@@ -1618,6 +2263,13 @@ if (requireNamespace("brms", quietly = TRUE)) {
             readr::write_csv(pw, file.path(OUT_REPORTS, "bayes_pairwise_import_force.csv"))
             message(sprintf("[bayes] wrote bayes_pairwise_import_force.csv: %d directed pairs from %s (beta_med=%.3f)",
                             nrow(pw), best_bayes_method, .beta_med))
+          } else {
+            # Not computable this run: say so, and do not leave the previous run's table behind.
+            invisible(suppressWarnings(file.remove(file.path(OUT_REPORTS, "bayes_pairwise_import_force.csv"))))
+            warning(sprintf(paste0("[bayes] pairwise FOI not computed: no %s for the featured model %s; ",
+                                   "bayes_pairwise_import_force.csv removed."),
+                            if (is.null(.fm)) "grid spec" else "posterior-median import coefficient",
+                            best_bayes_method), call. = FALSE)
           }
         }, error = function(e) warning("bayes pairwise import-force CSV: ", e$message))
       }
@@ -1629,11 +2281,13 @@ if (requireNamespace("brms", quietly = TRUE)) {
       bayes_stack_risk_scores <- tryCatch({
         rs <- compute_risk_scores(bayes_stack, province_map)
         if (!is.null(vuln_index)) rs <- add_risk_indices(rs, vuln_index)
+        rs$prob_scale <- .prob_scale_of(bayes_suite$stack_members)
         rs
       }, error = function(e) NULL)
       if (!is.null(bayes_stack_risk_scores)) {
         .bes_path <- file.path(OUT_REPORTS, "bayes_ensemble_risk_scores_all_zones.csv")
-        tryCatch(.write_risk_csv(bayes_stack_risk_scores, .bes_path),
+        tryCatch(.write_risk_csv(bayes_stack_risk_scores, .bes_path,
+                                 prob_scale = .prob_scale_of(bayes_suite$stack_members)),
                  error = function(e) warning("bayes ensemble risk CSV: ", e$message))
         if (!is.null(bayes_stack_raw)) tryCatch({
           .es_raw <- compute_risk_scores(bayes_stack_raw, province_map)
@@ -1651,24 +2305,20 @@ if (requireNamespace("brms", quietly = TRUE)) {
 }
 
 # ---------------------------------------------------------------------------
-# 12c. Daily re-issue — anchor ALL current forecasts to rolling day-windows FROM the
-# analysis date (P(first case within 7 / 14 days of ANALYSIS_DATE)) and upsert into the
-# accumulating daily series. ONE combined call (frequentist current forecast + featured
-# Bayesian model + Bayesian stacked ensemble): the persistence keys on forecast_date, so a
-# single call is correct where two would clobber. Frequentist rows carry a proper current-week
-# rate (mu_wk0); the Bayesian rows have none, so the anchoring uses the documented continuity
-# fallback (current-week rate = next-week rate) — the same treatment as the frequentist
-# comparators that lack mu_wk0. In a Bayesian-only run this is how the daily operational product
-# is produced; if no forecast at all is available (no frequentist models AND no Bayesian suite)
-# it is simply skipped.
+# 12c. Daily re-issue — re-express the featured Bayesian forecast (and the stacked ensemble
+# when it is a distinct object) as windows measured from the analysis date, P(first invasion
+# within 7 / 14 days of ANALYSIS_DATE) (issue_daily_reissue(), 22_daily_reissue.R). When the
+# analysis date is the forecast origin (a == 6) these are the model's own h=1 / h=2 windows and
+# its p passes through unchanged. Nothing is persisted and nothing reads the result; skipped
+# when no forecast exists.
 # ---------------------------------------------------------------------------
 .reissue_fc <- dplyr::bind_rows(
   if (!is.null(bayes_best_preds)) bayes_best_preds else NULL,
   # Only add the stacked ensemble when it is a DISTINCT object from the featured single
-  # model. best_bayes_method can fall back to the stack (line ~781), making bayes_best_preds
-  # the SAME object as bayes_stack; binding both would duplicate every (method, health_zone,
-  # horizon) key, which makes anchor_windows_from_analysis_date()'s pivot_wider emit list-
-  # columns and abort — silently dropping the ENTIRE daily re-issue via its non-fatal tryCatch.
+  # model. The featured forecast is never the stack now (a featured model without a live
+  # forecast stops the run, step 12b), so this guard is defensive: binding the same object
+  # twice would duplicate every (method, health_zone, horizon) key, which makes
+  # anchor_windows_from_analysis_date()'s pivot_wider emit list-columns and abort.
   if (!is.null(bayes_stack) && !identical(bayes_best_preds, bayes_stack)) bayes_stack else NULL)
 # Defensive net: guarantee unique (method, health_zone, horizon) keys so the anchor's
 # pivot_wider can never collapse duplicates into list-columns regardless of upstream overlap.
@@ -1692,7 +2342,7 @@ source(file.path(ST_DIR, "17_invasion_viz.R"))
 # Persist the in-memory LFO object so the detail visualisations (and any ad-hoc
 # re-plotting) can run without repeating the expensive LFO step. fc_all_current.rds held
 # the frequentist current-week forecast; remove any copy an older run left behind.
-suppressWarnings(file.remove(file.path(OUT_FORECASTS, "fc_all_current.rds")))
+invisible(suppressWarnings(file.remove(file.path(OUT_FORECASTS, "fc_all_current.rds"))))
 if (!is.null(lfo_results)) saveRDS(lfo_results, file.path(OUT_FORECASTS, "lfo_results.rds"))
 
 # Remove figures/tables from the superseded pre-rebuild pipeline so the outputs
@@ -1710,7 +2360,7 @@ if (!is.null(lfo_results)) saveRDS(lfo_results, file.path(OUT_FORECASTS, "lfo_re
   file.path(OUT_REPORTS, c("methodology_report.md", "summary_dashboard.pdf",
     "table_best_per_metric.csv", "table_model_comparison.csv",
     "table_outbreak_summary.csv")))
-suppressWarnings(file.remove(.stale[file.exists(.stale)]))
+invisible(suppressWarnings(file.remove(.stale[file.exists(.stale)])))
 
 shapefile <- if (file.exists(SHAPEFILE_PATH))
   tryCatch(sf::st_read(SHAPEFILE_PATH, quiet = TRUE), error = function(e) NULL) else NULL
@@ -1733,7 +2383,11 @@ vwrap(plot_rt(Rt_primary, rt_all = Rt_national_list, save = TRUE))
 # Use the OUTBREAK training start, not min(all_weeks): the zone-week grid carries
 # pre-outbreak historical weeks (all structurally zero for this outbreak), so the
 # epidemiologically meaningful fit window begins at the outbreak start.
-.fit_start <- suppressWarnings(min(zone_week_outbreak$week_start, na.rm = TRUE))
+# The FIRST DAY WITH DATA (the outbreak start; date_index is floored at it), not the start of
+# the first weekly bucket, which can precede it by up to six days (25 Apr on a Saturday-anchored
+# grid) and is not a date any case carries. The invasion report states the same date.
+.fit_start <- suppressWarnings(max(as.Date(OUTBREAK_START),
+                                   min(zone_week_outbreak$week_start, na.rm = TRUE)))
 if (!is.finite(.fit_start)) .fit_start <- OUTBREAK_START
 window_txt <- .window_caption(.fit_start, training_cutoff, LFO_HORIZONS)
 
@@ -1742,60 +2396,62 @@ window_txt <- .window_caption(.fit_start, training_cutoff, LFO_HORIZONS)
 # invasion maps (national + Ituri zoom, per horizon), per-province invasion maps
 # (Ituri/Nord-Kivu/Haut-Uele), prob x vulnerability choropleths (national + provinces),
 # ranked at-risk bars, and the preparedness-priority scatter/bars/map. No arbitrary
-# model picks; every figure's title names the exact model that produced it, and the
+# model picks; every renderer is passed the exact model that produced its data, and the
 # Bayesian set is file-prefixed "bayes_".
 render_map_suite <- function(rs, model_label, file_prefix = "") {
   if (is.null(rs)) return(invisible(NULL))
   pf <- function(b) if (nzchar(file_prefix)) paste0(file_prefix, b) else b
   # EVERY map/decision product is produced at BOTH horizons (1- and 2-week ahead).
   for (h in LFO_HORIZONS) {
+    # THIS horizon's window: a 1-week map must not carry the 2-week prediction window.
+    wt <- .window_caption(.fit_start, training_cutoff, h)
     vwrap(plot_invasion_risk_map(rs, horizon = h, method_label = model_label,
-            shapefile = shapefile, window_txt = window_txt, save = TRUE,
+            shapefile = shapefile, window_txt = wt, save = TRUE,
             file = pf("invasion_risk_map")))
     # Invasion-probability RANKING map (1 = highest risk) — robust operational targeting view,
     # complementing the absolute-probability map above. Produced per model at both horizons, as
     # the Ituri+national pair AND a standalone national-only panel.
     vwrap(plot_invasion_rank_map(rs, horizon = h, method_label = model_label,
-            shapefile = shapefile, window_txt = window_txt, save = TRUE,
+            shapefile = shapefile, window_txt = wt, save = TRUE,
             file = pf("invasion_rank_map"), extent = "both"))
     # show_title = FALSE: bayes_invasion_rank_map_national is a published panel whose
     # caption lives in the manuscript text (2026-09-17 streamlining brief).
     vwrap(plot_invasion_rank_map(rs, horizon = h, method_label = model_label,
-            shapefile = shapefile, window_txt = window_txt, save = TRUE,
+            shapefile = shapefile, window_txt = wt, save = TRUE,
             file = pf("invasion_rank_map"), extent = "national", show_title = FALSE))
     # #2 — probability WITH uncertainty (produced when p_lo/p_hi are present: the
     # Bayesian posterior CrI, or the frequentist ensemble spread attached below).
     # Both the Ituri zoom AND the whole-DRC national extent (#4, side-by-side prob+uncertainty).
     vwrap(plot_invasion_uncertainty_map(rs, shapefile = shapefile, horizon = h,
-            model_label = model_label, window_txt = window_txt, save = TRUE,
+            model_label = model_label, window_txt = wt, save = TRUE,
             file = pf("invasion_uncertainty_map"), extent = "ituri"))
     vwrap(plot_invasion_uncertainty_map(rs, shapefile = shapefile, horizon = h,
-            model_label = model_label, window_txt = window_txt, save = TRUE,
+            model_label = model_label, window_txt = wt, save = TRUE,
             file = pf("invasion_uncertainty_map_national"), extent = "national"))
     vwrap(plot_province_risk_maps(rs, shapefile = shapefile, horizon = h,
-            method_label = model_label, window_txt = window_txt, save = TRUE,
+            method_label = model_label, window_txt = wt, save = TRUE,
             file = pf("invasion_risk_map")))
     vwrap(plot_risk_scores_bars(rs, horizon = h, save = TRUE,
             file = pf("risk_scores_bars"), model_label = model_label))
     if ("V" %in% names(rs)) {
       # show_title = FALSE: published panel, caption in the manuscript text.
       vwrap(plot_prob_vuln_choropleth(rs, shapefile = shapefile, horizon = h,
-              province_zoom = NULL, window_txt = window_txt, save = TRUE,
+              province_zoom = NULL, window_txt = wt, save = TRUE,
               file = pf(sprintf("prob_vuln_choropleth_national_h%d", h)),
               model_label = model_label, show_title = FALSE))
       for (prov in PROVINCES_OF_INTEREST)
         vwrap(plot_prob_vuln_choropleth(rs, shapefile = shapefile, horizon = h,
-                province_zoom = prov, window_txt = window_txt, save = TRUE,
+                province_zoom = prov, window_txt = wt, save = TRUE,
                 file = pf(sprintf("prob_vuln_choropleth_%s_h%d", .prov_suffix(prov), h)),
                 model_label = model_label))
     }
     if ("priority" %in% names(rs)) {
       # show_title = FALSE: published panel, caption in the manuscript text.
-      vwrap(plot_priority_scatter(rs, horizon = h, window_txt = window_txt, save = TRUE,
+      vwrap(plot_priority_scatter(rs, horizon = h, window_txt = wt, save = TRUE,
               file = pf("priority_scatter"), model_label = model_label, show_title = FALSE))
       vwrap(plot_priority_bars(rs, horizon = h, save = TRUE,
               file = pf("priority_bars"), model_label = model_label))
-      vwrap(plot_priority_map(rs, shapefile = shapefile, horizon = h, window_txt = window_txt,
+      vwrap(plot_priority_map(rs, shapefile = shapefile, horizon = h, window_txt = wt,
               save = TRUE, file = pf("priority_map"), model_label = model_label))
     }
   }
@@ -1850,6 +2506,9 @@ if (!is.null(lfo_results)) {
   # recall_at_K from that table is quoting one estimand, not two hand copies of it.
   # NOTE lfo_cv_results.rds (the LFO cache, written before the append) stays model-only, which
   # is why REUSE_CACHED_LFO re-appends the baselines rather than serving them from cache.
+  # The previous run's table goes first: Figure 2A and the report read it with no run stamp, and
+  # a failure below would otherwise leave last run's curves under this run's figures.
+  invisible(suppressWarnings(file.remove(file.path(OUT_DIR, "key_outputs", "detection_curves.csv"))))
   tryCatch({
     .dc_methods <- unique(c(best_bayes_method, .bl_ok,
                             intersect(c("Gravity-B4", "Distance-B1", "Adjacency-B7",
@@ -1926,8 +2585,15 @@ if (!is.null(lfo_results)) {
 
 # Q5 — spatiotemporal evaluation figures: skill-over-time (all models) + lead-time.
 if (!is.null(st_skill)) {
-  vwrap(plot_skill_over_time(st_skill, metric = "auc_pr_skill", save = TRUE))
-  vwrap(plot_skill_over_time(st_skill, metric = "hit_at_k", save = TRUE))
+  vwrap(plot_skill_over_time(st_skill, metric = "auc_pr_skill", featured = best_bayes_method,
+                             save = TRUE))
+  vwrap(plot_skill_over_time(st_skill, metric = "hit_at_k", featured = best_bayes_method,
+                             save = TRUE))
+  # The same rounds taken apart into raw AUC-PR, the prevalence floor, and the lift --
+  # drawn for the FEATURED Bayesian model, so it reads against the per-model diagnostics
+  # below rather than against the field above. (method is required; the helper no longer
+  # falls back.)
+  vwrap(plot_aucpr_decomposition(st_skill, method = best_bayes_method, save = TRUE))
 }
 if (!is.null(lead_tbl)) vwrap(plot_lead_time(lead_tbl, save = TRUE))
 
@@ -1942,34 +2608,44 @@ if (!is.null(lead_tbl)) vwrap(plot_lead_time(lead_tbl, save = TRUE))
 if (!is.null(bayes_suite)) {
   vwrap(plot_bayes_parameters(bayes_suite$params, weights = bayes_suite$weights,
                               window_txt = window_txt, save = TRUE))
-  # Highlight the SKILL-SELECTED Bayesian model. If best_bayes_method is somehow invalid, fall
-  # back DATA-DRIVENLY to the highest loo-stacking-weight model that has predictions (then the
-  # first available) — never a hard-coded model name — so the figure always tracks the best fit.
-  .feat_bayes <- best_bayes_method
-  if (is.null(.feat_bayes) || !.feat_bayes %in% bayes_suite$preds$method) {
-    .wv <- bayes_suite$weights
-    .cand <- if (!is.null(.wv) && length(.wv))
-               intersect(names(sort(.wv, decreasing = TRUE)), bayes_suite$preds$method) else character(0)
-    .feat_bayes <- if (length(.cand)) .cand[1] else unique(bayes_suite$preds$method)[1]
-  }
+  # Highlight the SKILL-SELECTED Bayesian model (the composite selection's pick).
+  .feat_bayes <- best_bayes_method   # checked above: it has a live forecast
 
   # Task 2 — FULL posterior distributions of the Bayesian parameters (densities, not just
-  # median + CrI), extracted from the fitted models.
-  vwrap(plot_bayes_posterior_densities(bayes_posterior_draws(bayes_suite$fits),
+  # median + CrI), extracted from the fitted models. Reuses the draws already extracted for
+  # bayes_posterior_draws.csv above rather than walking every fit a second time, so the
+  # diagnostic PDF and the published artefact cannot be drawn from different extractions.
+  vwrap(plot_bayes_posterior_densities(get0(".bayes_draws", ifnotfound = NULL) %||%
+                                         bayes_posterior_draws(bayes_suite$fits),
           window_txt = window_txt, save = TRUE))
   # Tasks 2 & 3 — REFIT-based analyses for the featured model (gated; each adds ~10 brms fits):
   #   (2) a loo-predictive POSTERIOR over the generation-time mean (the GT is otherwise a fixed
   #       assumption), and (3) a SENSITIVITY of beta0 to the two-stage nowcast INPUT (raw vs
   #       epinowcast vs fast delay-CDF training counts) — a pragmatic check on whether feeding
   #       nowcast-corrected counts as a fixed second stage drives the inference.
-  if (isTRUE(get0("BAYES_PROFILE_ANALYSES", ifnotfound = TRUE))) {
-    .feat_spec <- Filter(function(g) g$label == .feat_bayes, bayes_default_grid(mobility_matrices))
-    .feat_spec <- if (length(.feat_spec)) .feat_spec[[1]]
-                  else list(mob = "M8", gt = "medium", cov = character(0), link = "cloglog")
+  # THE FEATURED MODEL'S OWN SPECIFICATION, never a stand-in (this used to fall back to a typed
+  # M8 spec, labelled with the featured model). Both analyses refit with brms, so a featured
+  # time-varying form is analysed at its fixed-beta specification -- the same kernel, generation
+  # time and covariates -- and the figures say so. No spec -> no analysis, and the old files go.
+  .feat_spec <- bayes_spec_for_label(.feat_bayes, c(BAYES_LFO_SPECS, .form_specs))
+  .prof_label <- if (!is.null(.feat_spec) && .spec_is_stan(.feat_spec))
+    sprintf("%s (fixed-beta specification of the featured form)", .feat_spec$base_label %||% .feat_bayes)
+    else .feat_bayes
+  if (isTRUE(get0("BAYES_PROFILE_ANALYSES", ifnotfound = TRUE)) && is.null(.feat_spec)) {
+    warning(sprintf("[bayes-profile] the featured model %s is not a spec of this run's grid; the GT posterior and nowcast sensitivity are NOT run.",
+                    .feat_bayes), call. = FALSE)
+    invisible(suppressWarnings(file.remove(file.path(OUT_FORECASTS, c("bayes_gt_posterior.csv",
+                                                                      "bayes_nowcast_sensitivity.csv")))))
+  }
+  if (isTRUE(get0("BAYES_PROFILE_ANALYSES", ifnotfound = TRUE)) && !is.null(.feat_spec)) {
+    # Each is written only when its fit succeeds: clear the previous run's first.
+    invisible(suppressWarnings(file.remove(file.path(OUT_FORECASTS, c("bayes_gt_posterior.csv",
+                                                                      "bayes_nowcast_sensitivity.csv")))))
     .gtp <- tryCatch(bayes_gt_posterior(zone_week_nc, mobility_matrices, gt_pmfs, covariates,
               osrm_mat, zones_all, mob = .feat_spec$mob, cov = .feat_spec$cov,
-              link = .feat_spec$link %||% "cloglog"), error = function(e) { warning("bayes GT posterior: ", conditionMessage(e)); NULL })
-    vwrap(plot_bayes_gt_posterior(.gtp, model_label = .feat_bayes, window_txt = window_txt))
+              link = .feat_spec$link %||% "cloglog", linelist = dat$ll, trunc_delay = .trunc_asof),
+              error = function(e) { warning("bayes GT posterior: ", conditionMessage(e)); NULL })
+    vwrap(plot_bayes_gt_posterior(.gtp, model_label = .prof_label, window_txt = window_txt))
     if (!is.null(.gtp)) readr::write_csv(.gtp, file.path(OUT_FORECASTS, "bayes_gt_posterior.csv"))
     # THE ARMS MUST BE DIFFERENT ESTIMATORS. Since the deployed nowcast became
     # apply_nowcast_correction() (step 4), `zone_week_nc` IS the deterministic arm — labelling
@@ -1981,7 +2657,8 @@ if (!is.null(bayes_suite)) {
     .zw_variants <- list(raw = .zw_raw, deterministic = zone_week_nc)
     .zw_enw <- tryCatch(
       nowcast_zone_week_epinowcast(zone_week = dat$zone_week, linelist = dat$ll,
-                                   analysis_date = ANALYSIS_DATE, outbreak_start = OUTBREAK_START),
+                                   analysis_date = ANALYSIS_DATE, outbreak_start = OUTBREAK_START,
+                                   fallback_delay = .trunc_deployed),
       error = function(e) { message("[bayes-sens] epinowcast arm unavailable (non-fatal): ",
                                     conditionMessage(e)); NULL })
     if (!is.null(.zw_enw) &&
@@ -1994,16 +2671,17 @@ if (!is.null(bayes_suite)) {
                osrm_mat, zones_all, mob = .feat_spec$mob, gt = .feat_spec$gt,
                cov = .feat_spec$cov, link = .feat_spec$link %||% "cloglog"),
                error = function(e) { warning("bayes nowcast sensitivity: ", conditionMessage(e)); NULL })
-    vwrap(plot_bayes_nowcast_sensitivity(.sens, model_label = .feat_bayes, window_txt = window_txt))
+    vwrap(plot_bayes_nowcast_sensitivity(.sens, model_label = .prof_label, window_txt = window_txt))
     if (!is.null(.sens)) readr::write_csv(.sens, file.path(OUT_FORECASTS, "bayes_nowcast_sensitivity.csv"))
   }
   for (hh in LFO_HORIZONS) {
+    .wt_h <- .window_caption(.fit_start, training_cutoff, hh)   # THIS horizon's window
     vwrap(plot_bayes_invasion_uncertainty(bayes_suite$preds, province_map = province_map,
-            horizon = hh, model = .feat_bayes, window_txt = window_txt, save = TRUE,
+            horizon = hh, model = .feat_bayes, window_txt = .wt_h, save = TRUE,
             file = "bayes_invasion_uncertainty"))
     if (!is.null(bayes_stack))
       vwrap(plot_bayes_invasion_uncertainty(bayes_stack, province_map = province_map,
-              horizon = hh, model = NULL, window_txt = window_txt, save = TRUE,
+              horizon = hh, model = NULL, window_txt = .wt_h, save = TRUE,
               file = "bayes_stacked_invasion_uncertainty"))
   }
   vwrap(plot_bayes_stacking(bayes_suite$weights, save = TRUE))
@@ -2101,7 +2779,11 @@ if (!is.null(lfo_results)) {
   # and the Bayesian ensemble — so the top-K precision figure contrasts DIFFERENT Bayesian
   # models rather than a single featured one against the frequentist pack.
   .bayes_skill_methods <- if (!is.null(eval_tbl) && any(grepl("^Bayes", eval_tbl$method))) {
-    .bt <- eval_tbl %>% dplyr::filter(horizon == 1L, grepl("^Bayes", method)) %>%
+    # The CANDIDATES only (no GT arms, no non-featured forms, no ensembles: those enter below by
+    # name), as top_bayes and plot_skill_over_time() do.
+    .bt <- eval_tbl %>% dplyr::filter(horizon == 1L, grepl("^Bayes", method),
+                                      !grepl(INVASION_SELECTION_EXCLUDE, method),
+                                      !grepl("-ens-", method)) %>%
       dplyr::arrange(dplyr::desc(auc_pr_skill)) %>% dplyr::pull(method)
     intersect(unique(c(head(.bt, 6L), best_bayes_method,
                        "Bayes-ens-mean", "Bayes-ens-median")),
@@ -2131,10 +2813,12 @@ if (!is.null(lfo_results)) {
     vwrap(plot_paper_figure3(.fig3_lfo, .fig3_methods, horizon = hh, save = TRUE,
             support_cells = tryCatch(invasion_common_cells(lfo_results, hh),
                                      error = function(e) NULL)))
+  invisible(suppressWarnings(file.remove(file.path(OUT_DIAGNOSTICS, "invasion_balanced_skill.csv"))))
   balance_tbl <- tryCatch(
-    purrr::map_dfr(LFO_HORIZONS, function(hh)
+    purrr::map_dfr(LFO_HORIZONS, function(hh) {
+      .sc <- tryCatch(invasion_common_cells(lfo_results, hh), error = function(e) NULL)
       purrr::map_dfr(unique(lfo_results$method),
-                     function(m) invasion_balance_metrics(lfo_results, m, hh))),
+                     function(m) invasion_balance_metrics(lfo_results, m, hh, support_cells = .sc)) }),
     error = function(e) NULL)
   if (!is.null(balance_tbl) && nrow(balance_tbl))
     readr::write_csv(balance_tbl, file.path(OUT_DIAGNOSTICS, "invasion_balanced_skill.csv"))
@@ -2151,35 +2835,37 @@ if (!is.null(lfo_results)) {
   # were discarded. The Bayesian beta trace below IS retained.
 
   # Bayesian analogues of params-over-time + beta-over-folds: refit the featured
-  # Bayesian model's mobility kernel (+ geo covariates, so covariate-HR traces exist)
+  # Bayesian model's own specification (kernel, covariates -- possibly none -- and form)
   # at each fold cutoff and plot the POSTERIOR covariate HRs and import coefficient
   # beta0 over folds, with proper 90% CrI (bayes_params_over_time / bayes_beta_over_folds).
   if (!is.null(best_bayes_method) && requireNamespace("brms", quietly = TRUE)) {
-    # Keep every kernel token (-dist, -fill, -split) so a featured kernel such as
-    # Bayes-M13-dist-fill-geo is refit as M13-dist-fill, not the travel-time M13 — the
-    # over-time trace must be faithful to the featured model's actual mobility kernel.
-    # The local regex used here dropped -fill/-split, which is ALWAYS wrong under the
-    # source-cell-fill default; mobility_kernel_from_method() (00_config.R) is the shared
-    # parser used by the cascade too.
-    .bmob <- mobility_kernel_from_method(best_bayes_method)
-    if (is.na(.bmob) || !.bmob %in% names(mobility_matrices)) {
-      .fallback <- if (MOBILITY_PRIMARY %in% names(mobility_matrices)) MOBILITY_PRIMARY
-                   else names(mobility_matrices)[1]
-      if (!is.na(.bmob))
-        warning(sprintf("params-over-time: kernel %s not built; tracing %s instead.",
-                        .bmob, .fallback), call. = FALSE)
-      .bmob <- .fallback
+    # THE FEATURED MODEL'S OWN SPECIFICATION -- kernel, generation time, covariates, link -- read
+    # from this run's grid entry, so each trace point is a refit of the model it is labelled
+    # with (compute_bayes_params_over_time() reproduces the back-test's data, design and fit).
+    # These used to be a parsed kernel with the generation time hard-coded to "medium" and the
+    # covariates to the geo set, whatever the featured model was.
+    # A featured time-varying form resolves to its own spec and is refitted by the Stan engine.
+    .fs <- bayes_spec_for_label(best_bayes_method, c(BAYES_LFO_SPECS, .form_specs))
+    bpot <- NULL
+    if (is.null(.fs) || !identical(.fs$tv %||% "none", "none")) {
+      warning(sprintf(paste0("params-over-time: %s is not a model of this run's grid, ",
+                             "so its beta / hazard-ratio traces are NOT drawn."),
+                      best_bayes_method), call. = FALSE)
+    } else {
+      bpot <- tryCatch(compute_bayes_params_over_time(zone_week_outbreak, .fold_cutoffs,
+                mobility_matrices, gt_pmfs, covariates, osrm_mat, zones_all,
+                mob = .fs$mob, gt = .fs$gt, cov_spec = .fs$cov, link = .fs$link %||% "cloglog",
+                # The sampling effort of the back-test fits (600 for brms, TV_FORM_ITER for a
+                # form), so a trace point and the round it mirrors are the same fit.
+                iter = 600L, iter_stan = TV_FORM_ITER, nowcast_fn = apply_nowcast_correction,
+                linelist = dat$ll, delay = .trunc_asof,
+                form = if (.spec_is_stan(.fs)) .fs else NULL),
+                error = function(e) { warning("bayes params-over-time: ", e$message); NULL })
     }
-    bpot <- tryCatch(compute_bayes_params_over_time(zone_week_outbreak, .fold_cutoffs,
-              mobility_matrices, gt_pmfs, covariates, osrm_mat, zones_all,
-              # ONE definition, from 00_config.R. This was a hard-coded copy of the retired
-              # 3-covariate geo set, so after the 2026-09-21 change the published beta0 trace
-              # would have described a covariate set no scored model used.
-              mob = .bmob, gt = "medium", cov_spec = get0("BAYES_GEO_COVARIATES",
-                                            ifnotfound = c("ccvi", "d_min")),
-              iter = 600L, nowcast_fn = apply_nowcast_correction, linelist = dat$ll,
-              delay = .trunc_asof),
-              error = function(e) { warning("bayes params-over-time: ", e$message); NULL })
+    # No trace this run: remove the previous run's tables so nothing redraws them.
+    if (is.null(bpot))
+      invisible(suppressWarnings(file.remove(file.path(OUT_DIR, "key_outputs",
+                                             c("bayes_params_over_time.csv", "bayes_beta_over_folds.csv")))))
     if (!is.null(bpot)) {
       # PUBLISH THE NUMBERS BEHIND THE RETAINED PANELS. bayes_params_over_time.pdf and
       # bayes_beta_over_folds.pdf are key_outputs deliverables carrying posterior hazard
@@ -2188,20 +2874,24 @@ if (!is.null(lfo_results)) {
       # these tables.
       tryCatch({
         .kd <- file.path(OUT_DIR, "key_outputs")
+        # Each table is written when this run has it and REMOVED otherwise (an intercept-only
+        # featured model has no hazard-ratio trace), so no file outlives the model it describes.
         if (!is.null(bpot$params) && nrow(bpot$params))
           readr::write_csv(bpot$params %>%
               dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ signif(.x, 12))),
             file.path(.kd, "bayes_params_over_time.csv"))
+        else invisible(suppressWarnings(file.remove(file.path(.kd, "bayes_params_over_time.csv"))))
         if (!is.null(bpot$beta) && nrow(bpot$beta))
           readr::write_csv(bpot$beta %>%
               dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ signif(.x, 12))),
             file.path(.kd, "bayes_beta_over_folds.csv"))
+        else invisible(suppressWarnings(file.remove(file.path(.kd, "bayes_beta_over_folds.csv"))))
         message("[over-time] published bayes_params_over_time.csv / bayes_beta_over_folds.csv")
       }, error = function(e)
         warning("[over-time] over-folds CSVs not written: ", conditionMessage(e), call. = FALSE))
       # show_title = FALSE: published panel, caption in the manuscript text.
       if (!is.null(bpot$params)) vwrap(plot_params_over_time(bpot$params, save = TRUE,
-              file = "bayes_params_over_time", model_label = sprintf("Bayesian: %s + geo", .bmob),
+              file = "bayes_params_over_time", model_label = sprintf("Bayesian: %s", best_bayes_method),
               show_title = FALSE))
       # Title-free, larger-font, PDF + 600-dpi PNG: this panel is used as a
       # standalone manuscript figure, so its caption lives in the text.
@@ -2227,7 +2917,8 @@ vwrap(write_invasion_report(
   primary_method = NULL,
   n_models = if (!is.null(lfo_results)) dplyr::n_distinct(lfo_results$method) else 0L,
   best_bayes_method = best_bayes_method,
-  bayes_weights = if (!is.null(bayes_suite)) bayes_suite$weights else NULL))
+  bayes_weights = if (!is.null(bayes_suite)) bayes_suite$weights else NULL,
+  prob_scale = .prob_scale_of(best_bayes_method)))
 
 # Q2/Q3 — document HOW models are selected and WHAT goes into the best model
 # (structure, mobility kernel, generation time, observation process, covariates,
@@ -2263,7 +2954,8 @@ local({
     "maps/bayes_prob_vuln_choropleth_national_h1.pdf",
     "diagnostics/bayes_discrimination_summary_h1.pdf",
     "diagnostics/bayes_lfo_forecast_vs_outcome_h1.pdf",
-    "reports/bayes_priority_scatter_h1.pdf")            # preparedness-priority scatter (Bayesian featured)
+    "reports/bayes_priority_scatter_h1.pdf",            # preparedness-priority scatter (Bayesian featured)
+    "diagnostics/delta_stability_h1.pdf")               # per-fold recalibration factor (16b)
   no_horizon <- c("reports/bayes_risk_scores_all_zones.csv",
                   "reports/harmonised_confirmed_cases.csv",
                   "diagnostics/invasion_recalibration.csv",
@@ -2271,6 +2963,7 @@ local({
                   # Retained figures that this block previously never gathered.
                   "diagnostics/rt_national.pdf",
                   "diagnostics/skill_over_time_auc_pr_skill.pdf",
+                  "diagnostics/aucpr_decomposition_by_horizon.pdf",
                   "diagnostics/bayes_beta_over_folds.pdf",
                   "diagnostics/bayes_params_over_time.pdf")
   wanted <- unique(c(as.vector(rbind(h1_files, sub("_h1\\.", "_h2.", h1_files))), no_horizon))
@@ -2309,7 +3002,7 @@ local({
       # Not produced by this run. Do NOT publish it, and clear any copy an earlier run left
       # in key_outputs/ so the bundle cannot present it as current.
       stale <- c(stale, basename(rel))
-      if (file.exists(dst)) suppressWarnings(file.remove(dst))
+      if (file.exists(dst)) invisible(suppressWarnings(file.remove(dst)))
     }
   }
   message(sprintf("[key_outputs] copied %d files -> %s", copied, key_dir))
@@ -2332,15 +3025,28 @@ local({
                "reports/raw/bayes_ensemble_risk_scores_all_zones.csv",
                sprintf("diagnostics/raw/forecast_reliability_h%d.csv", LFO_HORIZONS),
                sprintf("diagnostics/raw/forecast_count_calibration_h%d.csv", LFO_HORIZONS))
-  n_raw <- 0L
+  # The SAME freshness rule as the primary files: a raw twin not written by this run is not
+  # published, and any copy an earlier run left in key_outputs/raw/ is removed.
+  n_raw <- 0L; stale_raw <- character(0)
   for (rel in raw_src) {
     src <- file.path(OUT_DIR, rel)
-    if (file.exists(src)) {
+    dst <- file.path(raw_dir, basename(src))
+    if (!file.exists(src)) next
+    .fresh <- is.null(.t_run) ||
+              isTRUE(as.numeric(difftime(file.mtime(src), .t_run, units = "secs")) >= -2)
+    if (.fresh) {
       if (!dir.exists(raw_dir)) dir.create(raw_dir, recursive = TRUE, showWarnings = FALSE)
-      file.copy(src, file.path(raw_dir, basename(src)), overwrite = TRUE); n_raw <- n_raw + 1L
+      file.copy(src, dst, overwrite = TRUE); n_raw <- n_raw + 1L
+    } else {
+      stale_raw <- c(stale_raw, basename(rel))
+      if (file.exists(dst)) invisible(suppressWarnings(file.remove(dst)))
     }
   }
   message(sprintf("[key_outputs] copied %d raw twin(s) -> %s", n_raw, raw_dir))
+  if (length(stale_raw))
+    warning(sprintf("[key_outputs] %d raw twin(s) NOT produced by this run were excluded: %s",
+                    length(stale_raw), paste(stale_raw, collapse = ", ")),
+            call. = FALSE, immediate. = TRUE)
 })
 
 # ---------------------------------------------------------------------------
@@ -2380,17 +3086,36 @@ message(paste(rep("=", 60), collapse=""))
 # ---- Run-metadata info file (outputs/key_outputs/run_info.{json,md}) --------
 # Save key facts about this run — line-list cutoff, analysis date, health zones
 # invaded, CV fold count, forecast windows — from THIS run's in-memory values.
-# Guarded so a failure here can never fail the pipeline.
+# A FAILURE HERE STOPS THE RUN, like write_model_selection below: the figure suites read the
+# present date, the data end date and the seed from run_info.json, and the previous run's file
+# would pass their checks. The old file is removed first so it can never be read as this run's.
+invisible(suppressWarnings(file.remove(file.path(OUT_DIR, "key_outputs",
+                                                 c("run_info.json", "run_info.md")))))
 tryCatch(source(file.path(ROOT, "write_run_info.R")),
-         error = function(e) message("[run_info] skipped: ", conditionMessage(e)))
+         error = function(e) stop("[run_info] run_info.json was not written (", conditionMessage(e),
+                                  "); the figure suites would read the previous run's dates.",
+                                  call. = FALSE))
 
 # ---- Model-selection provenance (outputs/key_outputs/model_selection.{json,md}) ----
 # Detailed record of the FEATURED Bayesian model (+ best renewal + headline) chosen
 # by the leave-future-out CV composite, with the full scored leaderboard and a
 # cross-check that this file's independent scoring reproduces the pipeline's picks.
-# Guarded so a failure here can never fail the pipeline.
+# A FAILURE HERE STOPS THE RUN. Every downstream figure suite and the cascade read the featured
+# model from model_selection.json; were it not rewritten, they would silently feature the
+# PREVIOUS run's pick. (It used to be logged and skipped.)
 tryCatch(source(file.path(ROOT, "write_model_selection.R")),
-         error = function(e) message("[model_selection] skipped: ", conditionMessage(e)))
+         error = function(e) stop("[model_selection] model_selection.json was not written (",
+                                  conditionMessage(e), "); the downstream suites would read a ",
+                                  "stale featured model.", call. = FALSE))
+local({
+  .ms <- jsonlite::fromJSON(file.path(OUT_DIR, "key_outputs", "model_selection.json"))
+  .fj <- .ms$featured$bayesian$method
+  if (!identical(as.character(.fj), as.character(best_bayes_method)))
+    stop(sprintf(paste0("[model_selection] model_selection.json features %s but this run's figures ",
+                        "feature %s: the two selections disagree."), .fj, best_bayes_method),
+         call. = FALSE)
+  message(sprintf("[model_selection] featured model %s confirmed in model_selection.json", .fj))
+})
 
 # ---------------------------------------------------------------------------
 # DOWNSTREAM SUITES — cascade analyses + publication/manuscript figures
@@ -2410,7 +3135,8 @@ tryCatch(source(file.path(ROOT, "write_model_selection.R")),
 #
 # ORDERING is a genuine data dependency, not a preference:
 #   A  read THIS run's outputs (bayes_risk_scores_all_zones.csv, lfo_results.rds, ...)
-#   B  run_cascade.R -> modules 30-36, 38, 39; needs A's mobility_*.rds on disk
+#   B  run_cascade.R -> modules 30-36, 38, 39; needs the mobility_*.rds that step 3 of this
+#      run wrote
 #   C  read the CASCADE outputs B just wrote (cascade_reach_scores_all_zones.csv, ...)
 #   D  the k_indiv sweep (41) and its figure (42); 41 re-simulates the whole cascade
 #      across a grid of overdispersion values, so it is OFF unless asked for.
@@ -2421,6 +3147,15 @@ tryCatch(source(file.path(ROOT, "write_model_selection.R")),
   .flag <- function(nm, default) .env_flag(nm, default)
   if (!.flag("RUN_DOWNSTREAM_SUITES", TRUE)) {
     message("\n[downstream] RUN_DOWNSTREAM_SUITES=0 — skipping cascade + figure suites.")
+    return(invisible(NULL))
+  }
+  # A DATA-DEFINITION SENSITIVITY RUN (00_config.R) stops here. Its modelling outputs are in
+  # outputs_sensitivity/<tag>/, but several downstream suites and figure scripts address
+  # spatiotemporal/outputs/ directly, so running them would read the published run and
+  # overwrite published figures with a mixture of the two.
+  if (nzchar(get0("DATA_DEFINITION_TAG", ifnotfound = ""))) {
+    message("\n[downstream] data-definition sensitivity '", DATA_DEFINITION_TAG, "' — skipping the ",
+            "cascade + figure suites (they write to the published tree). Modelling outputs: ", OUT_DIR)
     return(invisible(NULL))
   }
   log_dir <- file.path(OUT_DIR, "logs"); dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
@@ -2481,16 +3216,40 @@ tryCatch(source(file.path(ROOT, "write_model_selection.R")),
     # + geography + mobility only) and reads nothing the figure suites write, so it is safe
     # at the head of this block.
     run_one("43_spread_kinematics.R")
+    # 50 ALSO BEFORE THE FIGURE SUITES, and for the same reason 43 is. It publishes
+    # key_outputs/mobility_value_ladder.csv, which Figure 2 PANEL C is drawn from, so run
+    # after make_manuscript_figures.R it would leave panel C one run stale on every run and
+    # fail outright on a fresh checkout. It reads only outputs/forecasts/lfo_results.rds
+    # (written by the modelling block above) and caches its two ablation arms, so it is
+    # inexpensive on a re-run and reads nothing any figure suite writes. Its own three
+    # appendix figures (S24-S26) come out of the same pass. RUN_MOBILITY_VALUE=0 skips it,
+    # in which case Figure 2 fails loudly rather than publishing a two-panel figure under
+    # the three-panel figure's name.
+    if (.flag("RUN_MOBILITY_VALUE", TRUE)) run_one("50_mobility_value.R")
+    else message("[downstream] RUN_MOBILITY_VALUE=0 - skipping 50_mobility_value.R; ",
+                 "make_manuscript_figures.R will refuse to build Figure 2 without its ladder.")
     for (f in FS_FIGURE_SUITES) run_one(f)
     # Figure_spread_kinematics_compact is a RETAINED deliverable but was orphaned:
     # nothing in the pipeline ever invoked make_spread_kinematics_compact.R, so the
     # figure could only ever appear if someone ran it by hand. It reads 43's
     # spread_kinematics_{weekly,summary}.csv, so it MUST follow 43 in this order.
     run_one("make_spread_kinematics_compact.R")
+    # 45 was orphaned in the same way: nothing in the pipeline invoked it, so the
+    # ascertainment appendix (Figures A1-A5, the reviewer response on detected vs true
+    # invasion) could only appear if someone ran it by hand. It reads 43's
+    # arrival_predictors.csv and this run's lfo_results.rds, so it MUST follow 43 and the
+    # modelling block. RUN_ASCERTAINMENT=0 skips it.
+    if (.flag("RUN_ASCERTAINMENT", TRUE)) run_one("45_ascertainment_figures.R")
+    else message("[downstream] RUN_ASCERTAINMENT=0 - skipping 45_ascertainment_figures.R.")
     # Supplementary figure suites. They read only saved artefacts of THIS run — the
-    # cross-validation, the convergence diagnostics, the beta_t trajectories, the mobility
+    # cross-validation, the convergence diagnostics, the beta_t trajectories, the time-varying
+    # forms' comparison (tv_comparison_*, written by the selection stage above), the mobility
     # matrices and both surveillance streams — so they follow the main suites and, like them,
     # must not run before the run that writes those files.
+    # 52: does a round's information state depend on whether it is re-censored from the final
+    # line list or read from the archived snapshot? Level and ranking of the import force, and
+    # each nowcast's error on the origin week. No model fits; about a minute.
+    if (.flag("RUN_VINTAGE_LEVEL_CHECK", TRUE)) run_one("52_vintage_level_check.R")
     run_one("make_si_model_figures.R")
     run_one("make_si_data_figures.R")
     run_one("update_bayesian_report.R")
@@ -2508,23 +3267,25 @@ tryCatch(source(file.path(ROOT, "write_model_selection.R")),
 
   # ---- B. The 3-month invasion cascade (modules 30-36, 38, 39) -------------
   # CASCADE_SMOKE=1 gives the fast path (M=40, heavy stages off) for CI.
-  # SKIP_CASCADE is the opt-out documented in the header and in README; it must work
-  # here, since this is now the only place the cascade is launched.
-  .skip_cascade <- tolower(trimws(Sys.getenv("SKIP_CASCADE", ""))) %in% c("1", "true", "t", "yes", "y")
+  # SKIP_CASCADE / SKIP_SCENARIOS is the opt-out to skip the 3-month forward cascade
+  # projections, urban introduction scenarios, and their figures.
+  .skip_cascade <- .env_flag("SKIP_CASCADE", FALSE) || .env_flag("SKIP_SCENARIOS", FALSE)
   if (.flag("RUN_CASCADE_SUITE", TRUE) && !.skip_cascade) {
     message("\n=== Downstream B: 3-month invasion cascade (run_cascade.R) ===")
     run_one("run_cascade.R")
   } else {
     message("\n[downstream] cascade skipped (",
-            if (.skip_cascade) "SKIP_CASCADE set" else "RUN_CASCADE_SUITE=0", ").")
+            if (.skip_cascade) "SKIP_CASCADE / SKIP_SCENARIOS set" else "RUN_CASCADE_SUITE=0", ").")
   }
 
   # ---- C. Figures that read the CASCADE outputs written by B ---------------
-  if (.flag("RUN_CASCADE_FIGURES", TRUE)) {
+  if (.flag("RUN_CASCADE_FIGURES", !.skip_cascade)) {
     message("\n=== Downstream C: cascade figure suites ===")
     run_one("37_cascade_figure4.R")
     run_one("40_cascade_next_dominoes.R")
     run_one("make_manuscript_figure2_cascade.R")
+  } else {
+    message("\n[downstream] cascade figure suites skipped.")
   }
 
   # ---- D. k_indiv overdispersion sweep (expensive) -------------------------
@@ -2630,7 +3391,7 @@ tryCatch({
       dir.create(dirname(dst), recursive = TRUE, showWarnings = FALSE)
       if (isTRUE(suppressWarnings(file.rename(f, dst)))) .moved <- .moved + 1L
       else if (isTRUE(file.copy(f, dst, overwrite = TRUE))) {
-        suppressWarnings(file.remove(f)); .moved <- .moved + 1L
+        invisible(suppressWarnings(file.remove(f))); .moved <- .moved + 1L
       }
     }
     message(sprintf("[gate] archived %d/%d non-retained figure file(s) out of the published tree -> %s",
@@ -2640,17 +3401,16 @@ tryCatch({
   }
 }, error = function(e) message("[gate] archive sweep skipped: ", conditionMessage(e)))
 
+# fc_calibrated, fc_ensemble and calibration went with the frequentist arm: they were bound
+# to NULL at the top of this file and never reassigned.
 invisible(list(
-  fc_calibrated = calibrated_forecasts,
-  fc_ensemble   = fc_ensemble,
-  lfo_results   = lfo_results,
-  metrics       = metrics_summary,
-  calibration   = calibration_gain,
-  mobility      = mobility_matrices,
-  gt_pmfs       = gt_pmfs,
-  Rt            = Rt_scalar,
-  dat           = dat,
-  downstream    = downstream_results
+  lfo_results = lfo_results,
+  metrics     = metrics_summary,
+  mobility    = mobility_matrices,
+  gt_pmfs     = gt_pmfs,
+  Rt          = Rt_scalar,
+  dat         = dat,
+  downstream  = downstream_results
 ))
 
 if (exists(".mark", mode = "function"))

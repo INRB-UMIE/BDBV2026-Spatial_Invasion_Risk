@@ -91,6 +91,24 @@ cascade_conditional_seed <- function(prep, scenario, hub, delta, psi = CASCADE_P
                                      force_seed_week = 1L, seed = CASCADE_SEED,
                                      seed_r = NA_real_, pop_vec = NULL) {
   n_mc <- n_mc %||% CASCADE_N_MC
+  # THE FORCED SET MUST BE NON-EMPTY, or this is the baseline under another name.
+  # simulate_cascade() forces only zones that are on the spine and NOT already infected (an
+  # infected zone cannot be invaded again), and silently ignores the rest. The hubs used to be
+  # taken from the gateway list — the currently infected sources — so every "conditional" table
+  # was the baseline, identical across hubs, and was published as the hub's downstream reach.
+  .forced <- intersect(hub, prep$zones_all[!prep$affected0])
+  if (!length(.forced))
+    stop(sprintf(paste0("[conditional] none of %s can be force-seeded: %s. The experiment would ",
+                        "reproduce the baseline. Choose hubs among zones NOT yet invaded at the ",
+                        "projection origin."),
+                 paste(hub, collapse = ", "),
+                 paste(ifelse(hub %in% prep$zones_all, "already infected at the origin",
+                              "not on the health-zone spine"), collapse = "; ")),
+         call. = FALSE)
+  if (length(.forced) < length(hub))
+    warning(sprintf("[conditional] %s: %d of %d hub zone(s) are already infected or off-spine and are not forced: %s",
+                    paste(hub, collapse = "+"), length(hub) - length(.forced), length(hub),
+                    paste(setdiff(hub, .forced), collapse = ", ")), call. = FALSE)
   # `seed` is explicit so the caller can pair this against a baseline built the same way.
   sim <- simulate_cascade(prep, scenario, n_mc = n_mc, delta = delta, psi = psi,
                           force_seed = hub, force_seed_week = force_seed_week,

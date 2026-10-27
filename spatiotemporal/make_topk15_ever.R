@@ -2,8 +2,9 @@
 # Top-15 per-forecast-round outcome figure, THREE-WAY outcome:
 #   invaded within the forecast window | invaded later | not invaded.
 # Mirrors panel E of Figure2_labelled (build_topk_folds) but at top-15, and splits
-# the "invaded" category into within-window vs eventually. House aesthetic copied
-# verbatim from make_publication_figures.R (theme_pub / save_dual / palette).
+# the "invaded" category into within-window vs eventually. House style (theme_pub /
+# save_dual / palette / reorder_within) is sourced from figure_style.R, as in
+# make_publication_figures.R.
 #
 # 2026-09-17: produced at BOTH horizons (F_topk15_ever_h1 / _h2). The horizon was
 # hard-coded to 1 in the data filter AND in the output basename, so the h=2 panel was
@@ -14,59 +15,6 @@
 suppressWarnings(suppressMessages({
   library(ggplot2); library(dplyr); library(readr); library(scales)
 }))
-
-# --- house-style constants (verbatim from make_publication_figures.R) ---
-INK <- "grey15"; MUTED <- "grey38"; FAINT <- "grey72"; GRID <- "grey92"
-base_family <- "sans"
-
-theme_pub <- function(base = 8.6) {
-  theme_minimal(base_size = base, base_family = base_family) %+replace% theme(
-    plot.title      = element_blank(),
-    plot.subtitle   = element_blank(),
-    plot.caption    = element_blank(),
-    axis.title      = element_text(size = base - 0.4, colour = MUTED),
-    axis.title.x    = element_text(margin = margin(t = 4)),
-    axis.title.y    = element_text(margin = margin(r = 4), angle = 90),
-    axis.text       = element_text(size = base - 1.2, colour = MUTED),
-    panel.grid.minor = element_blank(),
-    panel.grid.major = element_line(colour = GRID, linewidth = 0.3),
-    legend.position = "top", legend.justification = "left",
-    legend.title    = element_text(size = base - 1.2, colour = MUTED),
-    legend.text     = element_text(size = base - 1.4, colour = INK),
-    legend.key.height = unit(9, "pt"), legend.key.width = unit(15, "pt"),
-    strip.text      = element_text(size = base - 0.6, colour = INK, face = "bold",
-                                   margin = margin(3, 3, 3, 3)),
-    plot.tag        = element_text(size = base + 4.5, face = "bold", colour = INK),
-    plot.margin     = margin(6, 8, 6, 6)
-  )
-}
-
-# PANEL_DIR is derived from OUT (resolved below), NOT from a path relative to the working
-# directory. It was the literal "outputs/key_outputs/figures/panels", and run_all.R launches
-# this script from the REPO ROOT — where an unrelated `outputs/` tree also exists — so every
-# run wrote the panel into that stray tree while the copy in spatiotemporal/outputs went
-# stale. The same resolution problem was already fixed for the INPUT paths just below; the
-# output path was missed.
-save_dual <- function(p, name, w, h, dir = PANEL_DIR) {
-  # Retained-figure gate (FIGURE_KEEP, 00_config.R): silently skip any figure that
-  # is not on the published allow-list. get0() so the helper still works standalone.
-  .fk <- get0("figure_is_kept", ifnotfound = NULL)
-  # Gate on the FULL destination path, not the bare stem: FIGURE_DROP entries are
-  # "<directory>/<stem>" and the raw/ exclusion inspects path components, neither of
-  # which can match a basename.
-  if (is.function(.fk) && !.fk(file.path(dir, name))) return(invisible(p))
-  p <- fs_caption(p)                       # scale statement (raw pass by default)
-  ggsave(file.path(dir, paste0(name, ".pdf")), p, width = w, height = h, device = "pdf", bg = "white")
-  ggsave(file.path(dir, paste0(name, ".png")), p, width = w, height = h, dpi = 600, bg = "white")
-  message(sprintf("  saved %-34s  %.1f x %.1f in", name, w, h))
-  invisible(p)
-}
-# tidytext-style within-facet ordering (verbatim)
-reorder_within <- function(x, by, within) {
-  factor(paste(x, within, sep = "___"),
-         levels = unique(paste(x, within, sep = "___"))[order(within, by)])
-}
-tidytext_scale_y <- function() scale_y_discrete(labels = function(z) sub("___.*$", "", z))
 
 # --- data ---
 # ANCHORED path, not the bare relative "outputs": this script used to assume the working
@@ -84,42 +32,54 @@ OUT <- local({
 # Probability-scale switch (forecast_scale.R): default "recalibrated" (the primary set),
 # FORECAST_SCALE=raw writes the twin to a raw/ sibling under the same basenames.
 source(file.path(dirname(OUT), "forecast_scale.R"))
+# House style (palette, province scale, themes, save_dual) from figure_style.R — the
+# single definition for the whole suite.
+source(file.path(dirname(OUT), "figure_style.R"))
 
-# Load the retained-figure allow-list (FIGURE_KEEP / figure_is_kept, 00_config.R). Without it
-# the gate in save_dual() below resolves figure_is_kept to NULL and silently no-ops, so
-# FIGURE_DROP entries and the raw/ exclusion could never fire here even though this script
-# writes a retained deliverable (F_topk15_ever_h1/_h2). dirname(OUT) is the spatiotemporal
-# directory (OUT is .../spatiotemporal/outputs). Non-fatal: it must still run standalone.
-if (!is.function(get0("figure_is_kept")) || !is.function(get0("lfo_origin")))
-  try(suppressWarnings(suppressMessages(source(file.path(dirname(OUT), "00_config.R")))),
-      silent = TRUE)
 
+# The pipeline config is REQUIRED (00_config.R; dirname(OUT) is the spatiotemporal directory).
+# It defines the script guard below (script_run_or_forced), the forecast-origin convention
+# (lfo_origin) and the retained-figure allow-list (FIGURE_KEEP / figure_is_kept) that save_dual()
+# gates on. It used to be loaded inside try(silent = TRUE) as "non-fatal", but nothing below can
+# run without it: a failed load ended at the guard as "could not find function", and had the
+# guard been defined elsewhere, save_dual() would have resolved figure_is_kept to NULL and
+# skipped the gate (FIGURE_DROP and the raw/ exclusion) without a word.
+if (!is.function(get0("figure_is_kept")) || !is.function(get0("lfo_origin")) ||
+    !is.function(get0("script_run_or_forced")))
+  suppressWarnings(suppressMessages(source(file.path(dirname(OUT), "00_config.R"))))
+stopifnot(is.function(get0("figure_is_kept")), is.function(get0("lfo_origin")),
+          is.function(get0("script_run_or_forced")))
+# OUT is the PUBLISHED tree (above): a data-definition sensitivity must not redraw its panels.
+stop_if_data_definition_sensitivity("make_topk15_ever.R")
+
+# THIS FILE IS A SCRIPT, NOT A LIBRARY: everything below EXECUTES and writes published
+# outputs. It is launched as its own subprocess. Guarded so a source() — a test, an
+# ad-hoc check, a sweep that loads "every module" — defines what it needs and stops,
+# instead of silently rewriting files. FORCE_RUN=1 forces a run from a source().
+if (!script_run_or_forced("make_topk15_ever.R")) {
+  message("[topk15] sourced, not run: nothing is written. Use `Rscript make_topk15_ever.R`",
+          " (or FORCE_RUN=1) to run it.")
+} else {
+
+# PANEL_DIR is derived from OUT, NOT from a path relative to the working directory. It was the
+# literal "outputs/key_outputs/figures/panels", and run_all.R launches this script from the REPO
+# ROOT — where an unrelated `outputs/` tree also exists — so every run wrote the panel into that
+# stray tree while the copy in spatiotemporal/outputs went stale.
 PANEL_DIR <- fs_out_dir(file.path(OUT, "key_outputs", "figures", "panels"))
 
 # FEATURED MODEL read from the pipeline's own selection record rather than hard-coded — a
 # literal here silently diverges from the model the pipeline actually chose (it said
-# "Bayes-M17-med" while the manuscript still described Bayes-M14-med). Falls back to the
-# previous literal only if the selection file is unreadable.
-BEST_BAYES <- local({
-  f <- file.path(OUT, "key_outputs", "model_selection.json")
-  # $featured$bayesian, NOT $featured$headline. `headline` is the best model over ALL families
-  # (write_model_selection.R), so it can be a renewal or baseline method — this figure is a
-  # BAYESIAN product and would then plot a different model from the rest of the suite while its
-  # caption still said "featured Bayesian model". `headline` is kept only as the fallback, which
-  # is the convention every other consumer uses (make_manuscript_figures.R, 30_projection_config.R).
-  sel <- tryCatch(jsonlite::fromJSON(f), error = function(e) NULL)
-  m <- tryCatch(sel$featured$bayesian$method, error = function(e) NULL)
-  if (is.null(m) || !length(m) || is.na(m[1]))
-    m <- tryCatch(sel$featured$headline$method, error = function(e) NULL)
-  if (is.null(m) || !length(m) || is.na(m[1])) {
-    warning("[topk15] model_selection.json unreadable; falling back to the hard-coded featured model.",
-            call. = FALSE); "Bayes-M14-fill-med"
-  } else m[1]
-})
+# "Bayes-M17-med" while the manuscript still described Bayes-M14-med). An unreadable
+# selection file stops the build.
+# read_featured_model() (figure_style.R): $featured$bayesian, else $featured$headline, and NO
+# FALLBACK - this used to fall back to a typed "Bayes-M14-fill-med" when the file was unreadable.
+BEST_BAYES <- read_featured_model(file.path(OUT, "key_outputs", "model_selection.json"))
 message("[topk15] outputs = ", OUT, " | featured model = ", BEST_BAYES)
 rs  <- read_csv(fs_risk_csv(OUT, sub = "reports"), show_col_types = FALSE)
 lfo <- readRDS(file.path(OUT, "forecasts", "lfo_results.rds"))
-fs_apply_lfo_scale(lfo)
+# The column actually drawn is kept: a round with no fitted recalibration factor is labelled
+# "(uncorrected)" only on a pass that draws the recalibrated column (build_topk_ever()).
+PSCALE_COL <- fs_apply_lfo_scale(lfo)
 
 # Last calendar day of data used for fitting. The outcome classes ("invaded later", "not
 # invaded") are judged against THIS date, so the legend must quote it rather than a literal.
@@ -167,10 +127,45 @@ build_topk_ever <- function(hz) {
   }
 
   fold_ord <- sort(unique(d$cutoff))
-  # ASCII hyphen, not an em-dash: these facet strips are drawn on the base pdf device
-  # (ISOLatin1 encoding), which cannot represent U+2014 and silently substitutes a hyphen
-  # with a conversion warning — so the PDF and the PNG would otherwise disagree.
-  lab_lk   <- setNames(sprintf("Round %d - %s", seq_along(fold_ord), format(lfo_origin(fold_ord), "%d %b")),
+  # WHICH ROUNDS ARE DRAWN UNCORRECTED. The bars are on the prequentially recalibrated scale,
+  # but the earliest rounds have no settled training fold to fit delta on (delta_estimable
+  # FALSE) and their p_recal is the RAW probability, drawn beside recalibrated rounds with
+  # nothing to say so. Read per round off the featured model's own rows at this horizon (the
+  # rows drawn), exactly as make_manuscript_figures.R's .est_by_cut/.uncorr() do for Figure 2B
+  # and FigureS14. On a raw pass nothing is recalibrated, so nothing is "uncorrected" relative
+  # to the rest; a frame without the column predates recalibration (one scale throughout).
+  unc_cuts <- if (identical(PSCALE_COL, "p_recal") && "delta_estimable" %in% names(d)) {
+    est <- tapply(d$delta_estimable %in% TRUE, as.character(d$cutoff), any)
+    as.Date(names(est)[!est])
+  } else as.Date(character(0))
+  # WHICH ROUNDS ARE PROVISIONAL. A round whose outcome window closed fewer than
+  # LFO_RELIABLE_EVAL_AGE_DAYS before the analysis date (eval_reliable FALSE, written by
+  # run_invasion_lfo()) is scored, but its invasions are not all reported yet: a bar drawn as
+  # "invaded later" or "not invaded" there may yet prove to have been invaded within the window.
+  # Drawn unmarked it read as final; FigureS7 draws the same rounds hollow, and
+  # build_topk_folds() labels them the same way. A frame without the column cannot say which
+  # rounds have settled, so it is refused rather than drawn as if every outcome were final.
+  if (!"eval_reliable" %in% names(d))
+    stop("[topk15-ever] lfo_results.rds has no eval_reliable column, so unsettled rounds cannot ",
+         "be marked provisional; re-run run_all.R.", call. = FALSE)
+  rel <- tapply(d$eval_reliable %in% TRUE, as.character(d$cutoff), all)
+  prov_cuts <- as.Date(names(rel)[!rel])
+  round_tag <- vapply(seq_along(fold_ord), function(i) {
+    tg <- c(if (fold_ord[i] %in% unc_cuts)  "uncorrected",
+            if (fold_ord[i] %in% prov_cuts) "provisional")
+    if (length(tg)) paste0(" (", paste(tg, collapse = ", "), ")") else ""
+  }, character(1))
+  if (any(fold_ord %in% unc_cuts))
+    message(sprintf("[topk15-ever] h=%d: %d of %d round(s) carry no fitted recalibration factor and are labelled \"(uncorrected)\".",
+                    hz, sum(fold_ord %in% unc_cuts), length(fold_ord)))
+  if (any(fold_ord %in% prov_cuts))
+    message(sprintf("[topk15-ever] h=%d: %d of %d round(s) have not settled (eval_reliable FALSE) and are labelled \"(provisional)\".",
+                    hz, sum(fold_ord %in% prov_cuts), length(fold_ord)))
+  # ASCII hyphen, not an em-dash: save_dual() now draws through figure_pdf_device(), which
+  # encodes U+2014, but the last-resort base pdf device (ISOLatin1) cannot, and a hyphen reads
+  # the same on every device.
+  lab_lk   <- setNames(sprintf("Round %d - %s%s", seq_along(fold_ord),
+                               format(lfo_origin(fold_ord), "%d %b"), round_tag),
                        as.character(fold_ord))
 
   topk <- d %>%
@@ -186,7 +181,8 @@ build_topk_ever <- function(hz) {
       fold_lab = factor(lab_lk[as.character(cutoff)], levels = lab_lk[as.character(fold_ord)]),
       zone_w   = reorder_within(health_zone, p_invasion, fold_lab))
 
-  # --- accuracy self-check: per-fold counts must reproduce the validated table ---
+  # --- per-round counts, LOGGED for checking against the evaluation tables (nothing is
+  # asserted here: this prints them, it does not compare them) ---
   chk <- topk %>% group_by(fold_lab) %>%
     summarise(n = n(), within = sum(outcome == lv[1]), ever = sum(outcome != lv[3]),
               .groups = "drop")
@@ -209,7 +205,11 @@ build_topk_ever <- function(hz) {
     scale_fill_manual(values = out_col, name = NULL, drop = FALSE) +
     scale_x_continuous(labels = percent_format(1), limits = c(0, NA),
                        expand = expansion(mult = c(0, 0.06)), breaks = scales::pretty_breaks(3)) +
-    labs(x = "Predicted invasion probability, P(first case)", y = NULL) +
+    # The bars' scale, as Figure 2 panel E and FigureS14 state it.
+    labs(x = paste0("Predicted invasion probability, P(first case)",
+                    if (!identical(PSCALE_COL, "p_recal")) " (raw)"
+                    else if (any(fold_ord %in% unc_cuts)) " (recalibrated; rounds marked uncorrected are raw)"
+                    else " (recalibrated)"), y = NULL) +
     theme_pub(8.6) +
     theme(panel.grid.major.y = element_blank(),
           panel.spacing.x = unit(9, "pt"), panel.spacing.y = unit(8, "pt"),
@@ -223,3 +223,6 @@ build_topk_ever <- function(hz) {
 
 for (.hz in c(1L, 2L)) build_topk_ever(.hz)
 message("[topk15-ever] done.")
+
+}   # end of the script-run guard
+

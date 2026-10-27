@@ -143,24 +143,35 @@ mk_slice <- function(n_folds = 9L, n_zone = 200L, horizon = 1L, seed = 1L) {
   }))
 }
 
-test_that("the prequential delta trains only on folds whose outcome week has fully ELAPSED", {
-  # The rule is `C' + 7h + 6 <= C`. The +6 matters: a fold's last outcome week STARTS at
-  # C' + 7h and ENDS at C' + 7h + 6, so the previous rule (`C' + 7h <= C`) admitted a fold
-  # whose final outcome week had only just begun — the h=1 delta at fold k was then fitted
-  # partly on the week starting on fold k's own cutoff. With 7-day fold spacing the corrected
-  # rule withholds exactly one further fold at each horizon.
+# No burn-in: isolates the settledness rule from the (data-dependent) burn-in boundary.
+nob <- function(cutoff) rep(FALSE, length(cutoff))
+
+test_that("the prequential delta trains only on folds whose outcome was SETTLED at the issue date", {
+  # Rule (2026-10-14): a training fold with cutoff C' is usable for a forecast issued on C + 6
+  # only if (C + 6) - (C' + 7h + 7) >= 25 days (LFO_RELIABLE_EVAL_AGE_DAYS), h = the horizon of the
+  # TRAINING rows. Weekly folds: C' <= C - 35 for 1-week rows (fold k trains on 1..k-5) and
+  # C' <= C - 42 for 2-week rows (1..k-6). The previous rule (C' + 7h + 6 <= C) let fold k train
+  # on fold k-2, whose outcome week had ended only 7 days before the forecast was issued.
   s1 <- mk_slice(horizon = 1L); s2 <- mk_slice(horizon = 2L)
-  q1 <- prequential_invasion_delta(s1, horizon = 1L)
-  q2 <- prequential_invasion_delta(s2, horizon = 2L)
-  expect_equal(q1$n_train_folds, c(0, 0:7))              # h=1: fold k trains on k-2 folds
-  expect_equal(q2$n_train_folds, c(0, 0, 0, 1:6))        # h=2: one further fold withheld
+  q1 <- prequential_invasion_delta(s1, horizon = 1L, burnin_fn = nob, settled_days = 25L)
+  q2 <- prequential_invasion_delta(s2, horizon = 2L, burnin_fn = nob, settled_days = 25L)
+  expect_equal(q1$n_train_folds, pmax(0L, seq_len(9L) - 5L))
+  expect_equal(q2$n_train_folds, pmax(0L, seq_len(9L) - 6L))
 })
 
-test_that("only folds with NO closed training fold fall back to delta = 1", {
-  # The fallback is now an information constraint, not a threshold: with nothing to fit there
-  # is no delta, and every other fold gets one. Under the old event/origin floors this left
-  # over half the folds uncorrected.
-  s <- mk_slice(); q <- prequential_invasion_delta(s, horizon = 1L)
+test_that("burn-in folds are never trained on, but every fold still gets a delta row", {
+  bi <- function(cutoff) as.Date(cutoff) < as.Date("2026-05-30")   # folds 1-3 are burn-in
+  s <- mk_slice(n_folds = 12L)
+  q <- prequential_invasion_delta(s, horizon = 1L, burnin_fn = bi, settled_days = 25L)
+  expect_equal(nrow(q), 12L)
+  # fold k trains on folds 4..(k-5): max(0, k - 8)
+  expect_equal(q$n_train_folds, pmax(0L, seq_len(12L) - 8L))
+})
+
+test_that("only folds with NO usable training fold fall back to delta = 1", {
+  # The fallback is an information constraint, not a threshold: with nothing to fit there
+  # is no delta, and every other fold gets one.
+  s <- mk_slice(); q <- prequential_invasion_delta(s, horizon = 1L, burnin_fn = nob)
   expect_equal(q$delta_preq[q$n_train_folds == 0L],
                rep(1, sum(q$n_train_folds == 0L)))
   expect_false(any(q$delta_estimable[q$n_train_folds == 0L]))
@@ -169,27 +180,25 @@ test_that("only folds with NO closed training fold fall back to delta = 1", {
 })
 
 test_that("a training pool restricted to shared cells does not change which folds are reported", {
-  # `fit` supplies the training rows; `d` still defines the fold list. Without that split a
-  # fold outside the shared support would come back with no delta at all and drag the whole
-  # method's recalibrated block out of the evaluation.
-  s <- mk_slice(n_folds = 6L)
+  # `fit` supplies the training rows; `d` still defines the fold list.
+  s <- mk_slice(n_folds = 7L)
   sub <- s[s$fold_id != 1L, , drop = FALSE]          # fold 1 withheld from TRAINING only
-  q_all <- prequential_invasion_delta(s, horizon = 1L)
-  q_sub <- prequential_invasion_delta(s, horizon = 1L, fit = sub)
+  q_all <- prequential_invasion_delta(s, horizon = 1L, burnin_fn = nob)
+  q_sub <- prequential_invasion_delta(s, horizon = 1L, fit = sub, burnin_fn = nob)
   expect_equal(q_sub$fold_id, q_all$fold_id)          # same folds reported
   expect_equal(nrow(q_sub), nrow(q_all))
-  # fold 3 trains on fold 1 alone, which `sub` removes -> no training rows -> delta = 1
-  expect_equal(q_sub$delta_preq[q_sub$fold_id == 3L], 1)
-  expect_true(q_all$delta_estimable[q_all$fold_id == 3L])
+  # fold 6 trains on fold 1 alone, which `sub` removes -> no training rows -> delta = 1
+  expect_equal(q_sub$delta_preq[q_sub$fold_id == 6L], 1)
+  expect_true(q_all$delta_estimable[q_all$fold_id == 6L])
 })
 
 test_that("a missing cutoff column falls back to fold_id spacing with the same causality", {
+  # Burn-in needs real dates, so it is ignored on the synthetic calendar.
   s <- mk_slice(); s$cutoff <- NULL
-  q1 <- prequential_invasion_delta(s, horizon = 1L)
-  q2 <- prequential_invasion_delta(s, horizon = 2L)
-  # Same corrected rule as above, reached through the fold_id spacing fallback.
-  expect_equal(q1$n_train_folds, c(0, 0:7))
-  expect_equal(q2$n_train_folds, c(0, 0, 0, 1:6))
+  q1 <- prequential_invasion_delta(s, horizon = 1L, settled_days = 25L)
+  q2 <- prequential_invasion_delta(s, horizon = 2L, settled_days = 25L)
+  expect_equal(q1$n_train_folds, pmax(0L, seq_len(9L) - 5L))
+  expect_equal(q2$n_train_folds, pmax(0L, seq_len(9L) - 6L))
 })
 
 # 7. attach_invasion_recalibration ---------------------------------------------
@@ -232,16 +241,46 @@ test_that("recalibration leaves every RANKING metric bit-identical", {
 })
 
 # 8. POOLED TABLE --------------------------------------------------------------
-test_that("invasion_delta_table returns one row per method x horizon with sane fields", {
+test_that("invasion_delta_table returns ONE delta per method, on a row per horizon", {
   s <- rbind(mk_slice(horizon = 1L), mk_slice(horizon = 2L, seed = 2L))
-  tb <- suppressMessages(invasion_delta_table(s, n_boot = 60L))
+  tb <- suppressMessages(invasion_delta_table(s, n_boot = 60L, burnin_fn = nob))
   expect_equal(nrow(tb), 2L)
+  expect_equal(sort(tb$horizon), c(1L, 2L))
+  expect_equal(length(unique(tb$delta)), 1L)              # the same factor at both horizons
+  expect_true(all(tb$fit_horizon == 1L))
   expect_true(all(is.finite(tb$delta)))
   expect_true(all(tb$delta_lo <= tb$delta & tb$delta <= tb$delta_hi, na.rm = TRUE))
   expect_true(all(tb$n_events > 0))
   expect_false(any(tb$boundary_hit))
+  # the 1-week pool alone trains it
+  s1 <- s[s$horizon == 1L, ]
+  expect_equal(tb$delta[1], fit_invasion_delta(s1$p_invasion, s1$is_new_invasion), tolerance = 1e-10)
+  # Gamma posterior for the live draws: shape = events + 1/2, mean = delta exactly
+  expect_equal(tb$gamma_shape, tb$n_events + 0.5)
+  expect_equal(tb$gamma_shape / tb$gamma_rate, tb$delta, tolerance = 1e-12)
   # the moment estimator is reported alongside but is NOT what `delta` uses
   expect_true(all(is.finite(tb$delta_moment)))
+})
+
+test_that("the deployment delta excludes burn-in rounds", {
+  s  <- rbind(mk_slice(horizon = 1L), mk_slice(horizon = 2L, seed = 2L))
+  bi <- function(cutoff) as.Date(cutoff) < as.Date("2026-05-30")   # folds 1-3
+  tb <- suppressMessages(invasion_delta_table(s, n_boot = 0L, burnin_fn = bi))
+  s1 <- s[s$horizon == 1L & s$fold_id >= 4L, ]
+  expect_equal(tb$n_folds[1], 6L)
+  expect_equal(tb$delta[1], fit_invasion_delta(s1$p_invasion, s1$is_new_invasion), tolerance = 1e-10)
+})
+
+test_that("attach applies ONE delta per fold to every horizon, so nested windows stay nested", {
+  h1 <- mk_slice(horizon = 1L)
+  h2 <- h1; h2$horizon <- 2L
+  h2$p_invasion <- pmin(0.95, h1$p_invasion * 1.9)      # 2-week cumulative >= 1-week, zone by zone
+  out <- suppressMessages(attach_invasion_recalibration(rbind(h1, h2), burnin_fn = nob))
+  per_fold <- tapply(out$delta_preq, out$fold_id, function(v) length(unique(v)))
+  expect_true(all(per_fold == 1L))
+  a <- out[out$horizon == 1L, ]; b <- out[out$horizon == 2L, ]
+  b <- b[match(paste(a$fold_id, a$health_zone), paste(b$fold_id, b$health_zone)), ]
+  expect_true(all(b$p_recal >= a$p_recal - 1e-15))
 })
 
 message("\n[test_invasion_recalibration] all assertions executed.")
@@ -275,9 +314,15 @@ test_that("evaluate_invasion adds recal columns without altering any raw column"
   ev_before <- suppressWarnings(evaluate_invasion(f, n_boot = 0L))
   ev_after  <- suppressWarnings(evaluate_invasion(
     suppressMessages(attach_invasion_recalibration(f)), n_boot = 0L))
+  # TOP-K COLUMNS ARE DERIVED FROM TOPK_VALUES, not hard-coded: evaluate_invasion() emits
+  # prec_at_<K>/recall_at_<K>/hit_at_<K> for exactly the configured budgets, so naming
+  # literals here would break this test every time that constant moved (as it did when the
+  # budgets became 5/15/20).
+  .ks <- get0("TOPK_VALUES", ifnotfound = c(5L, 15L, 20L))
   raw_cols <- c("auc_pr", "auc_roc", "log_score", "brier_skill", "ece",
-                "calibration_in_large", "mean_rank_of_truth", "prec_at_5",
-                "prec_at_10", "prec_at_15", "n_atrisk", "n_invasions", "base_rate")
+                "calibration_in_large", "mean_rank_of_truth",
+                paste0("prec_at_", .ks), "n_atrisk", "n_invasions", "base_rate")
+  expect_true(all(raw_cols %in% names(ev_before)))
   a <- ev_before[order(ev_before$method, ev_before$horizon), raw_cols]
   b <- ev_after[order(ev_after$method, ev_after$horizon), raw_cols]
   expect_equal(as.data.frame(a), as.data.frame(b))
@@ -296,22 +341,27 @@ test_that("a fixed delta leaves EVERY evaluate_invasion metric identical", {
   ev_raw <- suppressWarnings(evaluate_invasion(f, n_boot = 0L))
   f2 <- f; f2$p_invasion <- recalibrate_invasion_p(f$p_invasion, 0.37)
   ev_fix <- suppressWarnings(evaluate_invasion(f2, n_boot = 0L))
-  for (cl in c("auc_pr", "auc_roc", "mean_rank_of_truth",
-               "prec_at_5", "recall_at_5", "hit_at_5",
-               "prec_at_10", "prec_at_15")) {
+  .ks <- get0("TOPK_VALUES", ifnotfound = c(5L, 15L, 20L))
+  for (cl in c("auc_pr", "auc_roc", "mean_rank_of_truth", "auc_pr_skill_date",
+               "sel_auc_pr_skill_date", "sel_mean_rank_of_truth",
+               paste0("prec_at_", .ks), paste0("recall_at_", .ks),
+               paste0("hit_at_", .ks))) {
     expect_equal(ev_raw[[cl]], ev_fix[[cl]], tolerance = 1e-12,
                  info = paste("fixed-delta invariance violated for", cl))
   }
 })
 
 test_that("selection falls back loudly when the recal column is absent or incomplete", {
+  # PREVIOUS basis (all-round columns).
   ev <- suppressWarnings(evaluate_invasion(mk_eval_frame(), n_boot = 0L))
   ev$log_score_recal <- NULL
-  expect_warning(m1 <- best_invasion_model(ev, select_on_recal = TRUE), "absent")
-  expect_equal(m1, best_invasion_model(ev, select_on_recal = FALSE))
+  expect_warning(m1 <- best_invasion_model(ev, select_on_recal = TRUE, basis = "pooled_all_dates"),
+                 "absent")
+  expect_equal(m1, best_invasion_model(ev, select_on_recal = FALSE, basis = "pooled_all_dates"))
+  # CURRENT basis (post-burn-in sel_* columns): an incomplete selection column also falls back.
   ev2 <- suppressWarnings(evaluate_invasion(
     suppressMessages(attach_invasion_recalibration(mk_eval_frame())), n_boot = 0L))
-  ev2$log_score_recal[1] <- NA_real_
+  ev2$sel_log_score_recal[1] <- NA_real_
   expect_warning(best_invasion_model(ev2, select_on_recal = TRUE), "no recalibrated log score")
 })
 
@@ -365,7 +415,7 @@ test_that("rank-only rows get p_recal = p_invasion and delta = 1, never NA", {
   s$method[seq_len(nrow(s) / 2)] <- "calibrated"
   s$method[-seq_len(nrow(s) / 2)] <- "rankonly"
   s$prob_calibrated <- s$method == "calibrated"
-  out <- suppressMessages(attach_invasion_recalibration(s))
+  out <- suppressMessages(attach_invasion_recalibration(s, burnin_fn = nob))
   ro <- out$method == "rankonly"
   expect_true(all(is.finite(out$p_recal[ro])))
   expect_equal(out$p_recal[ro], out$p_invasion[ro])
@@ -389,23 +439,19 @@ test_that("an already-affected rank-only row still gets NA, not the identity", {
 
 # 10. EXPANDING WINDOW + THE DELTA-STABILITY DIAGNOSTIC -------------------------
 test_that("the prequential delta trains on an EXPANDING window, never a recent slice", {
-  # Pinned deliberately. A window would only earn its cost if delta genuinely moved between
-  # folds, and invasion_delta_stability() reports it does not (I^2 = 0, tau^2 = 0, Cochran Q
-  # non-significant for every method at both horizons). Every fold whose outcome window has
-  # closed must therefore be in the training pool.
+  # Every fold whose outcome was settled by the issue date is in the training pool.
   s <- mk_slice(n_folds = 9L)
-  q <- prequential_invasion_delta(s, horizon = 1L)
-  # h=1, 7-day spacing: fold k trains on folds 1..k-2, i.e. n_train_folds = max(0, k-2).
-  expect_equal(q$n_train_folds, pmax(0L, seq_len(9L) - 2L))
+  q <- prequential_invasion_delta(s, horizon = 1L, burnin_fn = nob, settled_days = 25L)
+  expect_equal(q$n_train_folds, pmax(0L, seq_len(9L) - 5L))
   expect_true(all(diff(q$n_train_folds) >= 0))          # never shrinks
-  expect_equal(max(q$n_train_folds), 7L)                 # the last fold sees ALL prior folds
+  expect_equal(max(q$n_train_folds), 4L)                 # the last fold sees ALL settled folds
 })
 
 test_that("invasion_delta_stability fits each fold ALONE and reports heterogeneity", {
   if (!exists("invasion_delta_stability", mode = "function"))
     testthat::skip("invasion_delta_stability() unavailable")
   s <- rbind(mk_slice(horizon = 1L), mk_slice(horizon = 2L, seed = 5L))
-  st <- suppressWarnings(invasion_delta_stability(s))
+  st <- suppressWarnings(invasion_delta_stability(s, burnin_fn = nob))
   expect_true(all(c("per_fold", "summary") %in% names(st)))
   expect_true(all(c("fold_id","n_atrisk","n_events","delta","se_log","lo","hi")
                   %in% names(st$per_fold)))
@@ -428,4 +474,13 @@ test_that("invasion_delta_stability fits each fold ALONE and reports heterogenei
   expect_true(all(fin$Q_p >= 0 & fin$Q_p <= 1, na.rm = TRUE))
   # data simulated with a CONSTANT delta must not look heterogeneous
   expect_lt(median(fin$I2), 0.5)
+})
+
+test_that("invasion_delta_stability tests the DEPLOYED pool: no burn-in, no unsettled round", {
+  s <- mk_slice(horizon = 1L)
+  s$eval_reliable <- s$fold_id <= 7L                      # folds 8-9 unsettled
+  bi <- function(cutoff) as.Date(cutoff) < as.Date("2026-05-23")   # folds 1-2 burn-in
+  st <- suppressWarnings(invasion_delta_stability(s, burnin_fn = bi))
+  expect_identical(sort(unique(st$per_fold$fold_id)), 3:7)
+  expect_identical(st$summary$n_folds, 5L)
 })

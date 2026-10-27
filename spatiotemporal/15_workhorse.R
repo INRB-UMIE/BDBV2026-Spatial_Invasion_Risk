@@ -1,29 +1,25 @@
 # =============================================================================
-# 15_workhorse.R — Mobility-Informed Renewal Workhorse for Spatial Invasion
+# 15_workhorse.R — shared invasion-design helpers and risk scores
 # BDBV 2026 DRC · Spatiotemporal Invasion Forecast Suite
 #
-# The primary deliverable: for each health zone with NO confirmed cases up to the
-# forecast date, the probability it sees its first case(s) in the next 1-2 weeks
-# (spatial INVASION), plus a set of relative-risk scores. Zones already affected
-# carry NO invasion probability (NA everywhere).
+# A LIBRARY, not a model. The frequentist renewal workhorse this file was named for was
+# removed with that arm; what remains is the machinery the BAYESIAN suite and the cascade
+# share, plus the risk-score layer:
 #
-# Model (renewal / force-of-infection, verified core in 06_simple_models.R):
-#   Import force to at-risk zone i:  Lambda_i = sum_j W[j,i] * sum_k g(k) Y_nc[j,t-k]
-#   Expected introductions:          mu_i     = beta * Lambda_i
-#   Invasion probability:            p_i      = 1 - exp(-mu_i)     (Poisson arrival)
-#                                    p_i      = 1 - (theta/(theta+mu_i))^theta  (NegBin)
-#   Affected zones:                  p_i      = NA
+#   load_province_map()     zone -> province, from the shapefile
+#   affected_zones()        zones with >= 1 confirmed case up to a cutoff
+#   .count_wide()/.susp_wide()   zone x week count matrices
+#   .static_features()      static covariates aligned to the zone spine (median-imputed, NOT
+#                           standardised: the design builders standardise)
+#   .dmin_vec()             log(1 + travel time) to the nearest active zone (the `d_min` covariate)
+#   .feature_matrix()       the leakage-free design matrix for one forecast week
+#   .gweighted_own()        generation-time-weighted own recent incidence
+#   compute_risk_scores()   national and per-province relative risk and ranks
 #
-# The import coefficient beta is LEARNED from realised invasion events via a
-# complementary-log-log regression pooled over training weeks:
-#   cloglog(P(invade)) = log(beta) + log(Lambda)   [offset = log Lambda]
-# so p is tied directly to the mobility-driven import force and calibrated to the
-# actual (rare) invasion base rate — fixing the previous 1-exp(-R*Lambda)
-# overconfidence (R is a self-sustaining transmission number, NOT an import scale).
-#
-# Risk scores (at-risk zones only): absolute p_case on the CONFIRMED-case scale,
-# relative risk within each province of interest (Ituri, Nord-Kivu, Haut-Uele) and
-# relative risk nationwide. There is no ascertainment adjustment: see 00_config.R.
+# The invasion model itself is in 21_bayesian_renewal.R (the hazard) and
+# 20_forecast_detail.R (build_invasion_design); the renewal primitives are in
+# 06_simple_models.R. Every quantity here is on the CONFIRMED-case scale; there is no
+# ascertainment adjustment (see 00_config.R).
 # =============================================================================
 
 source(file.path(here::here(), "spatiotemporal", "00_config.R"))
@@ -79,20 +75,14 @@ affected_zones <- function(zone_week, cutoff) {
 }
 
 # ---------------------------------------------------------------------------
-# Learn the import coefficient beta from realised invasions
+# Design-matrix helpers for the covariate-augmented import model
 # ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Covariate-augmented import model (Q2 covariates + Q6 reporting-rate)
-# ---------------------------------------------------------------------------
-# The invasion hazard becomes  p_i = 1 - exp(-beta_i * Lambda_i)  with a
-# ZONE-SPECIFIC scale  beta_i = exp(intercept + sum_m gamma_m * x_{m,i}), i.e. we
-# keep the mobility import force Lambda as a fixed OFFSET and let penalised
-# covariates modulate the per-zone susceptibility. When covariate_spec is NULL
-# this collapses exactly to the intercept-only fit_import_beta (beta_i = beta).
-# Coefficients are Firth-penalised (brglm2) so a handful of events cannot make
-# them explode (the failure mode of the retired free-coefficient S3 model).
+# The invasion hazard is p_i = 1 - exp(-beta_i * Lambda_i) with a ZONE-SPECIFIC scale
+# beta_i = exp(intercept + sum_m gamma_m * x_{m,i}): the mobility import force Lambda enters
+# as a fixed OFFSET and the covariates modulate per-zone susceptibility. With an empty
+# covariate set it collapses to the intercept-only model. The fit itself is brms
+# (21_bayesian_renewal.R), whose priors regularise the quasi-separation that made the
+# frequentist joint MLE diverge.
 
 #' Build a zones x weeks matrix from an arbitrary count column.
 .count_wide <- function(zone_week, zones_all, col) {
@@ -122,7 +112,11 @@ affected_zones <- function(zone_week, cutoff) {
   .count_wide(zone_week, zones_all, col)
 }
 
-#' Named list of standardised STATIC covariate vectors aligned to zones_all.
+#' Named list of STATIC covariate vectors aligned to zones_all, on their natural scale
+#' (population enters as log population), with missing / non-finite values set to the
+#' covariate's median. NOT standardised here: build_invasion_design() standardises the
+#' training design, and the forecast and cascade callers re-standardise with THAT design's
+#' centre and scale.
 .static_features <- function(static_cov, zones_all) {
   out <- list()
   if (is.null(static_cov)) return(out)
@@ -163,10 +157,13 @@ affected_zones <- function(zone_week, cutoff) {
 #' Feature matrix (zones x features) for predicting invasion in week `t_for`,
 #' using only information available through week t_for-1 (no leakage).
 #'
-#' @param Y_active incidence matrix used for the d_min frontier feature. At fit
-#'   time this equals Y_wide (per-week historical frontier); at forecast time the
-#'   caller passes the OBSERVED training matrix so d_min is the distance to the
-#'   real frontier — NOT to zones with a small fractional PROJECTED incidence,
+#' @param Y_active incidence matrix used for the d_min frontier feature (default Y_wide).
+#'   At fit time the design builders (build_invasion_design(), 20_forecast_detail.R; the
+#'   time-varying-form design, 21c_frailty_models.R) pass the frontier as known for that
+#'   transition: under rolling as-of predictors (ROLLING_PREDICTORS, the default; always in
+#'   21c) the counts known at the end of week t_for - 1, otherwise the fold's one count matrix. At
+#'   forecast time the caller passes the OBSERVED training matrix so d_min is the distance
+#'   to the real frontier — NOT to zones with a small fractional PROJECTED incidence,
 #'   which would otherwise all count as "active" from horizon 2 onward.
 .feature_matrix <- function(t_for, Y_wide, A_wide, W, G, static, osrm,
                             zones_all, cov_spec, Y_active = Y_wide, S_wide = NULL) {
@@ -205,16 +202,8 @@ affected_zones <- function(zone_week, cutoff) {
 
 
 
-# ---------------------------------------------------------------------------
-# National renewal R (for forward projection of the import force at h>=2)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# The workhorse forecast
-# ---------------------------------------------------------------------------
-
-
+#' Generation-time-weighted own recent incidence: sum_k G[k] * Y[, t_for - k].
+#' The local-transmission term of the renewal equation, and the `*_local` covariates.
 .gweighted_own <- function(Yw, G, t_for) {
   n <- nrow(Yw); own <- numeric(n)
   for (k in seq_along(G)) {
@@ -232,15 +221,17 @@ affected_zones <- function(zone_week, cutoff) {
 # Risk scores (at-risk zones only)
 # ---------------------------------------------------------------------------
 
-#' Compute the four relative/absolute risk scores for a workhorse forecast.
-#'
-#' @param fc         forecast tibble from forecast_workhorse() (one method).
-#' @param province_map tibble(nom, province) from load_province_map().
-#' @return fc augmented with province, rr_ituri, rr_ituri_rank, rr_nat,
-#'   rr_nat_rank (all NA for affected zones).
 #' Column-safe province suffix: "Nord-Kivu" -> "nordkivu", "Haut-Uele" -> "hautuele".
 .prov_suffix <- function(p) tolower(gsub("[^A-Za-z]", "", p))
 
+#' National and per-province relative-risk scores for one method's forecast.
+#'
+#' @param fc         a forecast tibble (one method), with health_zone, mu_forecast and
+#'   was_active_before; e.g. predict_bayes_invasion() output.
+#' @param province_map tibble(nom, province) from load_province_map().
+#' @param provinces  provinces to add a within-province block for.
+#' @return fc augmented with `province`, `rr_nat` / `rr_nat_rank`, and `rr_<prov>` /
+#'   `rr_<prov>_rank` for each province of interest. All NA for already-affected zones.
 compute_risk_scores <- function(fc, province_map,
                                 provinces = get0("PROVINCES_OF_INTEREST",
                                                  ifnotfound = c("Ituri", "Nord-Kivu", "Haut-Uele"))) {
@@ -254,14 +245,13 @@ compute_risk_scores <- function(fc, province_map,
     dplyr::mutate(.mu = ifelse(was_active_before, NA_real_, mu_forecast)) %>%
     dplyr::group_by(dplyr::across(dplyr::all_of(grp))) %>%
     dplyr::mutate(
-      # nationwide relative risk (multiplier vs mean at-risk zone) + share + rank
+      # nationwide relative risk (multiplier vs the mean at-risk zone) + rank
       rr_nat        = .mu / mean(.mu, na.rm = TRUE),
-      rr_nat_share  = .mu / sum(.mu, na.rm = TRUE),
       rr_nat_rank   = dplyr::min_rank(dplyr::desc(.mu))
     ) %>%
     dplyr::ungroup()
   # Within-province relative risk for each province of interest (Ituri, Nord-Kivu,
-  # Haut-Uele, ...): each zone's expected introductions relative to the mean/sum of
+  # Haut-Uele, ...): each zone's expected introductions relative to the mean of
   # the still-at-risk zones IN THAT PROVINCE, with an in-province rank. A zone can
   # top its province yet be modest nationally, and vice-versa. rr_ituri is retained
   # (backward-compatible) as the Ituri entry of this generalised set.
@@ -270,9 +260,8 @@ compute_risk_scores <- function(fc, province_map,
     fc <- fc %>%
       dplyr::group_by(dplyr::across(dplyr::all_of(grp)), .inp = (province == prov)) %>%
       dplyr::mutate(
-        !!paste0("rr_", s)           := ifelse(.inp, .mu / mean(.mu, na.rm = TRUE), NA_real_),
-        !!paste0("rr_", s, "_share") := ifelse(.inp, .mu / sum(.mu, na.rm = TRUE), NA_real_),
-        !!paste0("rr_", s, "_rank")  := ifelse(.inp, dplyr::min_rank(dplyr::desc(.mu)), NA_integer_)
+        !!paste0("rr_", s)          := ifelse(.inp, .mu / mean(.mu, na.rm = TRUE), NA_real_),
+        !!paste0("rr_", s, "_rank") := ifelse(.inp, dplyr::min_rank(dplyr::desc(.mu)), NA_integer_)
       ) %>%
       dplyr::ungroup() %>%
       dplyr::select(-.inp)
@@ -280,4 +269,4 @@ compute_risk_scores <- function(fc, province_map,
   fc %>% dplyr::select(-.mu)
 }
 
-message("[workhorse] 15_workhorse.R loaded — mobility-informed renewal invasion model.")
+message("[workhorse] 15_workhorse.R loaded — invasion-design helpers and risk scores.")

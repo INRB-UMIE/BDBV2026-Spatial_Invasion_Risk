@@ -2,17 +2,11 @@
 # tests/test_delay_strata.R — the onset-to-sample delay, fitted per case class
 # BDBV 2026 DRC · Spatiotemporal Invasion Forecast Suite
 #
-# The onset imputation imputes onsets for CONFIRMED records, so it must draw from
-# the confirmed-case delay. Until 2026-09-22 it drew from a fit pooled over every
-# classification, and on this line list that pool is majority TEST-NEGATIVE:
-# 6,823 `not_a_case` windowed pairs and 2,038 with NO final classification,
-# against 4,981 confirmed and 145 suspected. Both groups are swabbed faster than
-# confirmed cases (raw means 6.40 d and 3.56 d against 8.80 d), so the pooled EpiDist
-# marginal returns 7.67 d where the CONFIRMED stratum gives 10.14 d — a 2.47 d
-# (32%) gap, and imputed onsets landed that much late for the ~23% of confirmed
-# records that carry one. (The interval-censored MLE puts the same contrast at
-# 7.67 vs 9.11 d; quote the estimator with the number.) Because the invasion
-# outcome is the FIRST onset in a zone, that shift can move a zone's invasion week.
+# The REPORTED onset->sample delay is the CONFIRMED-case delay (since 2026-10-15 it no longer
+# drives the onset imputation, which draws same-class donor intervals). A fit pooled over every
+# classification is mostly TEST-NEGATIVE and unclassified records on this line list (the
+# measured composition is in estimate_onset_sample_strata()'s docstring, 04c), so the pooled
+# and confirmed-stratum delays differ.
 #
 # These tests pin the read/write contract, because the failure mode is silent: a
 # stratum that does not resolve simply gives back the pooled delay.
@@ -90,17 +84,35 @@ test_that("the resolver cache keys on the stratum", {
                9.12, tolerance = 1e-9)
 })
 
-test_that("the onset imputation asks for the confirmed stratum", {
-  # Pinned on the source text: the call is inside load_linelist() and is not reachable
-  # without a line list, but getting it wrong is silent and moves every invasion date.
-  # testthat runs from tests/, so resolve the module relative to this file as well as the
-  # working directory — whichever exists.
-  cand <- c("01_data_prep.R", file.path("..", "01_data_prep.R"))
-  f <- cand[file.exists(cand)][1]
-  if (is.na(f)) testthat::skip("01_data_prep.R not reachable from the test working directory")
-  src <- readLines(f, warn = FALSE)
-  hit <- grep("effective_onset_sample_delay\\(stratum = \"confirmed\"\\)", src)
-  expect_gte(length(hit), 1L)
+test_that("the reported delay resolves the CONFIRMED stratum by default", {
+  # BEHAVIOURAL, not a source-text grep. This used to grep 01_data_prep.R for the literal
+  # `effective_onset_sample_delay(stratum = "confirmed")`; the call became
+  # `stratum = .imp_stratum` (resolved from ONSET_IMPUTE_STRATUM) and the test failed while
+  # the behaviour was correct. Assert what actually matters: the configured default is the
+  # confirmed stratum, and the resolver returns THAT stratum's fit rather than the pooled one.
+  .skip_unless("effective_onset_sample_delay")
+  expect_identical(get0("ONSET_IMPUTE_STRATUM", ifnotfound = NULL), "confirmed")
+
+  tmp <- tempfile(fileext = ".csv")
+  on.exit(unlink(tmp), add = TRUE)
+  utils::write.csv(data.frame(
+    quantity = c("epidist_family", "epidist_mean", "epidist_sd", "epidist_n",
+                 "epidist_family__confirmed", "epidist_mean__confirmed",
+                 "epidist_sd__confirmed", "epidist_n__confirmed",
+                 "selected_family", "selected_mean"),
+    value    = c("gamma", "7.665", "8.507", "13987",
+                 "gamma", "10.136", "10.416", "4981",
+                 "gamma", "7.665")),
+    tmp, row.names = FALSE)
+
+  pooled <- effective_onset_sample_delay(tmp, stratum = NULL)
+  conf   <- effective_onset_sample_delay(tmp, stratum = "confirmed")
+  expect_equal(pooled$mean, 7.665,  tolerance = 1e-9)
+  expect_equal(conf$mean,  10.136, tolerance = 1e-9)
+  expect_identical(conf$stratum, "confirmed")
+  # The two must be DIFFERENT distributions, or the stratification is inert — which is
+  # precisely the state this machinery was in before 2026-09-24.
+  expect_false(isTRUE(all.equal(pooled$mean, conf$mean)))
 })
 
 # -----------------------------------------------------------------------------
@@ -150,6 +162,68 @@ test_that("the panel's completeness curve is a CDF of the delay the pipeline res
   expect_true(all(diff(cdf) >= -1e-12))          # monotone
   expect_true(all(cdf >= 0 & cdf <= 1))
   expect_equal(cdf[1], 0, tolerance = 1e-12)
-  # Shape < 1 is why the panel plots a CDF and not a density: the density is unbounded at 0.
+  # This fixture's shape is below 1 (unbounded density at 0); the live fits sit near or below
+  # 1, which is why the panel plots a CDF and not a density.
   expect_lt(sp$params[["shape"]], 1)
+})
+
+# ---------------------------------------------------------------------------
+# POSTERIOR-DRAW REGISTRY KEYS
+#
+# 04c caches each EpiDist fit's draws under delay|model_type|family so 04d can draw the
+# posterior the pipeline actually used without a second Stan run. A put overwrites silently.
+# Between 2026-09-22 and 2026-10-02 every stratum fit reused the POOLED key, so the last
+# stratum fitted (suspected/probable, n=153) replaced the pooled posterior and
+# dhis2_delay_epidist_fits_*.png drew a 4.59 d onset->sample marginal while the pipeline
+# applied 7.41 d pooled / 9.81 d confirmed. Nothing modelled was wrong -- the published
+# parameters come from the fit objects, not the registry -- but the diagnostic figure, the
+# fit-summary CSV and the auto-generated sentence in BAYESIAN_INVASION_REPORT.md all
+# described a delay no downstream step applies.
+# ---------------------------------------------------------------------------
+
+test_that("a stratum fit never shares the pooled delay's registry key", {
+  .skip_unless(".epidist_draw_key")
+  expect_identical(.epidist_draw_key("onset_sample"), "onset_sample")
+  expect_identical(.epidist_draw_key("onset_sample", classes = NULL, stratum = "confirmed"),
+                   "onset_sample")                       # no subset -> no qualification
+  expect_identical(.epidist_draw_key("onset_sample", classes = "confirmed_case",
+                                     stratum = "confirmed"), "onset_sample__confirmed")
+  # The qualification comes from `classes`, so forgetting the label cannot restore the
+  # collision -- that omission is exactly how a future caller would reintroduce it.
+  expect_identical(.epidist_draw_key("onset_sample",
+                                     classes = c("suspected_case", "probable_case")),
+                   "onset_sample__probable_case+suspected_case")
+  keys <- c(.epidist_draw_key("onset_sample"),
+            .epidist_draw_key("onset_sample", "confirmed_case", "confirmed"),
+            .epidist_draw_key("onset_sample", "not_a_case", "not_a_case"),
+            .epidist_draw_key("onset_sample", c("suspected_case", "probable_case"), "suspected"))
+  expect_identical(anyDuplicated(keys), 0L)
+})
+
+test_that("fit_epidist_both forwards draw_key to every sub-fit", {
+  .skip_unless("fit_epidist_both"); .skip_unless("fit_epidist_model")
+  # fit_epidist_both() resolves fit_epidist_model() in the global environment, so the stub
+  # has to be installed there and restored afterwards.
+  seen <- character(0)
+  .orig <- get("fit_epidist_model", envir = globalenv())
+  assign("fit_epidist_model", function(df_pairs, obs_date_val, model_type, family_fn,
+                                       family_name, delay_name, draw_key = delay_name) {
+    seen <<- c(seen, .epidist_draws_key(draw_key, model_type, family_name))
+    NULL
+  }, envir = globalenv())
+  on.exit(assign("fit_epidist_model", .orig, envir = globalenv()), add = TRUE)
+
+  pairs <- tibble::tibble(onset = as.Date("2026-05-01") + 0:9,
+                          sample = as.Date("2026-05-01") + 0:9 + 3L)
+  invisible(fit_epidist_both(pairs, "onset_sample", as.Date("2026-07-01")))
+  pooled <- seen; seen <- character(0)
+  invisible(fit_epidist_both(pairs, "onset_sample", as.Date("2026-07-01"),
+                             draw_key = "onset_sample__confirmed"))
+  strat <- seen
+
+  expect_length(pooled, 4L)                               # naive/marginal x lognormal/gamma
+  expect_length(strat, 4L)
+  expect_true(all(startsWith(pooled, "onset_sample|")))
+  expect_true(all(startsWith(strat, "onset_sample__confirmed|")))
+  expect_identical(length(intersect(pooled, strat)), 0L)  # the collision that broke 04d
 })

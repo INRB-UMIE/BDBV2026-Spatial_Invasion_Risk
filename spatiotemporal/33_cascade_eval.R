@@ -4,28 +4,40 @@
 #
 # Layered validation, honest about the ~15-week data ceiling (a true 13-week
 # hold-out has at most one truncated origin):
-#   cascade_consistency_gate()  h=1 ranking vs the validated short-horizon model +
-#                               observed-frequency calibration (the anchor, §6.4).
-#   cascade_fit_psi()           fit the saturation psi so the cascade's expanding
-#                               front matches the observed frontier growth (§3.5).
+#   cascade_consistency_gate()  h=1 RANKING vs the validated short-horizon model (§6.4),
+#                               plus a level ratio that is ~delta by construction and is
+#                               therefore only a plumbing check, not calibration.
+#   cascade_fit_psi()           RETIRED naive-pace psi diagnostic (CASCADE_RUN_PACE_DIAG=1).
 #   cascade_backtest()          intermediate-horizon (<=8w) leave-future-out cascade
 #                               backtest at the earliest origins (~1 effective origin;
-#                               indicative), scored on reach discrimination + the
-#                               calibration of the weekly new-invasion count (§6.3).
+#                               indicative), scored on reach discrimination + the new-
+#                               invasion count — the COUNT is in-sample whenever delta was
+#                               fitted on the same origins and K (run_cascade.R reuses them).
 #   cascade_sensitivity()       ranking-stability across GT/kernel/psi/k/scenario (§6.6).
 #   cascade_sbc()               light simulation-based calibration of the kernel (§6.5).
 # Small self-contained metric helpers (no coupling to 16_invasion_eval internals).
 # =============================================================================
 
 # ---- metric helpers --------------------------------------------------------
-.casc_auc_pr <- function(p, y) {              # step-wise average precision (tie-aware)
-  ok <- is.finite(p) & !is.na(y); p <- p[ok]; y <- y[ok]
+# The published top-K budgets, shared with evaluate_invasion() (16_invasion_eval.R).
+.TOPK <- get0("TOPK_VALUES", ifnotfound = c(5L, 15L, 20L))
+
+# ONE average-precision implementation for the whole suite. This file used to carry its own
+# tie-aware copy under a comment saying it had "no coupling to 16_invasion_eval internals";
+# the two were numerically identical, so the independence bought nothing and cost a second
+# definition that could drift. 16_invasion_eval.R is loaded before this file by every entry
+# point (run_cascade.R, tests/run_tests.R, 41_kindiv_sweep.R); the fallback keeps an isolated
+# source() working and warns rather than silently scoring with a different estimator.
+.casc_auc_pr <- function(p, y) {
+  if (exists(".auc_pr", mode = "function")) return(.auc_pr(p, y))
+  warning("[cascade] .auc_pr() unavailable (16_invasion_eval.R not loaded); the cascade ",
+          "backtest is scored with a local fallback.", call. = FALSE)
+  ok <- is.finite(p) & !is.na(y); p <- p[ok]; y <- as.integer(y[ok])
   P <- sum(y == 1); if (!P || !length(p)) return(NA_real_)
   o <- order(p, decreasing = TRUE); ps <- p[o]; y <- y[o]
   tp <- cumsum(y == 1); fp <- cumsum(y == 0)
   keep <- c(ps[-length(ps)] != ps[-1], TRUE)
-  prec <- (tp / (tp + fp))[keep]; rec <- (tp / P)[keep]
-  sum(prec * diff(c(0, rec)), na.rm = TRUE)
+  sum((tp / (tp + fp))[keep] * diff(c(0, (tp / P)[keep])), na.rm = TRUE)
 }
 .casc_topk <- function(p, y, K) {             # precision@K (fraction of top-K truly invaded)
   ok <- is.finite(p) & !is.na(y); p <- p[ok]; y <- y[ok]
@@ -50,58 +62,101 @@
 
 # ---------------------------------------------------------------------------
 # CONSISTENCY GATE (PLAN §6.4). At h=1 the cascade uses no source projection, so
-# with sat==1 at week 1 its reach must (a) rank like the validated short-horizon
-# model and (b) sit at the recalibrated (observed-frequency) level. The h=2 leg is
-# compared to the DETERMINISTIC mean-field to avoid the Jensen offset (PLAN §6.4);
-# here we anchor on the exact-by-construction h=1 leg.
+# with sat==1 at week 1 its per-zone reach must be PROPORTIONAL to the validated
+# short-horizon model's week-1 probability from the same fit (the factor being delta).
+# The h=2 leg is compared to the DETERMINISTIC mean-field to avoid the Jensen
+# offset (PLAN §6.4); here we anchor on the h=1 leg.
+#
+# THE PASS RULE IS A NOISE-CALIBRATED DISPERSION TEST, not a Spearman threshold. A threshold on
+# the rank correlation of the few zones above `signal_thresh` cannot be met reliably: as the
+# outbreak declines those zones are near-tied (e.g. 6 zones at 2.2-3.7%), and the cascade's
+# Monte-Carlo noise at n_mc = 3000 (~15-20% of each zone's probability) reorders them. A
+# perfectly implemented cascade then fails rho >= 0.9 most of the time (measured on the
+# 2026-10-16 frame: 84%). The test below asks instead whether every zone's cascade reach
+# departs from level x prediction by more than its OWN Monte-Carlo error allows: Pearson
+# X^2 = sum (p_casc - level*p_pred)^2 / V over the zones with >= 5 expected invasions, on k - 1
+# df (one fitted level). V is the MODEL-BASED variance of the cascade's mean over D parameter
+# groups of R replicates each, V = [(q(1-q) - s^2)/R + s^2] / D, with q = level*p_pred and
+# s = level*p_sd (the forecast's posterior SD, scaled like the probability): process noise
+# within a group plus posterior-sampling noise between groups. (The empirical between-group
+# variance was tried first: for the many low-probability zones only a handful of groups record
+# an invasion, the estimate is noisy, and dividing by it inflates X^2.) The pass rule is
+# p >= gate_alpha. Spearman rho on the signal zones is still reported, as a diagnostic.
+#
+# THE GATE SIMULATES ON THE SHORT-HORIZON MODEL'S OWN GENERATION TIME. When the cascade
+# marginalises the generation time over a grid (CASCADE_GT_MARGINALISE = 1, a sensitivity; OFF
+# by default, where prep$G_list is NULL and nothing below changes), the grid point a group draws
+# sets the week-1 import force (own = sum_k G[k] I[, t-k]) while the short-horizon model uses the
+# single CASCADE_GT kernel, so the two would differ BY DESIGN, zone by zone. The week-1
+# simulation here therefore always holds the generation time at that kernel: what is tested is
+# that the simulator reproduces the model it is built from.
+#
+# WHAT THE GATE CANNOT TEST: THE LEVEL. Both sides are built from the SAME fit, so the
+# cascade's week-1 probability is 1 - exp(-delta * mu) against the short-horizon model's
+# 1 - exp(-mu), and their ratio is ~delta for ANY delta — dividing it by delta returns ~1 by
+# construction. It used to be part of `pass` and was described as a calibration test ("level
+# recalibrated to observed frequency"); it is an identity, and can fail only if the plumbing is
+# broken (delta not applied, saturation not 1 at week 1). It is kept as exactly that — an
+# implementation check, reported and warned on, but not part of `pass`. The one-week LEVEL is
+# tested against OBSERVED week-1 invasions by cascade_delta_h1_refit() (33b), at held-out
+# origins.
 # ---------------------------------------------------------------------------
 cascade_consistency_gate <- function(prep, fit, design, delta,
                                      zone_week_nc, mobility_matrices, gt_pmfs,
                                      covariates, osrm_mat, zones_all,
                                      n_mc = 3000L, signal_thresh = 0.02,
-                                     min_rho = 0.9,
-                                     # Level tolerance, RELATIVE TO delta. The gate previously
-                                     # tested the ranking correlation only. The level target is
-                                     # NOT 1: delta rescales the cascade hazard to the OBSERVED
-                                     # invasion frequency while the short-horizon model over-
-                                     # predicts by ~1/delta, so by construction
-                                     #     sum(p_cascade) / sum(p_shorthorizon)  ~=  delta.
-                                     # (2026-08 runs: 0.575/0.547 = 1.05 and 0.645/0.616 = 1.05.)
-                                     # Testing the ratio against 1.0 would therefore fail every
-                                     # correctly-calibrated run; what matters is that the realised
-                                     # level tracks the delta that was fitted for it.
+                                     gate_alpha = 0.01, min_expected = 5,
+                                     # Tolerance on the PLUMBING check level_ratio / delta (see
+                                     # the header): it is ~1 by construction for any delta, so a
+                                     # departure means the factor is not reaching the hazard.
                                      level_tol = 0.25) {
   scP <- CASCADE_SCENARIOS[[CASCADE_SCENARIO_PRIMARY]]
-  # No pop_vec, deliberately: this runs a SINGLE week, over which cumulative incidence
-  # cannot approach any zone's population, so within-zone depletion is identically inactive
-  # and supplying it would change nothing. Every multi-week simulation in the suite does
-  # pass it.
-  sim1 <- simulate_cascade(prep, scP, n_mc = n_mc, horizon = 1L, delta = delta,
+  # No pop_vec: within-zone depletion is not modelled (removed 2026-09-19), so simulate_cascade()
+  # accepts the argument but uses it in no simulation of the suite.
+  prep1 <- prep; prep1$G_list <- NULL; prep1$gt_weights <- NULL; prep1$gt_keys <- NULL
+  sim1 <- simulate_cascade(prep1, scP, n_mc = n_mc, horizon = 1L, delta = delta,
                            psi = CASCADE_PSI)
   reach1 <- cascade_reach_table(sim1, horizons = 1L)
   offs <- bayes_forecast_offsets(zone_week_nc, mobility_matrices, gt_pmfs, covariates,
             osrm_mat, zones_all, mob = prep$kernel, gt = CASCADE_GT,
             cov_spec = CASCADE_COV_SPEC, horizons = 1L)
   affected <- zones_all[prep$affected0]
-  pred <- predict_bayes_invasion(fit, offs, design, horizons = 1L, affected_zones = affected)
+  # The short-horizon model's own week-1 prediction from the SAME fit, by its own engine: a
+  # featured time-varying form is predicted by 21c's forecast (drift and frailty included).
+  pred <- if (inherits(fit, "stan_invasion_fit"))
+            .finalise_invasion_summary(stan_invasion_forecast_draws(fit, offs, 1L), affected)
+          else predict_bayes_invasion(fit, offs, design, horizons = 1L, affected_zones = affected)
+  if (!"p_sd" %in% names(pred))
+    stop("[cascade_gate] the short-horizon forecast carries no posterior SD (p_sd); the gate's ",
+         "Monte-Carlo variance cannot be formed.", call. = FALSE)
   m <- merge(reach1[, c("health_zone", "p_invasion")],
-             pred[, c("health_zone", "p_invasion")], by = "health_zone",
+             pred[, c("health_zone", "p_invasion", "p_sd")], by = "health_zone",
              suffixes = c("_casc", "_pred"))
   m <- m[is.finite(m$p_invasion_casc) & is.finite(m$p_invasion_pred), ]
   sig <- m[m$p_invasion_pred > signal_thresh, ]
   rho <- .casc_spearman(sig$p_invasion_casc, sig$p_invasion_pred)
   lvl <- sum(m$p_invasion_casc) / sum(m$p_invasion_pred)
-  pass_rank  <- is.finite(rho) && rho >= min_rho
+  # Monte-Carlo variance of each zone's week-1 reach, model-based (see the header).
+  .D <- as.numeric(sim1$n_draws_used); .R <- as.numeric(sim1$n_rep)
+  .q <- lvl * m$p_invasion_pred; .s2 <- (lvl * m$p_sd)^2
+  m$var_casc <- (pmax(.q * (1 - .q) - .s2, 0) / .R + .s2) / .D
+  .k <- is.finite(m$var_casc) & m$var_casc > 0 & lvl * m$p_invasion_pred * sim1$n_mc >= min_expected
+  x2 <- sum((m$p_invasion_casc[.k] - lvl * m$p_invasion_pred[.k])^2 / m$var_casc[.k])
+  df <- sum(.k) - 1L
+  p_disp <- if (df >= 1L) stats::pchisq(x2, df, lower.tail = FALSE) else NA_real_
+  pass_rank  <- is.finite(p_disp) && p_disp >= gate_alpha
   lvl_rel    <- if (is.finite(lvl) && is.finite(delta) && delta > 0) lvl / delta else NA_real_
+  # Plumbing check only (see the header): NOT part of `pass`, because it cannot fail for a
+  # wrong delta — only for a delta that never reached the hazard.
   pass_level <- is.finite(lvl_rel) && abs(lvl_rel - 1) <= level_tol
-  pass <- pass_rank && pass_level
+  pass <- pass_rank
   if (!pass_level)
-    warning(sprintf(paste0("[cascade_gate] h=1 LEVEL check failed: the cascade seeds at %.3f x the ",
-                           "validated short-horizon model, but delta=%.3f was fitted for it, so the ",
-                           "expected ratio is ~delta; realised/expected = %.2f (tolerance +/-%.0f%%). ",
-                           "The recalibration is not landing where it was aimed, even though the ",
-                           "RANKING agrees (rho=%.3f)."),
-                   lvl, delta, lvl_rel, 100 * level_tol, rho), call. = FALSE)
+    warning(sprintf(paste0("[cascade_gate] h=1 PLUMBING check failed: the cascade seeds at %.3f x the ",
+                           "raw short-horizon model from the same fit, where applying delta=%.3f ",
+                           "should give ~delta; ratio/delta = %.2f (tolerance +/-%.0f%%). The factor ",
+                           "is not reaching the simulated hazard as intended. (This is not a ",
+                           "calibration test: it is ~1 for any delta that IS applied.)"),
+                   lvl, delta, lvl_rel, 100 * level_tol), call. = FALSE)
   # keep the paired point cloud (for the evaluation figure's week-1 anchor panel):
   # signal = zones the validated model flags above threshold (drive the ranking test).
   gate_data <- data.frame(health_zone = m$health_zone,
@@ -109,14 +164,20 @@ cascade_consistency_gate <- function(prep, fit, design, delta,
                           p_invasion_casc = m$p_invasion_casc,
                           signal = m$p_invasion_pred > signal_thresh)
   list(spearman_signal = rho, n_signal = nrow(sig), level_ratio = lvl,
+       x2 = x2, x2_df = df, x2_p = p_disp, gate_alpha = gate_alpha, n_tested = sum(.k),
        level_vs_delta = lvl_rel, delta = delta,
+       # pass_level is the PLUMBING check (renamed in the note); `pass` is the ranking gate.
        pass = pass, pass_rank = pass_rank, pass_level = pass_level,
-       min_rho = min_rho, level_tol = level_tol,
+       level_is_identity = TRUE,
+       level_tol = level_tol,
        signal_thresh = signal_thresh, data = gate_data,
-       note = sprintf("h1 ranking rho=%.3f (n=%d, gate>=%.2f) %s; level=%.3f vs delta=%.3f (ratio %.2f, tol +/-%.0f%%) %s -> %s",
-                      rho, nrow(sig), min_rho, if (pass_rank) "PASS" else "FAIL",
+       note = sprintf(paste0("h1 proportionality X2=%.1f on %d df (p=%.3f, %d zones, gate p>=%.2f) %s ",
+                             "[rank diagnostic: rho=%.3f on %d signal zones]; plumbing: level=%.3f vs ",
+                             "delta=%.3f (ratio %.2f, ~1 by construction, tol +/-%.0f%%) %s -> %s"),
+                      x2, df, p_disp, sum(.k), gate_alpha, if (pass_rank) "PASS" else "FAIL",
+                      rho, nrow(sig),
                       lvl, delta, lvl_rel, 100 * level_tol,
-                      if (pass_level) "PASS" else "FAIL",
+                      if (pass_level) "ok" else "BROKEN",
                       if (pass) "PASS" else "FAIL"))
 }
 
@@ -281,7 +342,11 @@ cascade_fit_psi <- function(prep, delta, zone_week_nc, zones_all,
 cascade_backtest <- function(layer, cutoffs_from_end = c(10L, 9L, 8L), K = 6L,
                              n_mc = 300L, delta = NULL, psi = CASCADE_PSI,
                              kernel = CASCADE_KERNEL, zone_province = NULL,
-                             linelist = NULL, min_eval_age_days = 10L,
+                             # SETTLED outcomes only (LFO_RELIABLE_EVAL_AGE_DAYS), the same
+                             # threshold the calibration origins use: was 10 d, below the p90
+                             # onset->confirmation delay.
+                             linelist = NULL,
+                             min_eval_age_days = get0("LFO_RELIABLE_EVAL_AGE_DAYS", ifnotfound = 25L),
                              analysis_date = get0("ANALYSIS_DATE", ifnotfound = NA),
                              origins = NULL, seed = CASCADE_SEED) {
   K <- as.integer(K)
@@ -299,17 +364,17 @@ cascade_backtest <- function(layer, cutoffs_from_end = c(10L, 9L, 8L), K = 6L,
   # its K-week one. Score the origins that do, rather than refusing to score any.
   origins <- Filter(function(o) key %in% names(o$truth), origins)
   if (!length(origins)) {
-    warning(sprintf("[cascade_backtest] no origin carries a reporting-complete %d-week outcome.", K),
+    warning(sprintf("[cascade_backtest] no origin carries a settled %d-week outcome (min_eval_age_days).", K),
             call. = FALSE)
     return(NULL)
   }
 
-  del <- delta %||% cascade_fit_delta(cov_model = paste0("Bayes-", kernel, "-geo"))
+  del <- delta %||% cascade_fit_delta(cov_model = cascade_hazard_label(kernel))
   scP <- CASCADE_SCENARIOS[[CASCADE_SCENARIO_PRIMARY]]
   res <- list(); det <- list()
   for (o in origins) {
-    # Same model as production: the origin carries the population vector so within-zone
-    # depletion is engaged here exactly as it is in the run this backtest scores.
+    # Same model as production (within-zone depletion is modelled in neither: removed
+    # 2026-09-19).
     sim   <- simulate_cascade(o$prep, scP, n_mc = n_mc, horizon = K,
                               delta = as.numeric(del), psi = psi, seed = seed,
                               pop_vec = o$pop_vec)
@@ -321,12 +386,19 @@ cascade_backtest <- function(layer, cutoffs_from_end = c(10L, 9L, 8L), K = 6L,
     if (!length(p)) next
     br <- mean(y); ap <- .casc_auc_pr(p, y)
     rk_avg <- rank(-p, ties.method = "average")
-    res[[length(res) + 1L]] <- tibble::tibble(
+    .row <- tibble::tibble(
       cutoff = as.character(o$cutoff_date), K = K, n_atrisk = length(p), n_events = sum(y),
       base_rate = br, auc_pr = ap, auc_pr_skill = ap / max(br, 1e-9),
       mean_rank_of_truth = if (any(y == 1L)) mean(rk_avg[y == 1L]) else NA_real_,
-      prec_at5 = .casc_topk(p, y, 5L), prec_at10 = .casc_topk(p, y, 10L),
       pred_new = sum(p), obs_new = sum(y), count_ratio = sum(p) / max(sum(y), 1e-9))
+    # SAME top-K budgets as the short-horizon evaluation (TOPK_VALUES, 00_config.R), so a
+    # cascade precision@K and an invasion precision@K mean the same watch-list size. The
+    # column NAME is generated from the budget it holds: the three names used to be written
+    # out by hand beside values taken from .TOPK[1:3], so changing TOPK_VALUES left a column
+    # called `prec_at15` carrying precision at some other K -- and .TOPK[3] silently became
+    # NA if the vector was shortened.
+    for (.K in .TOPK) .row[[paste0("prec_at", .K)]] <- .casc_topk(p, y, .K)
+    res[[length(res) + 1L]] <- .row
     det[[length(det) + 1L]] <- tibble::tibble(
       cutoff = as.character(o$cutoff_date), K = K,
       health_zone = z, p_invasion = p, y = as.integer(y))
@@ -369,20 +441,29 @@ cascade_sensitivity <- function(layer, design_by_kernel, fit_by_kernel, reff, de
   base_r <- base_matched[base_matched$horizon == max(CASCADE_REPORT_HORIZONS) &
                          !base_matched$was_active_before, c("health_zone", "p_invasion")]
   runs <- list()
-  add <- function(tag, reach) {
+  # `level_comparable` says whether the row's mean reach can be read against the baseline's.
+  # It cannot for the KERNEL rows: each alternative kernel's hazard is refit on its own design,
+  # so its intercept — and the scale delta corrects — is that kernel's, while delta was fitted
+  # (on the held-out-origin calibration windows) for the FEATURED kernel only. Running the alternative at the featured delta
+  # puts its level on an uncalibrated scale (the shipped table showed +80-105% mean reach on
+  # the kernel axis, an artefact of exactly this). Refitting delta per kernel would need the
+  # whole held-out-origin calibration once per kernel; instead those rows report the RANKING
+  # comparison only and their mean reach is withheld (NA), with the reason recorded.
+  add <- function(tag, reach, level_comparable = TRUE, note = NA_character_) {
     r <- reach[reach$horizon == max(CASCADE_REPORT_HORIZONS) & !reach$was_active_before,
                c("health_zone", "p_invasion")]
     m <- merge(base_r, r, by = "health_zone", suffixes = c("_base", "_alt"))
     runs[[tag]] <<- tibble::tibble(axis = tag,
       spearman = .casc_spearman(m$p_invasion_base, m$p_invasion_alt),
-      mean_reach = mean(r$p_invasion, na.rm = TRUE))
+      mean_reach = if (isTRUE(level_comparable)) mean(r$p_invasion, na.rm = TRUE) else NA_real_,
+      level_comparable = isTRUE(level_comparable), note = note)
   }
   # The matched baseline itself is reported as a row so the mean reach every alternative
   # is compared against is visible in the table rather than implicit (its Spearman is 1
   # by construction).
   add(sprintf("baseline (psi=%.2f)", psi), base_matched)
   # NOTE: the individual-offspring overdispersion (k_indiv) axis is handled by the
-  # dedicated cascade_kindiv_sweep() (dense grid, fitted psi), not here, to avoid
+  # dedicated cascade_kindiv_sweep() (dense grid, at the deployed psi), not here, to avoid
   # duplicate work and keep a single canonical k result.
   # psi sweep. prep for the production kernel is built ONCE above; it was previously
   # rebuilt inside this loop on every psi, re-extracting the posterior draws and the
@@ -409,7 +490,10 @@ cascade_sensitivity <- function(layer, design_by_kernel, fit_by_kernel, reff, de
                              reff, kernel = kern)
     add(sprintf("kernel=%s", kern),
         cascade_reach_table(simulate_cascade(prepk, scP, n_mc = n_mc, delta = delta, psi = psi,
-                                             pop_vec = layer$pop)))
+                                             pop_vec = layer$pop)),
+        level_comparable = FALSE,
+        note = sprintf(paste0("rank comparison only: delta was fitted for %s, not for %s, so ",
+                              "this kernel's absolute reach is uncalibrated"), CASCADE_KERNEL, kern))
   }
   dplyr::bind_rows(runs)
 }
@@ -424,8 +508,8 @@ cascade_sensitivity <- function(layer, design_by_kernel, fit_by_kernel, reff, de
 #
 # All runs — baseline AND alternatives — use the SAME (delta, psi) as production, so
 # the effect attributed to k is purely k. (Contrast cascade_sensitivity(), whose k
-# rows historically ran at the default psi while the baseline used the fitted psi;
-# that conflation is avoided here and the call site is fixed to pass the fitted psi.)
+# rows historically ran at the default psi while the baseline used the then-fitted psi;
+# that conflation is avoided here and the call site passes the deployed psi, now fixed at 0.)
 # Returns list(summary, byzone). `province` is a named vector zone -> province.
 # ---------------------------------------------------------------------------
 cascade_kindiv_sweep <- function(prep, scenario, delta, psi, pop_vec = NULL,
@@ -458,6 +542,20 @@ cascade_kindiv_sweep <- function(prep, scenario, delta, psi, pop_vec = NULL,
   # measures only genuinely separable agreement. (Spearman/Kendall beside it already handle
   # ties correctly via average ranks, which is why they were never affected.)
   .topset <- function(d, N) d$health_zone[rank(-d$p_invasion, ties.method = "max") <= N]
+  # THE COLUMN NAMES BELOW ENCODE THEIR OWN ARGUMENTS. `mean_reach_h4/h8/h13`,
+  # `mean_estab_h13` and `top15_jaccard` are written out as literals while their VALUES come
+  # from `horizons` and `topN`, and 36_report.R and 42_kindiv_sweep_figure.R read those
+  # literals and label them "13 weeks" / "Top-15 Jaccard" in published prose and figures. A
+  # caller that changed either argument would therefore publish a number under the wrong K or
+  # the wrong horizon, silently. Stop instead: the names are part of the published contract,
+  # so a genuine change to them has to be made deliberately in all three files at once.
+  .hz <- as.integer(horizons)
+  if (!identical(.hz[c(1L, min(2L, length(.hz)))], c(4L, 8L)) || Hmax != 13L || topN != 15L)
+    stop(sprintf(paste0("[kindiv] cascade_kindiv_sweep() writes the fixed column names ",
+                        "mean_reach_h4/h8/h13, mean_estab_h13 and top15_jaccard, but was ",
+                        "called with horizons = %s and topN = %d. Rename the columns here ",
+                        "and in 36_report.R / 42_kindiv_sweep_figure.R before changing these."),
+                 paste(.hz, collapse = "/"), topN), call. = FALSE)
   base_r   <- atrisk(reach_by_k[[key(k_base)]], Hmax)
   base_top <- .topset(base_r, topN)
   jacc <- function(a, b) { u <- length(union(a, b)); if (!u) return(NA_real_)
@@ -497,13 +595,30 @@ cascade_kindiv_sweep <- function(prep, scenario, delta, psi, pop_vec = NULL,
 # ~uniform. Few replicates by default (heavy); returns the rank statistics.
 # ---------------------------------------------------------------------------
 cascade_sbc <- function(design, cov_spec = CASCADE_COV_SPEC, n_sbc = 20L,
-                        iter = 400L, seed = CASCADE_SEED) {
-  set.seed(seed)
+                        iter = 400L, seed = CASCADE_SEED, form = CASCADE_FORM) {
+  # The check simulates from, and refits, the FIXED-BETA brms hazard. When the cascade deploys a
+  # time-varying form its fitter is the Stan engine, which this does not exercise; it says so
+  # rather than report a check of a different fitter as the deployed one's.
+  if (!identical(form, "fixed"))
+    return(list(rank_stats = NULL, n_used = 0L, skipped = TRUE,
+                note = sprintf(paste0("SBC not run: the cascade hazard is the '%s' form (Stan engine); ",
+                                      "this check covers the fixed-beta brms fitter only."), form)))
+  # Seeded; the caller's RNG stream is restored (as simulate_cascade() does).
+  .had <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  .old <- if (.had) get(".Random.seed", envir = globalenv()) else NULL
+  on.exit({ if (.had) assign(".Random.seed", .old, envir = globalenv())
+            else suppressWarnings(rm(".Random.seed", envir = globalenv())) }, add = TRUE)
+  set_fixed_seed(seed)
   d0 <- design$d; feat <- intersect(cov_spec, design$feat)
+  # The truths are drawn from the SAME priors the fitter uses (00_config.R), so the ranks are
+  # uniform under a correct fitter; typed values here would silently break that the day a prior
+  # changes.
+  .p0 <- .normal_prior_params(BAYES_PRIOR_INTERCEPT, "BAYES_PRIOR_INTERCEPT")
+  .pb <- .normal_prior_params(BAYES_PRIOR_COEF, "BAYES_PRIOR_COEF")
   Z <- as.matrix(cbind(1, d0[, feat, drop = FALSE])); off <- d0$logLam
   ranks <- vector("list", n_sbc)
   for (s in seq_len(n_sbc)) {
-    b0 <- stats::rnorm(1, -3, 2); g <- stats::rnorm(length(feat), 0, 1)
+    b0 <- stats::rnorm(1, .p0[1], .p0[2]); g <- stats::rnorm(length(feat), .pb[1], .pb[2])
     eta <- as.numeric(Z %*% c(b0, g)) + off
     y <- stats::rbinom(nrow(Z), 1, 1 - exp(-exp(eta)))       # cloglog
     if (sum(y) < 2L) next
@@ -518,6 +633,6 @@ cascade_sbc <- function(design, cov_spec = CASCADE_COV_SPEC, n_sbc = 20L,
       if (nm %in% names(dr)) mean(dr[[nm]] < truth[[nm]]) else NA_real_)
   }
   ranks <- do.call(rbind, ranks[!vapply(ranks, is.null, logical(1))])
-  list(rank_stats = ranks, n_used = if (is.null(ranks)) 0L else nrow(ranks),
+  list(rank_stats = ranks, n_used = if (is.null(ranks)) 0L else nrow(ranks), skipped = FALSE,
        note = "SBC rank of truth within posterior should be ~Uniform(0,1) per parameter")
 }
