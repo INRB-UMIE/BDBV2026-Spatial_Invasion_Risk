@@ -1,7 +1,7 @@
 {
-  "latest_analysis_date": "2026-10-28",
-  "path": "outputs/2026-10-28",
-  "risk_scores": "outputs/2026-10-28/bayes_risk_scores_all_zones.csv",
-  "run_info": "outputs/2026-10-28/run_info.json",
-  "updated_at": "2026-10-28T12:19:00Z"
+  "latest_analysis_date": "2026-10-30",
+  "path": "outputs/2026-10-30",
+  "risk_scores": "outputs/2026-10-30/bayes_risk_scores_all_zones.csv",
+  "run_info": "outputs/2026-10-30/run_info.json",
+  "updated_at": "2026-10-30T15:21:49Z"
 }
