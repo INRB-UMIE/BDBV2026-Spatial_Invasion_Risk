@@ -1,0 +1,885 @@
+{
+  "pipeline": "spatiotemporal",
+  "conditional_variant": false,
+  "generated_at": "2026-11-05T21:28:52+0000",
+  "selection_rule": "All three axes are computed on the rounds AFTER the ascertainment burn-in (cutoff week index >= 7), and AUC-PR skill is scored WITHIN each forecast date (per-date AUC-PR) rather than on all rounds pooled. Excluding the burn-in is a deliberate choice: in the discovery phase where first cases were confirmed partly reflected where surveillance looked first, so those rounds are kept out of the choice of model. Performance is REPORTED over all rounds. Among methods covering the most horizons (partial-CV methods excluded), drop 'spiky' models whose worst-horizon mean rank-of-truth exceeds 1.5x the field median; among the survivors the winner is the lowest CV COMPOSITE — within each horizon models are ranked by AUC-PR skill (desc), mean rank-of-truth (asc) and log score (asc), the three ranks are summed within horizon and then summed across horizons — with ties broken by higher total AUC-PR skill, then lower total rank-of-truth, then lower log score. Gates fall back to the ungated set if they would leave nothing. Log-score axis: RECALIBRATED (16b prequential delta; INVASION_SELECT_ON_RECAL=TRUE), so the axis measures refinement rather than calibration-in-the-large.",
+  "horizons_pooled": [1, 2],
+  "evaluation_source": {
+    "type": "in-memory (this run's CV)",
+    "path": null,
+    "pinned_from_baseline": false
+  },
+  "selection_basis": "per_date_post_burnin",
+  "performance_reported_on": "all rounds",
+  "pick_previous_rule": {
+    "method": "Bayes-M14-fill-geo",
+    "stage1_method": "Bayes-M14-fill-geo",
+    "log_score_axis": "log_score_recal",
+    "composite": 13,
+    "margin_over_runner_up": 6,
+    "cascade_kernel": "M14-fill",
+    "form": "fixed"
+  },
+  "selection_bootstrap": [
+    {
+      "method": "Bayes-M14-fill-geo-tvrw1",
+      "kernel": "M14-fill",
+      "share": 0.5575,
+      "stage1_share": 0
+    },
+    {
+      "method": "Bayes-M14-fill-geo",
+      "kernel": "M14-fill",
+      "share": 0.21,
+      "stage1_share": 0.7675
+    },
+    {
+      "method": "Bayes-M10-fill-geo",
+      "kernel": "M10-fill",
+      "share": 0.0775,
+      "stage1_share": 0.0775
+    },
+    {
+      "method": "Bayes-M13c-fill-geo",
+      "kernel": "M13c-fill",
+      "share": 0.075,
+      "stage1_share": 0.075
+    },
+    {
+      "method": "Bayes-M16-fill-geo",
+      "kernel": "M16-fill",
+      "share": 0.065,
+      "stage1_share": 0.065
+    },
+    {
+      "method": "Bayes-M16-fill-med",
+      "kernel": "M16-fill",
+      "share": 0.0125,
+      "stage1_share": 0.0125
+    },
+    {
+      "method": "Bayes-M14-fill-med",
+      "kernel": "M14-fill",
+      "share": 0.0025,
+      "stage1_share": 0.0025
+    }
+  ],
+  "selection_axis": {
+    "select_on_recal": true,
+    "log_score_axis": "log_score_recal",
+    "bayesian_pick_raw": {
+      "method": "Bayes-M14-fill-geo-tvrw1",
+      "stage1_method": "Bayes-M14-fill-geo",
+      "log_score_axis": "log_score",
+      "composite": 13,
+      "margin_over_runner_up": 7,
+      "cascade_kernel": "M14-fill",
+      "form": "rw1"
+    },
+    "bayesian_pick_recal": {
+      "method": "Bayes-M14-fill-geo-tvrw1",
+      "stage1_method": "Bayes-M14-fill-geo",
+      "log_score_axis": "log_score_recal",
+      "composite": 13,
+      "margin_over_runner_up": 7,
+      "cascade_kernel": "M14-fill",
+      "form": "rw1"
+    },
+    "pick_stable_across_axes": true,
+    "cascade_kernel_stable": true
+  },
+  "data_snapshot": {
+    "selected_on": {
+      "folder": "LINELIST_05112026",
+      "processed_at": "2026-11-05T12:00:00"
+    },
+    "predicted_on": {
+      "folder": "LINELIST_05112026",
+      "processed_at": "2026-11-05T12:00:00"
+    },
+    "snapshot_lag": false
+  },
+  "featured": {
+    "bayesian": {
+      "method": "Bayes-M14-fill-geo-tvrw1",
+      "stage1_method": "Bayes-M14-fill-geo",
+      "stage2_pool": [
+        "Bayes-M14-fill-geo",
+        "Bayes-M14-fill-geo-tvrw1"
+      ],
+      "secondary_forms": [
+        "Bayes-M14-fill-geo-tvfrailty",
+        "Bayes-M14-fill-geo-tvrw1frailty"
+      ],
+      "form": "rw1",
+      "spec": {
+        "label": "Bayes-M14-fill-geo-tvrw1",
+        "mob": "M14-fill",
+        "gt": "medium",
+        "cov": [
+          "ccvi",
+          "d_min"
+        ],
+        "link": "cloglog",
+        "engine": "stan",
+        "form": "rw1",
+        "use_rw": true,
+        "use_frailty": false,
+        "stage1": "Bayes-M14-fill-geo"
+      },
+      "auc_pr_skill_sum": 48.53,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 26.44,
+          "auc_pr_pooled_all_rounds": 0.1367,
+          "auc_pr_skill_pooled_all_rounds": 26.72,
+          "mean_rank_of_truth": 42.63,
+          "log_score_used": 0.0174,
+          "log_score_raw": 0.0178,
+          "rank_aucpr_skill": 1,
+          "rank_rank_of_truth": 1,
+          "rank_log_score": 1
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 22.09,
+          "auc_pr_pooled_all_rounds": 0.1499,
+          "auc_pr_skill_pooled_all_rounds": 16.34,
+          "mean_rank_of_truth": 40.26,
+          "log_score_used": 0.0312,
+          "log_score_raw": 0.0318,
+          "rank_aucpr_skill": 2,
+          "rank_rank_of_truth": 1,
+          "rank_log_score": 2
+        }
+      ],
+      "pipeline_pick": "Bayes-M14-fill-geo-tvrw1",
+      "cross_check_ok": true
+    },
+    "renewal": {
+      "method": null,
+      "auc_pr_skill_sum": null,
+      "per_horizon": [],
+      "pipeline_pick": null,
+      "cross_check_ok": null,
+      "pipeline_fallback": false
+    },
+    "headline": {
+      "method": "Bayes-M14-fill-geo-tvrw1",
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 26.44,
+          "auc_pr_pooled_all_rounds": 0.1367,
+          "auc_pr_skill_pooled_all_rounds": 26.72,
+          "mean_rank_of_truth": 42.63,
+          "log_score_used": 0.0174,
+          "log_score_raw": 0.0178,
+          "rank_aucpr_skill": 1,
+          "rank_rank_of_truth": 1,
+          "rank_log_score": 1
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 22.09,
+          "auc_pr_pooled_all_rounds": 0.1499,
+          "auc_pr_skill_pooled_all_rounds": 16.34,
+          "mean_rank_of_truth": 40.26,
+          "log_score_used": 0.0312,
+          "log_score_raw": 0.0318,
+          "rank_aucpr_skill": 2,
+          "rank_rank_of_truth": 1,
+          "rank_log_score": 2
+        }
+      ],
+      "pipeline_pick": "Bayes-M14-fill-geo-tvrw1",
+      "cross_check_ok": true
+    }
+  },
+  "bayesian_leaderboard": [
+    {
+      "rank": 1,
+      "method": "Bayes-M14-fill-geo",
+      "auc_pr_skill_sum": 48.12,
+      "rank_of_truth_max": 47.64,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 25.73,
+          "auc_pr_pooled_all_rounds": 0.1347,
+          "auc_pr_skill_pooled_all_rounds": 26.33,
+          "mean_rank_of_truth": 46.26,
+          "log_score_used": 0.0176,
+          "log_score_raw": 0.0198,
+          "rank_aucpr_skill": 2,
+          "rank_rank_of_truth": 5,
+          "rank_log_score": 1
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 22.4,
+          "auc_pr_pooled_all_rounds": 0.1853,
+          "auc_pr_skill_pooled_all_rounds": 20.21,
+          "mean_rank_of_truth": 47.64,
+          "log_score_used": 0.0309,
+          "log_score_raw": 0.035,
+          "rank_aucpr_skill": 1,
+          "rank_rank_of_truth": 3,
+          "rank_log_score": 1
+        }
+      ]
+    },
+    {
+      "rank": 2,
+      "method": "Bayes-M10-fill-geo",
+      "auc_pr_skill_sum": 48.2,
+      "rank_of_truth_max": 49.82,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 27.57,
+          "auc_pr_pooled_all_rounds": 0.1387,
+          "auc_pr_skill_pooled_all_rounds": 27.1,
+          "mean_rank_of_truth": 47.5,
+          "log_score_used": 0.0181,
+          "log_score_raw": 0.0203,
+          "rank_aucpr_skill": 1,
+          "rank_rank_of_truth": 7,
+          "rank_log_score": 2
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 20.63,
+          "auc_pr_pooled_all_rounds": 0.1648,
+          "auc_pr_skill_pooled_all_rounds": 17.97,
+          "mean_rank_of_truth": 49.82,
+          "log_score_used": 0.0321,
+          "log_score_raw": 0.036,
+          "rank_aucpr_skill": 2,
+          "rank_rank_of_truth": 6,
+          "rank_log_score": 2
+        }
+      ]
+    },
+    {
+      "rank": 3,
+      "method": "Bayes-M13c-fill-geo",
+      "auc_pr_skill_sum": 38.94,
+      "rank_of_truth_max": 40.54,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 21,
+          "auc_pr_pooled_all_rounds": 0.1303,
+          "auc_pr_skill_pooled_all_rounds": 25.47,
+          "mean_rank_of_truth": 37.36,
+          "log_score_used": 0.0187,
+          "log_score_raw": 0.0217,
+          "rank_aucpr_skill": 6,
+          "rank_rank_of_truth": 1,
+          "rank_log_score": 5
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 17.94,
+          "auc_pr_pooled_all_rounds": 0.1652,
+          "auc_pr_skill_pooled_all_rounds": 18.01,
+          "mean_rank_of_truth": 40.54,
+          "log_score_used": 0.0335,
+          "log_score_raw": 0.0393,
+          "rank_aucpr_skill": 5,
+          "rank_rank_of_truth": 1,
+          "rank_log_score": 6
+        }
+      ]
+    },
+    {
+      "rank": 4,
+      "method": "Bayes-M14-fill-med",
+      "auc_pr_skill_sum": 43.02,
+      "rank_of_truth_max": 56.06,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 23.26,
+          "auc_pr_pooled_all_rounds": 0.1309,
+          "auc_pr_skill_pooled_all_rounds": 25.58,
+          "mean_rank_of_truth": 52.35,
+          "log_score_used": 0.0183,
+          "log_score_raw": 0.0204,
+          "rank_aucpr_skill": 4,
+          "rank_rank_of_truth": 10,
+          "rank_log_score": 3
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 19.76,
+          "auc_pr_pooled_all_rounds": 0.1658,
+          "auc_pr_skill_pooled_all_rounds": 18.08,
+          "mean_rank_of_truth": 56.06,
+          "log_score_used": 0.0327,
+          "log_score_raw": 0.0364,
+          "rank_aucpr_skill": 3,
+          "rank_rank_of_truth": 10,
+          "rank_log_score": 3
+        }
+      ]
+    },
+    {
+      "rank": 5,
+      "method": "Bayes-M17-fill-geo",
+      "auc_pr_skill_sum": 36.24,
+      "rank_of_truth_max": 44.61,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 19.62,
+          "auc_pr_pooled_all_rounds": 0.1329,
+          "auc_pr_skill_pooled_all_rounds": 25.97,
+          "mean_rank_of_truth": 40.77,
+          "log_score_used": 0.0193,
+          "log_score_raw": 0.0225,
+          "rank_aucpr_skill": 8,
+          "rank_rank_of_truth": 2,
+          "rank_log_score": 8
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 16.62,
+          "auc_pr_pooled_all_rounds": 0.1498,
+          "auc_pr_skill_pooled_all_rounds": 16.33,
+          "mean_rank_of_truth": 44.61,
+          "log_score_used": 0.0349,
+          "log_score_raw": 0.041,
+          "rank_aucpr_skill": 8,
+          "rank_rank_of_truth": 2,
+          "rank_log_score": 8
+        }
+      ]
+    },
+    {
+      "rank": 6,
+      "method": "Bayes-M16-fill-geo",
+      "auc_pr_skill_sum": 37.39,
+      "rank_of_truth_max": 52.96,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 19.82,
+          "auc_pr_pooled_all_rounds": 0.1255,
+          "auc_pr_skill_pooled_all_rounds": 24.52,
+          "mean_rank_of_truth": 52.96,
+          "log_score_used": 0.0186,
+          "log_score_raw": 0.0208,
+          "rank_aucpr_skill": 7,
+          "rank_rank_of_truth": 11,
+          "rank_log_score": 4
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 17.56,
+          "auc_pr_pooled_all_rounds": 0.165,
+          "auc_pr_skill_pooled_all_rounds": 17.99,
+          "mean_rank_of_truth": 48.39,
+          "log_score_used": 0.0329,
+          "log_score_raw": 0.0368,
+          "rank_aucpr_skill": 7,
+          "rank_rank_of_truth": 4,
+          "rank_log_score": 4
+        }
+      ]
+    },
+    {
+      "rank": 7,
+      "method": "Bayes-M10-fill-med",
+      "auc_pr_skill_sum": 42.6,
+      "rank_of_truth_max": 60.69,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 23.49,
+          "auc_pr_pooled_all_rounds": 0.1244,
+          "auc_pr_skill_pooled_all_rounds": 24.3,
+          "mean_rank_of_truth": 56.77,
+          "log_score_used": 0.0187,
+          "log_score_raw": 0.0207,
+          "rank_aucpr_skill": 3,
+          "rank_rank_of_truth": 15,
+          "rank_log_score": 6
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 19.1,
+          "auc_pr_pooled_all_rounds": 0.1433,
+          "auc_pr_skill_pooled_all_rounds": 15.62,
+          "mean_rank_of_truth": 60.69,
+          "log_score_used": 0.0335,
+          "log_score_raw": 0.0371,
+          "rank_aucpr_skill": 4,
+          "rank_rank_of_truth": 15,
+          "rank_log_score": 5
+        }
+      ]
+    },
+    {
+      "rank": 8,
+      "method": "Bayes-M13c-fill-med",
+      "auc_pr_skill_sum": 35.52,
+      "rank_of_truth_max": 51.51,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 19.26,
+          "auc_pr_pooled_all_rounds": 0.1195,
+          "auc_pr_skill_pooled_all_rounds": 23.35,
+          "mean_rank_of_truth": 45.23,
+          "log_score_used": 0.0193,
+          "log_score_raw": 0.0221,
+          "rank_aucpr_skill": 9,
+          "rank_rank_of_truth": 4,
+          "rank_log_score": 9
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 16.26,
+          "auc_pr_pooled_all_rounds": 0.1511,
+          "auc_pr_skill_pooled_all_rounds": 16.48,
+          "mean_rank_of_truth": 51.51,
+          "log_score_used": 0.035,
+          "log_score_raw": 0.0403,
+          "rank_aucpr_skill": 10,
+          "rank_rank_of_truth": 8,
+          "rank_log_score": 9
+        }
+      ]
+    },
+    {
+      "rank": 9,
+      "method": "Bayes-M16-fill-med",
+      "auc_pr_skill_sum": 40.71,
+      "rank_of_truth_max": 58.54,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 22.89,
+          "auc_pr_pooled_all_rounds": 0.1206,
+          "auc_pr_skill_pooled_all_rounds": 23.57,
+          "mean_rank_of_truth": 58.54,
+          "log_score_used": 0.0193,
+          "log_score_raw": 0.0213,
+          "rank_aucpr_skill": 5,
+          "rank_rank_of_truth": 16,
+          "rank_log_score": 7
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 17.82,
+          "auc_pr_pooled_all_rounds": 0.1563,
+          "auc_pr_skill_pooled_all_rounds": 17.04,
+          "mean_rank_of_truth": 56.15,
+          "log_score_used": 0.0346,
+          "log_score_raw": 0.0382,
+          "rank_aucpr_skill": 6,
+          "rank_rank_of_truth": 11,
+          "rank_log_score": 7
+        }
+      ]
+    },
+    {
+      "rank": 10,
+      "method": "Bayes-M4c-geo",
+      "auc_pr_skill_sum": 29.08,
+      "rank_of_truth_max": 49.41,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 15.88,
+          "auc_pr_pooled_all_rounds": 0.0944,
+          "auc_pr_skill_pooled_all_rounds": 18.45,
+          "mean_rank_of_truth": 47.18,
+          "log_score_used": 0.0202,
+          "log_score_raw": 0.0222,
+          "rank_aucpr_skill": 12,
+          "rank_rank_of_truth": 6,
+          "rank_log_score": 11
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 13.2,
+          "auc_pr_pooled_all_rounds": 0.1193,
+          "auc_pr_skill_pooled_all_rounds": 13.01,
+          "mean_rank_of_truth": 49.41,
+          "log_score_used": 0.036,
+          "log_score_raw": 0.0395,
+          "rank_aucpr_skill": 12,
+          "rank_rank_of_truth": 5,
+          "rank_log_score": 11
+        }
+      ]
+    },
+    {
+      "rank": 11,
+      "method": "Bayes-M17-fill-med",
+      "auc_pr_skill_sum": 35.56,
+      "rank_of_truth_max": 59.8,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 19.16,
+          "auc_pr_pooled_all_rounds": 0.1208,
+          "auc_pr_skill_pooled_all_rounds": 23.6,
+          "mean_rank_of_truth": 51.92,
+          "log_score_used": 0.0197,
+          "log_score_raw": 0.0229,
+          "rank_aucpr_skill": 10,
+          "rank_rank_of_truth": 9,
+          "rank_log_score": 10
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 16.4,
+          "auc_pr_pooled_all_rounds": 0.1413,
+          "auc_pr_skill_pooled_all_rounds": 15.41,
+          "mean_rank_of_truth": 59.8,
+          "log_score_used": 0.036,
+          "log_score_raw": 0.042,
+          "rank_aucpr_skill": 9,
+          "rank_rank_of_truth": 14,
+          "rank_log_score": 10
+        }
+      ]
+    },
+    {
+      "rank": 12,
+      "method": "Bayes-M13-fill-geo",
+      "auc_pr_skill_sum": 26.84,
+      "rank_of_truth_max": 50.2,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 14.39,
+          "auc_pr_pooled_all_rounds": 0.1278,
+          "auc_pr_skill_pooled_all_rounds": 24.97,
+          "mean_rank_of_truth": 45.11,
+          "log_score_used": 0.0203,
+          "log_score_raw": 0.0239,
+          "rank_aucpr_skill": 14,
+          "rank_rank_of_truth": 3,
+          "rank_log_score": 12
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 12.45,
+          "auc_pr_pooled_all_rounds": 0.1345,
+          "auc_pr_skill_pooled_all_rounds": 14.67,
+          "mean_rank_of_truth": 50.2,
+          "log_score_used": 0.037,
+          "log_score_raw": 0.0439,
+          "rank_aucpr_skill": 13,
+          "rank_rank_of_truth": 7,
+          "rank_log_score": 13
+        }
+      ]
+    },
+    {
+      "rank": 13,
+      "method": "Bayes-M4c-med",
+      "auc_pr_skill_sum": 27.78,
+      "rank_of_truth_max": 55.05,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 15.35,
+          "auc_pr_pooled_all_rounds": 0.0921,
+          "auc_pr_skill_pooled_all_rounds": 18,
+          "mean_rank_of_truth": 51.43,
+          "log_score_used": 0.0206,
+          "log_score_raw": 0.0225,
+          "rank_aucpr_skill": 13,
+          "rank_rank_of_truth": 8,
+          "rank_log_score": 13
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 12.43,
+          "auc_pr_pooled_all_rounds": 0.1098,
+          "auc_pr_skill_pooled_all_rounds": 11.97,
+          "mean_rank_of_truth": 55.05,
+          "log_score_used": 0.037,
+          "log_score_raw": 0.0404,
+          "rank_aucpr_skill": 14,
+          "rank_rank_of_truth": 9,
+          "rank_log_score": 12
+        }
+      ]
+    },
+    {
+      "rank": 14,
+      "method": "Bayes-M13-fill-med",
+      "auc_pr_skill_sum": 31.5,
+      "rank_of_truth_max": 70.18,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 16.68,
+          "auc_pr_pooled_all_rounds": 0.1127,
+          "auc_pr_skill_pooled_all_rounds": 22.02,
+          "mean_rank_of_truth": 55.81,
+          "log_score_used": 0.021,
+          "log_score_raw": 0.0247,
+          "rank_aucpr_skill": 11,
+          "rank_rank_of_truth": 14,
+          "rank_log_score": 14
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 14.82,
+          "auc_pr_pooled_all_rounds": 0.115,
+          "auc_pr_skill_pooled_all_rounds": 12.54,
+          "mean_rank_of_truth": 70.18,
+          "log_score_used": 0.0384,
+          "log_score_raw": 0.0456,
+          "rank_aucpr_skill": 11,
+          "rank_rank_of_truth": 16,
+          "rank_log_score": 14
+        }
+      ]
+    },
+    {
+      "rank": 15,
+      "method": "Bayes-M4-geo",
+      "auc_pr_skill_sum": 22.46,
+      "rank_of_truth_max": 57.71,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 12.51,
+          "auc_pr_pooled_all_rounds": 0.0609,
+          "auc_pr_skill_pooled_all_rounds": 11.9,
+          "mean_rank_of_truth": 54.55,
+          "log_score_used": 0.0213,
+          "log_score_raw": 0.0238,
+          "rank_aucpr_skill": 17,
+          "rank_rank_of_truth": 12,
+          "rank_log_score": 15
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 9.95,
+          "auc_pr_pooled_all_rounds": 0.0863,
+          "auc_pr_skill_pooled_all_rounds": 9.41,
+          "mean_rank_of_truth": 57.71,
+          "log_score_used": 0.0384,
+          "log_score_raw": 0.0429,
+          "rank_aucpr_skill": 17,
+          "rank_rank_of_truth": 13,
+          "rank_log_score": 15
+        }
+      ]
+    },
+    {
+      "rank": 16,
+      "method": "Bayes-M8-fill-geo",
+      "auc_pr_skill_sum": 21.34,
+      "rank_of_truth_max": 57.35,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 11.89,
+          "auc_pr_pooled_all_rounds": 0.1015,
+          "auc_pr_skill_pooled_all_rounds": 19.85,
+          "mean_rank_of_truth": 55.45,
+          "log_score_used": 0.0213,
+          "log_score_raw": 0.0244,
+          "rank_aucpr_skill": 18,
+          "rank_rank_of_truth": 13,
+          "rank_log_score": 16
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 9.44,
+          "auc_pr_pooled_all_rounds": 0.1064,
+          "auc_pr_skill_pooled_all_rounds": 11.6,
+          "mean_rank_of_truth": 57.35,
+          "log_score_used": 0.0388,
+          "log_score_raw": 0.0446,
+          "rank_aucpr_skill": 18,
+          "rank_rank_of_truth": 12,
+          "rank_log_score": 16
+        }
+      ]
+    },
+    {
+      "rank": 17,
+      "method": "Bayes-M8-fill-med",
+      "auc_pr_skill_sum": 25.91,
+      "rank_of_truth_max": 76.94,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 14.09,
+          "auc_pr_pooled_all_rounds": 0.0759,
+          "auc_pr_skill_pooled_all_rounds": 14.83,
+          "mean_rank_of_truth": 63.69,
+          "log_score_used": 0.022,
+          "log_score_raw": 0.025,
+          "rank_aucpr_skill": 16,
+          "rank_rank_of_truth": 17,
+          "rank_log_score": 18
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 11.82,
+          "auc_pr_pooled_all_rounds": 0.0775,
+          "auc_pr_skill_pooled_all_rounds": 8.45,
+          "mean_rank_of_truth": 76.94,
+          "log_score_used": 0.0404,
+          "log_score_raw": 0.0458,
+          "rank_aucpr_skill": 15,
+          "rank_rank_of_truth": 17,
+          "rank_log_score": 18
+        }
+      ]
+    },
+    {
+      "rank": 18,
+      "method": "Bayes-M4-med",
+      "auc_pr_skill_sum": 25.46,
+      "rank_of_truth_max": 77.14,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 14.09,
+          "auc_pr_pooled_all_rounds": 0.0539,
+          "auc_pr_skill_pooled_all_rounds": 10.54,
+          "mean_rank_of_truth": 64.87,
+          "log_score_used": 0.0218,
+          "log_score_raw": 0.0243,
+          "rank_aucpr_skill": 15,
+          "rank_rank_of_truth": 18,
+          "rank_log_score": 17
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 11.37,
+          "auc_pr_pooled_all_rounds": 0.0659,
+          "auc_pr_skill_pooled_all_rounds": 7.18,
+          "mean_rank_of_truth": 77.14,
+          "log_score_used": 0.0397,
+          "log_score_raw": 0.044,
+          "rank_aucpr_skill": 16,
+          "rank_rank_of_truth": 18,
+          "rank_log_score": 17
+        }
+      ]
+    }
+  ],
+  "stage2_leaderboard": [
+    {
+      "rank": 1,
+      "method": "Bayes-M14-fill-geo-tvrw1",
+      "auc_pr_skill_sum": 48.53,
+      "rank_of_truth_max": 42.63,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 26.44,
+          "auc_pr_pooled_all_rounds": 0.1367,
+          "auc_pr_skill_pooled_all_rounds": 26.72,
+          "mean_rank_of_truth": 42.63,
+          "log_score_used": 0.0174,
+          "log_score_raw": 0.0178,
+          "rank_aucpr_skill": 1,
+          "rank_rank_of_truth": 1,
+          "rank_log_score": 1
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 22.09,
+          "auc_pr_pooled_all_rounds": 0.1499,
+          "auc_pr_skill_pooled_all_rounds": 16.34,
+          "mean_rank_of_truth": 40.26,
+          "log_score_used": 0.0312,
+          "log_score_raw": 0.0318,
+          "rank_aucpr_skill": 2,
+          "rank_rank_of_truth": 1,
+          "rank_log_score": 2
+        }
+      ]
+    },
+    {
+      "rank": 2,
+      "method": "Bayes-M14-fill-geo",
+      "auc_pr_skill_sum": 48.12,
+      "rank_of_truth_max": 47.64,
+      "eligible": true,
+      "n_horizons": 2,
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "auc_pr_skill": 25.73,
+          "auc_pr_pooled_all_rounds": 0.1347,
+          "auc_pr_skill_pooled_all_rounds": 26.33,
+          "mean_rank_of_truth": 46.26,
+          "log_score_used": 0.0176,
+          "log_score_raw": 0.0198,
+          "rank_aucpr_skill": 2,
+          "rank_rank_of_truth": 2,
+          "rank_log_score": 2
+        },
+        {
+          "horizon": 2,
+          "auc_pr_skill": 22.4,
+          "auc_pr_pooled_all_rounds": 0.1853,
+          "auc_pr_skill_pooled_all_rounds": 20.21,
+          "mean_rank_of_truth": 47.64,
+          "log_score_used": 0.0309,
+          "log_score_raw": 0.035,
+          "rank_aucpr_skill": 1,
+          "rank_rank_of_truth": 2,
+          "rank_log_score": 1
+        }
+      ]
+    }
+  ],
+  "renewal_leaderboard": []
+}
