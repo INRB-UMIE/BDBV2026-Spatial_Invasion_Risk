@@ -1,6 +1,6 @@
 # Model selection — spatiotemporal
 
-_Generated 2026-11-11T10:45:16+0000_
+_Generated 2026-11-11T16:23:33+0000_
 
 **Featured Bayesian model (two-stage CV composite, recalibrated log-score axis):** `Bayes-M14-fill-geo-tvrw1`
 **Stage 1 (fixed-beta specification):** `Bayes-M14-fill-geo`; **stage 2** compared it with its time-varying forms `Bayes-M14-fill-geo-tvrw1`; the frailty forms `Bayes-M14-fill-geo-tvfrailty`, `Bayes-M14-fill-geo-tvrw1frailty` are a secondary analysis, scored but never candidates
